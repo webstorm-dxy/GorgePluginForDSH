@@ -1,0 +1,3 @@
+- insert:
+    - id: gorge-chart-studio
+      name: '@local/gorge-chart-studio'

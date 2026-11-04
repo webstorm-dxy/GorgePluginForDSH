@@ -1,0 +1,6958 @@
+/**
+ * Dremu 谱面工坊 — browser half of the `@local/gorge-chart-studio` bundle.
+ *
+ * Registers a "Dremu 谱面工坊" entry in the sidebar panel list and a full-page
+ * chart studio in the `main` panel: a timeline editor for Gorge/Dremu `.g`
+ * staff files (the format used by the Deenty/Gorge rhythm game).
+ *
+ * Editing model follows rpe-next (Re:PhiEdit Next): horizontal time axis with a
+ * snapping beat grid, multi-select, a property inspector with per-field editors
+ * and a curve editor, undo/redo, and audio playback.
+ *
+ * The Host half owns the project (parsing/serializing `.g`, saving to disk,
+ * revisions, agent tools). This half mirrors it over
+ * `/plugins/gorge-chart/state` + SSE and pushes edits optimistically with
+ * `{ baseRev, ops }`; when the Host reports a revision this tab did not produce
+ * (an agent edit), it refetches the whole state.
+ *
+ * Everything is plain browser JavaScript: no Harness client package is
+ * imported, styling uses `--dsw-alias-*` theme tokens, and the stylesheet is
+ * rendered by the page component so unmounting removes it.
+ */
+window.__ModuleLoader__.load({
+  id: '@local/gorge-chart-studio',
+  factory(require) {
+    'use strict';
+
+    const React = require('react');
+    const { useCallback, useEffect, useMemo, useRef, useState } = React;
+    const h = React.createElement;
+
+    const NS = 'gorgeChart';
+    const PANEL_ID = 'gorge-chart';
+    const API = '/plugins/gorge-chart';
+    const STATE_URL = API + '/state';
+    const EDIT_URL = API + '/edit';
+    const EVENTS_URL = API + '/events';
+    const OPEN_URL = API + '/open';
+    const SAVE_URL = API + '/save';
+    const FILE_URL = API + '/file';
+    const PROJECTS_URL = API + '/projects';
+    const RELOAD_URL = API + '/reload';
+
+    // Timeline geometry.
+    const RULER_H = 26;
+    const WAVE_H = 44;
+    const ROW_H = 34;
+    /** Collapsible staff (谱表) header row above each group of lanes. */
+    const GROUP_H = 25;
+    const GUTTER_W = 148;
+    const NOTE_R = 6;
+    const MIN_PPS = 1.2;
+    const MAX_PPS = 900;
+    const PPS_DEFAULT = 46;
+    const SNAP_DIVISIONS = [1, 2, 3, 4, 6, 8, 12, 16];
+    const MAX_HISTORY = 200;
+
+    /** Palette used when a catalog entry has no colour of its own. */
+    const FALLBACK_COLORS = ['#38e8c4', '#7c8cff', '#ffd166', '#ff7ab6', '#8bd450', '#f4845f', '#a78bfa', '#4dd0e1'];
+
+    // =======================================================================
+    // Locale dictionaries (registered through the Client locale service).
+    // =======================================================================
+
+    const zh = {
+      panel: 'Dremu 谱面工坊',
+      title: 'Dremu 谱面工坊',
+      subtitle: 'Gorge / Dremu .g 谱表编辑器',
+      openProject: '打开项目',
+      openProjectPlaceholder: '项目目录绝对路径，或 “谱面库” 中的名称',
+      open: '打开',
+      reload: '重新载入',
+      save: '保存',
+      saveAll: '保存全部',
+      saved: '已保存',
+      saving: '正在保存…',
+      unsaved: '未保存',
+      clean: '已同步',
+      project: '项目',
+      projects: '谱面库',
+      recent: '最近打开',
+      selectProject: '选择项目',
+      noProject: '还没有打开谱面项目',
+      noProjectHint: '打开一个包含 .g 谱表文件的目录，例如 ~/Music/DremuTest',
+      loadFailed: '载入失败',
+      loading: '正在载入…',
+      retry: '重试',
+      close: '关闭',
+      cancel: '取消',
+      apply: '应用',
+      reset: '重置',
+      delete: '删除',
+      duplicate: '复制一份',
+      undo: '撤销',
+      redo: '重做',
+      copy: '复制',
+      paste: '粘贴',
+      selectAll: '全选',
+      staffs: '谱表',
+      elements: '元素',
+      lanes: '轨道',
+      notes: '元素',
+      search: '搜索…',
+      filterAll: '全部',
+      filterNotes: '音符',
+      filterLanes: '轨道',
+      filterOther: '其它',
+      inspector: '属性',
+      noSelection: '未选中元素',
+      noSelectionHint: '在时间轴上点击元素以编辑属性；双击空白处放置当前工具的元素。',
+      multiSelection: '已选中 {count} 个元素',
+      projectInfo: '谱面信息',
+      tempo: 'BPM',
+      offset: '偏移',
+      offsetUnit: '秒',
+      duration: '时长',
+      staffCount: '谱表数',
+      elementCount: '元素数',
+      periodCount: '周期数',
+      warnings: '提醒',
+      shortcuts: '快捷键',
+      timeline: '时间轴',
+      tools: '工具',
+      toolSelect: '选择',
+      toolTap: '放置 Tap',
+      toolDrag: '放置 Drag',
+      toolHold: '放置 Hold',
+      toolLane: '放置轨道',
+      toolGuideLane: '放置引导轨道',
+      snap: '吸附',
+      snapOff: '自由',
+      autoScroll: '跟随播放',
+      zoomIn: '放大',
+      zoomOut: '缩小',
+      fitAll: '全览',
+      play: '播放',
+      pause: '暂停',
+      stop: '停止',
+      rate: '倍速',
+      time: '时间',
+      beat: '拍',
+      selected: '选中',
+      start: '开始',
+      length: '长度',
+      field: '字段',
+      value: '值',
+      addField: '添加字段',
+      type: '类型',
+      typeUnknown: '未知类型',
+      curveEditor: '曲线编辑器',
+      curveOf: '曲线：{name}',
+      addPoint: '添加控制点',
+      removePoint: '删除控制点',
+      preview: '预览',
+      numeric: '数值',
+      asText: '文本',
+      advanced: '其它字段',
+      advancedHint: '这些字段不在当前元素类型的内置描述里，可直接编辑其原始值。',
+      newElement: '新建元素',
+      elementPalette: '元素类型',
+      newElementAt: '在 {time} 新建 {type}',
+      created: '已创建',
+      deleted: '已删除',
+      dragHint: '拖动移动时间，拖动右边缘改变长度',
+      emptyStaff: '（空谱表）',
+      audio: '音频',
+      audioMissing: '未找到音频文件',
+      waveLoading: '波形载入中…',
+      waveUnavailable: '波形不可用',
+      following: '跟随',
+      staffChart: '谱表',
+      staffAudio: '音频',
+      staffStoryboard: '演出',
+      staffOther: '其它',
+      laneOrphan: '未归属',
+      miscRow: '其它元素',
+      offline: '已断开',
+      online: '已连接',
+      deleteConfirm: '删除选中的 {count} 个元素？',
+      discardCurve: '放弃曲线修改？',
+      errorPrefix: '错误：',
+      ok: '好的',
+      autoScrollOn: '已开启跟随播放',
+      autoScrollOff: '已关闭跟随播放',
+      helpTitle: '操作说明',
+      helpBody:
+        '滚轮上下滚动谱表，Shift+滚轮横向滚动，Ctrl+滚轮缩放。在空白处拖动框选，拖动元素改变时间，拖动右边缘改变长度。空格播放/暂停，Delete 删除，Ctrl+Z 撤销，Ctrl+Shift+Z 重做，Ctrl+S 保存。',
+      editTime: '时间（秒）',
+      laneName: '轨道',
+      innerNotes: '长条内点',
+      goto: '定位',
+      seek: '跳转',
+      jumpToStart: '回到开头',
+      playbackOpen: '播放预览',
+      playbackTitle: '纯播放预览',
+      playbackClose: '关闭预览',
+      playbackHint: '纯播放 · 无判定与谱面信号',
+      playbackLanes: '轨道',
+      playbackNotes: '音符',
+      playbackUnbound: '未绑定',
+      playbackEmpty: '该谱面没有可播放的 Dremu 轨道',
+      playbackRestart: '从头播放',
+      playbackBackground: '背景',
+      playbackNoAudio: '无音频：按谱面时钟播放',
+      selectTool: '选择工具',
+      placeHint: '在时间轴上双击放置',
+      applying: '正在应用…',
+      rev: '版本',
+      dirtyDot: '有未保存修改',
+      emptyElementList: '当前谱表没有匹配的元素',
+      dropAssets: '素材',
+      assetImages: '图片',
+      assetAudio: '音频',
+      timelineEmpty: '双击时间轴放置元素，或打开示例项目',
+      errorGeneric: '操作失败',
+      unsupportedValue: '（不支持的数值）',
+      unnamed: '未命名',
+    };
+
+    const en = {
+      panel: 'Dremu Chart Studio',
+      title: 'Dremu Chart Studio',
+      subtitle: 'Gorge / Dremu .g staff editor',
+      openProject: 'Open project',
+      openProjectPlaceholder: 'Absolute folder path, or a library name',
+      open: 'Open',
+      reload: 'Reload from disk',
+      save: 'Save',
+      saveAll: 'Save all',
+      saved: 'Saved',
+      saving: 'Saving…',
+      unsaved: 'Unsaved',
+      clean: 'In sync',
+      project: 'Project',
+      projects: 'Chart library',
+      recent: 'Recent',
+      selectProject: 'Choose a project',
+      noProject: 'No chart project is open',
+      noProjectHint: 'Open a folder that contains .g staff files, e.g. ~/Music/DremuTest',
+      loadFailed: 'Failed to load',
+      loading: 'Loading…',
+      retry: 'Retry',
+      close: 'Close',
+      cancel: 'Cancel',
+      apply: 'Apply',
+      reset: 'Reset',
+      delete: 'Delete',
+      duplicate: 'Duplicate',
+      undo: 'Undo',
+      redo: 'Redo',
+      copy: 'Copy',
+      paste: 'Paste',
+      selectAll: 'Select all',
+      staffs: 'Staffs',
+      elements: 'Elements',
+      lanes: 'Lanes',
+      notes: 'Elements',
+      search: 'Search…',
+      filterAll: 'All',
+      filterNotes: 'Notes',
+      filterLanes: 'Lanes',
+      filterOther: 'Other',
+      inspector: 'Inspector',
+      noSelection: 'Nothing selected',
+      noSelectionHint: 'Click an element on the timeline to edit it; double-click empty space to place the current tool.',
+      multiSelection: '{count} elements selected',
+      projectInfo: 'Chart info',
+      tempo: 'BPM',
+      offset: 'Offset',
+      offsetUnit: 's',
+      duration: 'Length',
+      staffCount: 'Staffs',
+      elementCount: 'Elements',
+      periodCount: 'Periods',
+      warnings: 'Notes',
+      shortcuts: 'Shortcuts',
+      timeline: 'Timeline',
+      tools: 'Tools',
+      toolSelect: 'Select',
+      toolTap: 'Place Tap',
+      toolDrag: 'Place Drag',
+      toolHold: 'Place Hold',
+      toolLane: 'Place lane',
+      toolGuideLane: 'Place guide lane',
+      snap: 'Snap',
+      snapOff: 'Free',
+      autoScroll: 'Follow playback',
+      zoomIn: 'Zoom in',
+      zoomOut: 'Zoom out',
+      fitAll: 'Fit',
+      play: 'Play',
+      pause: 'Pause',
+      stop: 'Stop',
+      rate: 'Rate',
+      time: 'Time',
+      beat: 'Beat',
+      selected: 'Selected',
+      start: 'Start',
+      length: 'Length',
+      field: 'Field',
+      value: 'Value',
+      addField: 'Add field',
+      type: 'Type',
+      typeUnknown: 'Unknown type',
+      curveEditor: 'Curve editor',
+      curveOf: 'Curve: {name}',
+      addPoint: 'Add point',
+      removePoint: 'Remove point',
+      preview: 'Preview',
+      numeric: 'Numbers',
+      asText: 'Text',
+      advanced: 'Other fields',
+      advancedHint: 'Fields not described by the built-in schema; edit the raw value directly.',
+      newElement: 'New element',
+      elementPalette: 'Element type',
+      newElementAt: 'Create {type} at {time}',
+      created: 'Created',
+      deleted: 'Deleted',
+      dragHint: 'Drag to move in time, drag the right edge to resize',
+      emptyStaff: '(empty staff)',
+      audio: 'Audio',
+      audioMissing: 'Audio file not found',
+      waveLoading: 'Loading waveform…',
+      waveUnavailable: 'Waveform unavailable',
+      following: 'Follow',
+      staffChart: 'Chart',
+      staffAudio: 'Audio',
+      staffStoryboard: 'Storyboard',
+      staffOther: 'Other',
+      laneOrphan: 'Unassigned',
+      miscRow: 'Other elements',
+      offline: 'Disconnected',
+      online: 'Connected',
+      deleteConfirm: 'Delete {count} selected element(s)?',
+      discardCurve: 'Discard curve changes?',
+      errorPrefix: 'Error: ',
+      ok: 'OK',
+      autoScrollOn: 'Follow playback on',
+      autoScrollOff: 'Follow playback off',
+      helpTitle: 'How to edit',
+      helpBody:
+        'Wheel scrolls staff rows, Shift+wheel scrolls time, Ctrl+wheel zooms. Drag empty space to box-select, drag an element to move it, drag its right edge to resize. Space plays/pauses, Delete deletes, Ctrl+Z undoes, Ctrl+Shift+Z redoes, Ctrl+S saves.',
+      editTime: 'Time (s)',
+      laneName: 'Lane',
+      innerNotes: 'Inner notes',
+      goto: 'Go to',
+      seek: 'Seek',
+      jumpToStart: 'Back to start',
+      playbackOpen: 'Play preview',
+      playbackTitle: 'Autoplay preview',
+      playbackClose: 'Close preview',
+      playbackHint: 'Playback only · no judgement or chart signals',
+      playbackLanes: 'Lanes',
+      playbackNotes: 'Notes',
+      playbackUnbound: 'Unbound',
+      playbackEmpty: 'This chart has no playable Dremu lanes',
+      playbackRestart: 'Restart',
+      playbackBackground: 'Background',
+      playbackNoAudio: 'No audio: following the chart clock',
+      selectTool: 'Select tool',
+      placeHint: 'Double-click on the timeline to place',
+      applying: 'Applying…',
+      rev: 'rev',
+      dirtyDot: 'Unsaved changes',
+      emptyElementList: 'No elements match in this staff',
+      dropAssets: 'Assets',
+      assetImages: 'Images',
+      assetAudio: 'Audio',
+      timelineEmpty: 'Double-click the timeline to place an element, or open a sample project',
+      errorGeneric: 'Operation failed',
+      unsupportedValue: '(unsupported value)',
+      unnamed: 'unnamed',
+    };
+
+    // =======================================================================
+    // Small utilities.
+    // =======================================================================
+
+    /** Clamp a number into an inclusive range. */
+    function clamp(value, lo, hi) {
+      return value < lo ? lo : value > hi ? hi : value;
+    }
+
+    /** Round to `digits` decimals without float dust. */
+    function round(value, digits) {
+      const factor = Math.pow(10, digits === undefined ? 3 : digits);
+      return Math.round(value * factor) / factor;
+    }
+
+    /** True for a plain object (not null, not an array). */
+    function isPlainObject(value) {
+      return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+
+    /** True for a typed value wrapper `{ t: 'obj' | 'arr' | 'ref' | 'expr' }`. */
+    function isTypedValue(value) {
+      return isPlainObject(value) && typeof value.t === 'string' && ['obj', 'arr', 'ref', 'expr'].indexOf(value.t) !== -1;
+    }
+
+    /** Deep clone through JSON (the value tree is JSON-safe by contract). */
+    function deepClone(value) {
+      return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+    }
+
+    /** Format seconds as m:ss.mmm (or h:mm:ss.mmm past an hour). */
+    function formatTime(seconds) {
+      const value = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+      const totalMs = Math.round(value * 1000);
+      const ms = totalMs % 1000;
+      const totalSec = Math.floor(totalMs / 1000);
+      const sec = totalSec % 60;
+      const totalMin = Math.floor(totalSec / 60);
+      const min = totalMin % 60;
+      const hour = Math.floor(totalMin / 60);
+      const pad = (number, width) => String(number).padStart(width, '0');
+      if (hour > 0) return hour + ':' + pad(min, 2) + ':' + pad(sec, 2) + '.' + pad(ms, 3);
+      return min + ':' + pad(sec, 2) + '.' + pad(ms, 3);
+    }
+
+    /**
+     * Truncate text with an ellipsis so it fits `maxWidth` in the context's
+     * current font. Canvas has no CSS text-overflow, so the gutter labels need
+     * this to avoid drawing over neighbouring columns.
+     */
+    function fitText(ctx, text, maxWidth) {
+      const value = text === null || text === undefined ? '' : String(text);
+      if (!(maxWidth > 0) || value.length === 0) return '';
+      if (ctx.measureText(value).width <= maxWidth) return value;
+      const ellipsis = '…';
+      let low = 0;
+      let high = value.length;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (ctx.measureText(value.slice(0, mid) + ellipsis).width <= maxWidth) low = mid;
+        else high = mid - 1;
+      }
+      return low > 0 ? value.slice(0, low) + ellipsis : '';
+    }
+
+    /** Format a number for a compact readout (trims zeroes, max 3 decimals). */
+    function formatNum(value, digits) {
+      if (!Number.isFinite(value)) {
+        if (value === Infinity) return '+∞';
+        if (value === -Infinity) return '−∞';
+        return 'NaN';
+      }
+      const rounded = round(value, digits === undefined ? 4 : digits);
+      return String(rounded);
+    }
+
+    /** Screen-reader friendly type label: `Dremu.DremuTap` -> `DremuTap`. */
+    function shortType(type) {
+      if (typeof type !== 'string') return '';
+      const dot = type.lastIndexOf('.');
+      return dot === -1 ? type : type.slice(dot + 1);
+    }
+
+    /** Type label without the namespace: `GorgeFramework.VariableFloat` -> `VariableFloat`. */
+    function stripNamespace(type) {
+      return shortType(type);
+    }
+
+    /** Parse a numeric input, tolerating empty / non-numeric text. */
+    function parseNumberInput(text) {
+      if (typeof text === 'number') return Number.isFinite(text) ? text : null;
+      if (typeof text !== 'string') return null;
+      const trimmed = text.trim();
+      if (trimmed === '') return null;
+      if (trimmed === '-∞' || trimmed === '-inf') return -Infinity;
+      if (trimmed === '+∞' || trimmed === '∞' || trimmed === 'inf') return Infinity;
+      const parsed = Number(trimmed);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    /** Canonical number field text (`10.0` style for integers, like the .g writer). */
+    function numberText(value) {
+      if (!Number.isFinite(value)) {
+        if (value === Infinity) return '(1.0/0.0)';
+        if (value === -Infinity) return '(-1.0/0.0)';
+        return 'NaN';
+      }
+      if (Number.isInteger(value) && Math.abs(value) < 1e15) return value.toFixed(1);
+      return String(value);
+    }
+
+    /** Read a path inside a value tree (arrays support numeric segments). */
+    function getAtPath(root, path) {
+      let current = root;
+      for (const segment of path) {
+        if (current === null || current === undefined) return undefined;
+        if (Array.isArray(current)) current = current[Number(segment)];
+        else if (isPlainObject(current)) current = current[segment];
+        else return undefined;
+      }
+      return current;
+    }
+
+    /** Immutably set a path inside a value tree copy; returns the new root. */
+    function setAtPath(root, path, value) {
+      if (path.length === 0) return deepClone(value);
+      const copy = deepClone(root);
+      let current = copy;
+      for (let i = 0; i < path.length - 1; i += 1) {
+        const segment = path[i];
+        let next = Array.isArray(current) ? current[Number(segment)] : current[segment];
+        if (next === null || next === undefined) {
+          next = typeof path[i + 1] === 'number' ? [] : {};
+          if (Array.isArray(current)) current[Number(segment)] = next;
+          else current[segment] = next;
+        }
+        current = next;
+      }
+      const last = path[path.length - 1];
+      if (Array.isArray(current)) current[Number(last)] = deepClone(value);
+      else current[last] = deepClone(value);
+      return copy;
+    }
+
+    /** Delete a path inside a value tree copy (array entries splice). */
+    function deleteAtPath(root, path) {
+      if (path.length === 0) return undefined;
+      const copy = deepClone(root);
+      const parent = getAtPath(copy, path.slice(0, -1));
+      const last = path[path.length - 1];
+      if (Array.isArray(parent)) parent.splice(Number(last), 1);
+      else if (isPlainObject(parent)) delete parent[last];
+      return copy;
+    }
+
+    /** Effective numeric value of a scalar Value, else null. */
+    function valueAsNumber(value) {
+      if (typeof value === 'number') return value;
+      if (isTypedValue(value) && value.t === 'expr') {
+        if (typeof value.special === 'number') return value.special;
+        const special = String(value.special || '');
+        if (special === 'Infinity' || special === '+Infinity') return Infinity;
+        if (special === '-Infinity') return -Infinity;
+        if (special === 'NaN') return NaN;
+        const source = typeof value.src === 'string' ? value.src.trim() : '';
+        if (/^[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$/.test(source)) return Number(source);
+        if (/^[-+]?\d+(?:\.\d+)?\/0(?:\.0+)?$/.test(source)) {
+          return source.startsWith('-') ? -Infinity : Infinity;
+        }
+        return null;
+      }
+      return null;
+    }
+
+    /** String value for display. */
+    function valueAsString(value) {
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'string') return value;
+      if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+      if (isTypedValue(value)) {
+        if (value.t === 'ref') return String(value.path || '');
+        if (value.t === 'expr') return String(value.src || '');
+        return stripNamespace(value.type);
+      }
+      return '';
+    }
+
+    /** Human label for any Value. */
+    function describeValue(value) {
+      if (value === null || value === undefined) return 'null';
+      if (typeof value === 'boolean') return value ? 'true' : 'false';
+      if (typeof value === 'number') return formatNum(value, 6);
+      if (typeof value === 'string') return '"' + value + '"';
+      if (isTypedValue(value)) {
+        if (value.t === 'ref') return String(value.path || '');
+        if (value.t === 'expr') return String(value.src || '');
+        if (value.t === 'arr') return stripNamespace(value.type) + '[' + (value.items ? value.items.length : 0) + ']';
+        const keys = Object.keys(value.fields || {});
+        return stripNamespace(value.type) + ' {' + keys.length + '}';
+      }
+      if (Array.isArray(value)) return '[' + value.length + ']';
+      return '{}';
+    }
+
+    // =======================================================================
+    // Curve sampling (display only; the Host model is authoritative).
+    // =======================================================================
+
+    /** Clamp helper for the [0,1] Hermite parameter. */
+    function hermiteBasis(t) {
+      const t2 = t * t;
+      const t3 = t2 * t;
+      return [2 * t3 - 3 * t2 + 1, t3 - 2 * t2 + t, -2 * t3 + 3 * t2, t3 - t2];
+    }
+
+    /** Sample one curve-ish Value at x; returns a number (null when unknown). */
+    function sampleCurve(value, x) {
+      if (value === null || value === undefined) return null;
+      const scalar = valueAsNumber(value);
+      if (scalar !== null) return scalar;
+      if (!isTypedValue(value) || value.t !== 'obj') return null;
+      const type = stripNamespace(value.type);
+      const fields = value.fields || {};
+      const num = (name, fallback) => {
+        const raw = valueAsNumber(fields[name]);
+        return raw === null ? fallback : raw;
+      };
+      switch (type) {
+        case 'ConstantFunctionCurve':
+        case 'ConstantCurve':
+          return num('value', 0);
+        case 'LinearFunctionCurve':
+          // Engine default is k = 0, b = 0 (constant 0), not the identity.
+          return num('k', 0) * x + num('b', 0);
+        case 'LinearCurve': {
+          const t0 = num('timeStart', 0);
+          const t1 = num('timeEnd', 1);
+          const v0 = num('valueStart', 0);
+          // Engine default is the identity ramp (0 -> 1).
+          const v1 = num('valueEnd', 1);
+          if (!Number.isFinite(t0) || !Number.isFinite(t1) || t1 === t0) return t0 <= x ? v1 : v0;
+          const t = clamp((x - t0) / (t1 - t0), 0, 1);
+          return v0 + (v1 - v0) * t;
+        }
+        case 'CubicHermiteSpline':
+        case 'HermiteSpline': {
+          const start = fields.startPoint;
+          const endPoint = fields.endPoint;
+          const x1 = start && isTypedValue(start) ? valueAsNumber(start.fields && start.fields.x) : null;
+          const y1 = start && isTypedValue(start) ? valueAsNumber(start.fields && start.fields.y) : null;
+          const x2 = endPoint && isTypedValue(endPoint) ? valueAsNumber(endPoint.fields && endPoint.fields.x) : null;
+          const y2 = endPoint && isTypedValue(endPoint) ? valueAsNumber(endPoint.fields && endPoint.fields.y) : null;
+          const fromX = x1 === null ? 0 : x1;
+          const fromY = y1 === null ? 0 : y1;
+          const toX = x2 === null ? 1 : x2;
+          const toY = y2 === null ? 1 : y2;
+          if (x <= fromX) return fromY;
+          if (x >= toX) return toY;
+          const dx = toX - fromX;
+          if (!(dx > 0)) return fromY;
+          const dy = toY - fromY;
+          const clampWeight = (value, fallback) => {
+            const weight = Number.isFinite(value) ? value : fallback;
+            return Math.max(0, Math.min(1, weight));
+          };
+          const wt1 = clampWeight(num('startWeight', 1 / 3), 1 / 3);
+          const wt2 = clampWeight(num('endWeight', 1 / 3), 1 / 3);
+          const tangent1 = num('startTangent', 0);
+          const tangent2 = num('endTangent', 0);
+          const xdx = (x - fromX) / dx;
+          const wt2s = 1 - wt2;
+          let t = 0.5;
+          if (Math.abs(wt1 - 1 / 3) < 1e-12 && Math.abs(wt2 - 1 / 3) < 1e-12) {
+            t = xdx;
+          } else {
+            // Weighted cubic Hermite parameter solve, ported from
+            // GorgeFramework CubicHermiteSpline.AnimationCurveInterpolant
+            // (third-order Householder iteration).
+            for (let iteration = 0; iteration < 50; iteration += 1) {
+              const t2 = 1 - t;
+              const fg = 3 * t2 * t2 * t * wt1 + 3 * t2 * t * t * wt2s + t * t * t - xdx;
+              if (Math.abs(fg) < 2 * 2.23e-16) break;
+              const fpg = 3 * t2 * t2 * wt1 + 6 * t2 * t * (wt2s - wt1) + 3 * t * t * (1 - wt2s);
+              const fppg = 6 * t2 * (wt2s - 2 * wt1) + 6 * t * (1 - 2 * wt2s + wt1);
+              const fpppg = 18 * wt1 - 18 * wt2s + 6;
+              const denominator = 6 * fpg * fpg * fpg - 6 * fg * fpg * fppg + fg * fg * fpppg;
+              if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-18) break;
+              const next = t - (6 * fg * fpg * fpg - 3 * fg * fg * fppg) / denominator;
+              if (!Number.isFinite(next)) break;
+              t = Math.max(0, Math.min(1, next));
+            }
+          }
+          const tt = 1 - t;
+          const eps = 2.23e-16;
+          if (Math.abs(dy) < 2 * eps) {
+            return fromY + 3 * tt * tt * t * wt1 * tangent1 * dx + 3 * tt * t * t * wt2 * tangent2 * dx;
+          }
+          const yp1dy = (tangent1 * dx) / dy;
+          const yp2dy = (tangent2 * dx) / dy;
+          const y = 3 * tt * tt * t * wt1 * yp1dy + 3 * tt * t * t * (1 - wt2 * yp2dy) + t * t * t;
+          return fromY + y * dy;
+        }
+        case 'PiecewiseFunctionCurve':
+        case 'PiecewiseCurve': {
+          const list = fields.functionPieces;
+          const items = list && isTypedValue(list) && Array.isArray(list.items) ? list.items : [];
+          for (const item of items) {
+            if (!isTypedValue(item) || item.t !== 'obj') continue;
+            const pieceFields = item.fields || {};
+            const startX = valueAsNumber(pieceFields.startX);
+            const endX = valueAsNumber(pieceFields.endX);
+            if (startX === null || endX === null) continue;
+            const leftClosed = pieceFields.leftClosed === undefined ? true : pieceFields.leftClosed !== false;
+            const rightClosed = pieceFields.rightClosed === undefined ? true : pieceFields.rightClosed !== false;
+            const afterLeft = leftClosed ? x >= startX : x > startX;
+            const beforeRight = rightClosed ? x <= endX : x < endX;
+            if (afterLeft && beforeRight) {
+              const inner = sampleCurve(pieceFields.functionCurve, x);
+              return inner === null ? 0 : inner;
+            }
+          }
+          return 0;
+        }
+        case 'AxialSymmetricFunctionCurve': {
+          const inner = fields.functionCurve;
+          const axis = num('axis', 0);
+          const keepLeft = fields.keepLeft === undefined ? true : fields.keepLeft !== false;
+          const mirrored = keepLeft ? (x <= axis ? x : 2 * axis - x) : x >= axis ? x : 2 * axis - x;
+          const value = sampleCurve(inner, mirrored);
+          return value === null ? 0 : value;
+        }
+        case 'PeriodicFunctionCurve': {
+          const startX = num('startX', 0);
+          const endX = num('endX', 1);
+          const period = endX - startX;
+          const wrapped = period === 0 ? x : ((((x - startX) % period) + period) % period) + startX;
+          const value = sampleCurve(fields.functionCurve, wrapped);
+          return value === null ? 0 : value;
+        }
+        case 'AdditionFunctionCurve': {
+          const first = fields.f1 !== undefined ? fields.f1 : fields.functionCurve1;
+          const second = fields.f2 !== undefined ? fields.f2 : fields.functionCurve2;
+          const a = sampleCurve(first, x);
+          const b = sampleCurve(second, x);
+          return (a === null ? 0 : a) + (b === null ? 0 : b);
+        }
+        case 'CompositeFunctionCurve': {
+          const outer = sampleCurve(fields.outerFunctionCurve, x);
+          const inner = sampleCurve(fields.innerFunctionCurve, x);
+          const nested = sampleCurve(fields.outerFunctionCurve, inner === null ? 0 : inner);
+          return outer === null && nested === null ? 0 : nested === null ? 0 : nested;
+        }
+        case 'VariableFloat': {
+          const base = num('baseValue', 0);
+          const variation = sampleCurve(fields.variationCurve, x);
+          return variation === null ? base : base + variation;
+        }
+        case 'VariableVector2':
+          return null;
+        default:
+          return null;
+      }
+    }
+
+    /** Sample a curve into `count` evenly spaced [x, y] pairs across [x0, x1]. */
+    function sampleCurveSeries(value, x0, x1, count) {
+      const points = [];
+      const total = Math.max(2, count || 96);
+      for (let i = 0; i < total; i += 1) {
+        const x = x0 + ((x1 - x0) * i) / (total - 1);
+        const y = sampleCurve(value, x);
+        if (y !== null && Number.isFinite(y)) points.push([x, y]);
+      }
+      return points;
+    }
+
+    /** True when the value is a curve the editor can draw. */
+    function isDrawableCurve(value) {
+      if (!isTypedValue(value) || value.t !== 'obj') return false;
+      const type = stripNamespace(value.type);
+      return (
+        [
+          'ConstantFunctionCurve',
+          'ConstantCurve',
+          'LinearFunctionCurve',
+          'LinearCurve',
+          'CubicHermiteSpline',
+          'HermiteSpline',
+          'PiecewiseFunctionCurve',
+          'PiecewiseCurve',
+          'AxialSymmetricFunctionCurve',
+          'PeriodicFunctionCurve',
+          'AdditionFunctionCurve',
+          'CompositeFunctionCurve',
+          'VariableFloat',
+        ].indexOf(type) !== -1
+      );
+    }
+
+    /** 0..1 colour channels from a ColorArgb-ish Value. */
+    function colorFromValue(value, fallback) {
+      const base = fallback || [1, 1, 1];
+      if (!isTypedValue(value) || value.t !== 'obj') return base;
+      const fields = value.fields || {};
+      const channel = (name, def) => {
+        const raw = valueAsNumber(fields[name]);
+        if (raw === null) return def;
+        // The corpus mixes 0..1 floats with 0..255 bytes; detect the byte range.
+        return raw > 1 ? clamp(raw / 255, 0, 1) : clamp(raw, 0, 1);
+      };
+      return [channel('r', base[0]), channel('g', base[1]), channel('b', base[2])];
+    }
+
+    /** CSS colour string from a ColorArgb-ish Value. */
+    function cssColorFromValue(value, alpha) {
+      const [r, g, b] = colorFromValue(value);
+      const a = alpha === undefined ? 1 : alpha;
+      return 'rgba(' + Math.round(r * 255) + ',' + Math.round(g * 255) + ',' + Math.round(b * 255) + ',' + a + ')';
+    }
+
+    // =======================================================================
+    // Local (optimistic) op application — mirrors the Host model contract.
+    // =======================================================================
+
+    /** Find one element plus its staff/period by id. */
+    function findElement(project, elementId) {
+      if (!project || !Array.isArray(project.staffs)) return null;
+      for (const staff of project.staffs) {
+        const periods = staff.periods || [];
+        for (let pi = 0; pi < periods.length; pi += 1) {
+          const period = periods[pi];
+          const elements = period.elements || [];
+          for (let ei = 0; ei < elements.length; ei += 1) {
+            if (elements[ei].id === elementId) {
+              return { staff, period, element: elements[ei], periodIndex: pi, elementIndex: ei };
+            }
+          }
+        }
+      }
+      return null;
+    }
+
+    /** Recompute an element's derived timing fields after a fields change. */
+    function deriveTiming(element, period, catalog) {
+      const entry = catalogEntry(catalog, element.type);
+      const timing = (entry && entry.timing) || {};
+      const fields = element.fields || {};
+      const offset = period && Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+      const readNumber = (name) => {
+        if (!name) return null;
+        const raw = valueAsNumber(fields[name]);
+        return raw === null ? null : raw;
+      };
+      let start = readNumber(timing.start);
+      if (start === null) start = readNumber('hitTime');
+      if (start === null) start = readNumber('startMoment');
+      if (start === null) start = readNumber('generateTime');
+      if (start === null) start = 0;
+      let duration = readNumber(timing.duration);
+      if (duration === null) duration = readNumber('keepTime');
+      if (duration === null) duration = readNumber('holdTime');
+      const laneField = timing.lane || 'laneName';
+      const laneRaw = fields[laneField];
+      element.start = round(offset + start, 6);
+      element.duration = duration === null ? null : round(duration, 6);
+      element.lane = typeof laneRaw === 'string' ? laneRaw : null;
+      return element;
+    }
+
+    /** Catalog lookup by element type. */
+    function catalogEntry(catalog, type) {
+      if (!catalog || !Array.isArray(catalog.elements)) return null;
+      for (const entry of catalog.elements) if (entry.type === type) return entry;
+      return null;
+    }
+
+    /**
+     * Field name that stores an element's start time. The catalog descriptor is
+     * authoritative: a field that is currently absent from the parsed element
+     * simply uses its injector default (0), and patching it creates it, which is
+     * exactly what the .g writer needs.
+     */
+    function resolveStartField(catalog, element) {
+      const entry = catalogEntry(catalog, element && element.type);
+      const timing = (entry && entry.timing) || {};
+      if (typeof timing.start === 'string' && timing.start.length > 0) return timing.start;
+      const fields = (element && element.fields) || {};
+      return ['hitTime', 'generateTime', 'startMoment'].find((name) => fields[name] !== undefined) || null;
+    }
+
+    /** Field name that stores an element's duration (null when it has none). */
+    function resolveDurationField(catalog, element) {
+      const entry = catalogEntry(catalog, element && element.type);
+      const timing = (entry && entry.timing) || {};
+      if (typeof timing.duration === 'string' && timing.duration.length > 0) return timing.duration;
+      const fields = (element && element.fields) || {};
+      return ['keepTime', 'holdTime'].find((name) => fields[name] !== undefined) || null;
+    }
+
+    /** Current absolute start of an element (period offset applied). */
+    function elementStart(catalog, element, period) {
+      const field = resolveStartField(catalog, element);
+      const local = field ? valueAsNumber(element.fields && element.fields[field]) : null;
+      const offset = period && Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+      if (local !== null) return offset + local;
+      return Number.isFinite(element.start) ? element.start : offset;
+    }
+
+    /** Color for an element type, from the catalog or the fallback palette. */
+    function elementColor(catalog, type) {
+      const entry = catalogEntry(catalog, type);
+      if (entry && entry.color) return entry.color;
+      let hash = 0;
+      const text = String(type || '');
+      for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+      return FALLBACK_COLORS[hash % FALLBACK_COLORS.length];
+    }
+
+    /** Category for an element type, from the catalog. */
+    function elementCategory(catalog, type) {
+      const entry = catalogEntry(catalog, type);
+      return (entry && entry.category) || 'other';
+    }
+
+    /** Ensure a period slice holds an element; returns the period id used. */
+    function pickPeriod(project, staffId, time) {
+      const staff = (project.staffs || []).find((item) => item.id === staffId);
+      if (!staff || !Array.isArray(staff.periods) || staff.periods.length === 0) return null;
+      let best = staff.periods[0];
+      let bestDistance = Infinity;
+      for (const period of staff.periods) {
+        const offset = Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+        const length = Number.isFinite(period.minLength) ? period.minLength : 20;
+        if (time >= offset && time < offset + length) return period.id;
+        const distance = Math.min(Math.abs(time - offset), Math.abs(time - (offset + length)));
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = period;
+        }
+      }
+      return best.id;
+    }
+
+    /**
+     * Apply the Host's op list locally so the UI updates before the round trip.
+     * Returns the new project plus the inverse ops (used for undo).
+     */
+    function applyOpsLocal(project, ops, catalog) {
+      const next = deepClone(project);
+      const inverse = [];
+      const errors = [];
+      for (const op of ops || []) {
+        try {
+          if (!op || typeof op !== 'object') continue;
+          if (op.op === 'patch') {
+            const found = findElement(next, op.elementId);
+            if (!found) {
+              errors.push('unknown element ' + op.elementId);
+              continue;
+            }
+            const path = Array.isArray(op.path) ? op.path : [];
+            const previous = getAtPath(found.element.fields, path);
+            if (path.length === 0) {
+              inverse.push({ op: 'patch', elementId: op.elementId, path: [], value: deepClone(found.element.fields) });
+              found.element.fields = deepClone(op.value) || {};
+            } else {
+              inverse.push({ op: 'patch', elementId: op.elementId, path: deepClone(path), value: deepClone(previous) });
+              found.element.fields = setAtPath(found.element.fields, path, op.value);
+            }
+            deriveTiming(found.element, found.period, catalog);
+          } else if (op.op === 'add') {
+            const staff = (next.staffs || []).find((item) => item.id === op.staffId);
+            if (!staff) {
+              errors.push('unknown staff ' + op.staffId);
+              continue;
+            }
+            const periodId = op.periodId || pickPeriod(next, op.staffId, op.element && op.element.start);
+            const period = (staff.periods || []).find((item) => item.id === periodId) || (staff.periods || [])[0];
+            if (!period) {
+              errors.push('no period in ' + op.staffId);
+              continue;
+            }
+            const element = {
+              id: (op.element && op.element.id) || 'new:' + Math.random().toString(36).slice(2, 10),
+              type: op.element.type,
+              fields: deepClone(op.element.fields) || {},
+            };
+            element.category = elementCategory(catalog, element.type);
+            deriveTiming(element, period, catalog);
+            period.elements = period.elements || [];
+            period.elements.push(element);
+            inverse.push({ op: 'remove', elementId: element.id });
+          } else if (op.op === 'remove') {
+            const found = findElement(next, op.elementId);
+            if (!found) {
+              errors.push('unknown element ' + op.elementId);
+              continue;
+            }
+            inverse.push({
+              op: 'add',
+              staffId: found.staff.id,
+              periodId: found.period.id,
+              element: { id: found.element.id, type: found.element.type, fields: deepClone(found.element.fields) },
+            });
+            found.period.elements.splice(found.elementIndex, 1);
+          } else if (op.op === 'setMeta') {
+            const previous = { op: 'setMeta' };
+            if (op.tempo) {
+              previous.tempo = deepClone(next.tempo);
+              next.tempo = Object.assign({}, next.tempo || {}, op.tempo);
+            }
+            if (op.title !== undefined) {
+              previous.title = next.title;
+              next.title = op.title;
+            }
+            inverse.push(previous);
+          } else if (op.op === 'setStaffName') {
+            const staff = (next.staffs || []).find((item) => item.id === op.staffId);
+            if (!staff) {
+              errors.push('unknown staff ' + op.staffId);
+              continue;
+            }
+            inverse.push({ op: 'setStaffName', staffId: op.staffId, displayName: staff.displayName });
+            staff.displayName = op.displayName;
+          } else {
+            errors.push('unsupported op ' + op.op);
+          }
+        } catch (error) {
+          errors.push(String((error && error.message) || error));
+        }
+      }
+      return { project: next, inverse, errors };
+    }
+
+    // =======================================================================
+    // Stylesheet. Rendered as a React element by the page so unmounting
+    // removes it; only theme tokens are used for chrome colours.
+    // =======================================================================
+
+    const STYLE_TEXT = [
+      '.dgc-root{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:13px;line-height:18px;overflow:hidden;position:relative}',
+      '.dgc-header{display:flex;align-items:center;gap:10px;padding:0 14px;height:46px;flex:0 0 auto;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
+      '.dgc-title{display:flex;flex-direction:column;min-width:0;margin-right:4px}',
+      '.dgc-title strong{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}',
+      '.dgc-title span{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}',
+      '.dgc-spacer{flex:1 1 auto}',
+      '.dgc-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border-radius:7px;height:28px;padding:0 10px;font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap}',
+      '.dgc-btn:hover:not(:disabled){border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}',
+      '.dgc-btn:disabled{opacity:.45;cursor:default}',
+      '.dgc-btn.is-primary{background:var(--dsw-alias-brand-primary);border-color:transparent;color:#fff}',
+      '.dgc-btn.is-primary:hover:not(:disabled){filter:brightness(1.08);background:var(--dsw-alias-brand-primary)}',
+      '.dgc-btn.is-ghost{background:transparent;border-color:transparent;padding:0 8px}',
+      '.dgc-btn.is-ghost:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l1)}',
+      '.dgc-btn.is-danger{color:var(--dsw-alias-state-error-primary)}',
+      '.dgc-btn.is-active{background:var(--dsw-alias-brand-primary);border-color:transparent;color:#fff}',
+      '.dgc-icon{width:16px;height:16px;display:block}',
+      '.dgc-badge{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);white-space:nowrap}',
+      '.dgc-badge.is-dirty{color:var(--dsw-alias-state-warn-primary);border-color:currentColor}',
+      '.dgc-badge.is-clean{color:var(--dsw-alias-state-success-primary);border-color:currentColor}',
+      '.dgc-input{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-radius:6px;height:26px;padding:0 8px;font:inherit;font-size:12px;min-width:0;width:100%;box-sizing:border-box}',
+      '.dgc-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}',
+      '.dgc-input.is-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}',
+      '.dgc-select{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-radius:6px;height:26px;padding:0 6px;font:inherit;font-size:12px;cursor:pointer}',
+      '.dgc-toolbar{display:flex;align-items:center;gap:6px;padding:6px 12px;flex:0 0 auto;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);flex-wrap:wrap}',
+      '.dgc-toolgroup{display:flex;align-items:center;gap:4px;padding-right:8px;margin-right:2px;border-right:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-toolgroup:last-child{border-right:none}',
+      '.dgc-toolbar label{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--dsw-alias-label-secondary);white-space:nowrap}',
+      '.dgc-body{flex:1 1 auto;min-height:0;display:flex;overflow:hidden}',
+      '.dgc-side{flex:0 0 236px;min-width:180px;display:flex;flex-direction:column;border-right:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-height:0}',
+      '.dgc-sideSection{display:flex;flex-direction:column;min-height:0}',
+      '.dgc-sideSection.is-staffs{flex:0 0 auto;max-height:46%;border-bottom:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-sideSection.is-elements{flex:1 1 auto;min-height:0}',
+      '.dgc-sideHead{display:flex;align-items:center;gap:6px;padding:7px 10px 6px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-label-secondary)}',
+      '.dgc-sideHead .dgc-spacer{flex:1}',
+      '.dgc-list{overflow:auto;min-height:0;flex:1 1 auto;padding:0 6px 8px}',
+      '.dgc-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer;user-select:none}',
+      '.dgc-row:hover{background:var(--dsw-alias-bg-layer-2)}',
+      '.dgc-row.is-active{background:color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, transparent)}',
+      '.dgc-row .dgc-dot{width:8px;height:8px;border-radius:2px;flex:0 0 auto}',
+      '.dgc-row .dgc-rowLabel{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}',
+      '.dgc-row .dgc-rowMeta{font-size:10.5px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}',
+      '.dgc-row .dgc-rowBtn{opacity:.55;border:none;background:none;color:inherit;cursor:pointer;padding:0 2px;font-size:11px}',
+      '.dgc-row .dgc-rowBtn:hover{opacity:1}',
+      '.dgc-groupHead{display:flex;align-items:center;gap:6px;margin:6px 0 2px;padding:3px 6px;font-size:10.5px;font-weight:600;letter-spacing:.03em;color:var(--dsw-alias-label-secondary);text-transform:uppercase;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-groupHead:first-child{margin-top:0;border-top:none}',
+      '.dgc-hint{padding:10px 12px;font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-secondary)}',
+      '.dgc-center{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;position:relative;background:var(--dsw-alias-bg-base)}',
+      '.dgc-canvasWrap{flex:1 1 auto;min-height:0;position:relative;overflow:hidden}',
+      '.dgc-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:default}',
+      '.dgc-inspector{flex:0 0 322px;min-width:260px;display:flex;flex-direction:column;border-left:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-height:0}',
+      '.dgc-inspectorBody{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 10px 16px}',
+      '.dgc-sectionTitle{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--dsw-alias-label-secondary);margin:10px 0 6px}',
+      '.dgc-sectionTitle:first-child{margin-top:0}',
+      '.dgc-field{display:grid;grid-template-columns:104px minmax(0,1fr);gap:8px;align-items:center;padding:2px 0}',
+      '.dgc-fieldLabel{font-size:12px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dgc-fieldBody{display:flex;align-items:center;gap:5px;min-width:0}',
+      '.dgc-fieldBody .dgc-input{height:24px;font-size:12px}',
+      '.dgc-numWrap{position:relative;flex:1 1 auto;min-width:0}',
+      '.dgc-tree{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:6px 8px;margin:4px 0 6px;background:var(--dsw-alias-bg-layer-2)}',
+      '.dgc-treeHead{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dsw-alias-label-secondary);margin-bottom:4px}',
+      '.dgc-chips{display:flex;flex-wrap:wrap;gap:4px}',
+      '.dgc-chip{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);border-radius:999px;padding:1px 8px;font-size:11px;cursor:pointer;color:var(--dsw-alias-label-secondary)}',
+      '.dgc-chip.is-active{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}',
+      '.dgc-transport{display:flex;align-items:center;gap:10px;padding:7px 12px;flex:0 0 auto;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
+      '.dgc-clock{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary);min-width:128px}',
+      '.dgc-scrub{flex:1 1 auto;position:relative;height:22px;display:flex;align-items:center;min-width:80px}',
+      '.dgc-scrub input{width:100%;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}',
+      '.dgc-status{font-size:11.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40%}',
+      '.dgc-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb, var(--dsw-alias-bg-base) 76%, transparent);z-index:4;padding:24px}',
+      '.dgc-overlayCard{max-width:520px;width:100%;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-overlay);border-radius:12px;padding:18px 20px;box-shadow:0 12px 32px rgba(0,0,0,.28)}',
+      '.dgc-overlayCard h3{margin:0 0 6px;font-size:14px;font-weight:600}',
+      '.dgc-overlayCard p{margin:0 0 12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}',
+      '.dgc-rowActions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}',
+      '.dgc-modalBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.42);z-index:60;display:flex;align-items:center;justify-content:center;padding:24px}',
+      '.dgc-modal{width:min(760px,94vw);max-height:86vh;display:flex;flex-direction:column;border-radius:12px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-overlay);box-shadow:0 18px 48px rgba(0,0,0,.36);overflow:hidden}',
+      '.dgc-modalHead{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-modalHead h3{margin:0;font-size:13.5px;font-weight:600;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dgc-modalBody{flex:1 1 auto;min-height:0;display:flex;overflow:hidden}',
+      '.dgc-modalCanvas{flex:1 1 auto;min-width:0;position:relative;background:var(--dsw-alias-bg-base)}',
+      '.dgc-modalSide{flex:0 0 300px;min-width:220px;overflow:auto;padding:10px 12px;border-left:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
+      '.dgc-modalFoot{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;height:100%;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary)}',
+      '.dgc-empty h3{margin:0;font-size:14px;color:var(--dsw-alias-label-primary);font-weight:600}',
+      '.dgc-listRowSlim{font-size:11.5px;color:var(--dsw-alias-label-secondary);padding:1px 4px}',
+      '.dgc-tag{font-size:10px;border-radius:4px;padding:0 4px;border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary)}',
+      '.dgc-offline{color:var(--dsw-alias-state-warn-primary)}',
+      '.dgc-err{color:var(--dsw-alias-state-error-primary)}',
+      '.dgc-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}',
+      '.dgc-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}',
+      '.dgc-player{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;background:#0b1220;color:#e8eef9}',
+      '.dgc-playerHead{display:flex;align-items:center;gap:8px;padding:0 14px;height:46px;flex:0 0 auto;background:rgba(10,16,26,.9);border-bottom:1px solid rgba(255,255,255,.12)}',
+      '.dgc-playerTitle{display:flex;flex-direction:column;min-width:0;margin-right:4px}',
+      '.dgc-playerTitle strong{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}',
+      '.dgc-playerTitle span{font-size:11px;color:rgba(232,238,249,.62);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}',
+      '.dgc-playerBadge{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.18);color:rgba(232,238,249,.78);white-space:nowrap}',
+      '.dgc-playerBadge.is-warn{color:#fbbf24;border-color:currentColor}',
+      '.dgc-playerStage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center}',
+      '.dgc-playerFrame{position:relative;flex:0 0 auto;overflow:hidden}',
+      '.dgc-playerCanvas{position:absolute;inset:0;width:100%;height:100%;display:block}',
+      '.dgc-playerEmpty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(232,238,249,.72);font-size:13px;pointer-events:none;text-align:center;padding:24px}',
+      '.dgc-playerNote{position:absolute;left:14px;bottom:10px;font-size:11px;color:rgba(232,238,249,.55);pointer-events:none}',
+      '.dgc-playerBar{display:flex;align-items:center;gap:10px;padding:8px 14px;flex:0 0 auto;background:rgba(10,16,26,.9);border-top:1px solid rgba(255,255,255,.12)}',
+      '.dgc-playerBar .dgc-clock{color:#e8eef9;min-width:118px}',
+      '.dgc-player .dgc-btn{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.18);color:#e8eef9}',
+      '.dgc-player .dgc-btn:hover:not(:disabled){background:rgba(255,255,255,.16)}',
+      '.dgc-player .dgc-btn.is-primary{background:#3b82f6;border-color:transparent;color:#fff}',
+      '.dgc-player .dgc-btn.is-ghost{background:transparent}',
+      '.dgc-playerLabel{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:rgba(232,238,249,.72);white-space:nowrap}',
+      '.dgc-playerLabel .dgc-select{background:rgba(255,255,255,.08);color:#e8eef9;border-color:rgba(255,255,255,.18)}',
+      '.dgc-playerCheck{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:rgba(232,238,249,.72);white-space:nowrap}',
+    ].join('\n');
+
+    /** Stylesheet element rendered by the page (removed with the page). */
+    function StyleSheet() {
+      return h('style', { 'data-gorge-chart-studio': 'true' }, STYLE_TEXT);
+    }
+
+    /** Cached style token colours resolved from the document (canvas drawing). */
+    const tokenCache = new Map();
+    function cssToken(name, fallback) {
+      if (tokenCache.has(name)) return tokenCache.get(name);
+      let value = fallback;
+      try {
+        const resolved = window.getComputedStyle(document.documentElement).getPropertyValue(name);
+        if (resolved && resolved.trim()) value = resolved.trim();
+      } catch (error) {
+        /* keep the fallback */
+      }
+      tokenCache.set(name, value);
+      return value;
+    }
+    /** Drop the token cache (theme switches). */
+    function resetTokenCache() {
+      tokenCache.clear();
+    }
+
+    // =======================================================================
+    // Host bridge: state fetch, SSE, optimistic edits, undo/redo.
+    // =======================================================================
+
+    /** GET JSON with an abort signal; throws a readable Error on failure. */
+    async function fetchJson(url, options) {
+      const response = await fetch(url, Object.assign({ cache: 'no-store' }, options || {}));
+      let body = null;
+      try {
+        body = await response.json();
+      } catch (error) {
+        body = null;
+      }
+      if (!response.ok) {
+        const message = body && (body.error || body.message) ? body.error || body.message : 'HTTP ' + response.status;
+        const error = new Error(message);
+        error.status = response.status;
+        error.body = body;
+        throw error;
+      }
+      return body;
+    }
+
+    /**
+     * One shared chart document session: server state plus the local optimistic
+     * copy, the edit queue, and the undo/redo stacks.
+     */
+    function useChartSession() {
+      const [state, setState] = useState(null);
+      const [phase, setPhase] = useState('loading');
+      const [error, setError] = useState(null);
+      const [connection, setConnection] = useState('connecting');
+      const [saving, setSaving] = useState(false);
+      const [notice, setNotice] = useState(null);
+
+      const stateRef = useRef(null);
+      /** Latest optimistic project: the base for every local op application. */
+      const projectRef = useRef(null);
+      const serverRevRef = useRef(0);
+      const queueRef = useRef(Promise.resolve());
+      const historyRef = useRef({ past: [], future: [] });
+      const inflightRef = useRef(0);
+      /** Highest revision seen on SSE that this tab did not produce yet. */
+      const pendingRevRef = useRef(0);
+      const mountedRef = useRef(true);
+
+      stateRef.current = state;
+
+      useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+          mountedRef.current = false;
+        };
+      }, []);
+
+      /** Replace the whole client state from a Host payload. */
+      const acceptState = useCallback((payload) => {
+        if (!payload || typeof payload !== 'object') return;
+        serverRevRef.current = Number.isFinite(payload.rev) ? payload.rev : serverRevRef.current;
+        projectRef.current = payload.project || null;
+        pendingRevRef.current = 0;
+        setState(payload);
+        setPhase(payload.project ? 'ready' : 'empty');
+        setError(null);
+        historyRef.current = { past: [], future: [] };
+      }, []);
+
+      /** Refetch the whole document (agent edits, open, reload, conflict). */
+      const refresh = useCallback(async () => {
+        try {
+          const payload = await fetchJson(STATE_URL);
+          if (!mountedRef.current) return;
+          acceptState(payload);
+        } catch (failure) {
+          if (!mountedRef.current) return;
+          setError(String((failure && failure.message) || failure));
+          setPhase((current) => (current === 'ready' ? current : 'error'));
+        }
+      }, [acceptState]);
+
+      useEffect(() => {
+        refresh();
+      }, [refresh]);
+
+      // SSE: the Host notifies `{rev, dirty}`. A revision this tab did not
+      // produce means an agent/tool changed the project — refetch everything.
+      useEffect(() => {
+        if (typeof EventSource !== 'function') return undefined;
+        let source;
+        try {
+          source = new EventSource(EVENTS_URL);
+        } catch (failure) {
+          setConnection('offline');
+          return undefined;
+        }
+        source.onopen = () => setConnection('online');
+        source.onerror = () => setConnection('offline');
+        source.onmessage = (event) => {
+          let payload = null;
+          try {
+            payload = JSON.parse(event.data);
+          } catch (failure) {
+            payload = null;
+          }
+          if (!payload) return;
+          if (payload.rev !== undefined && payload.rev !== serverRevRef.current) {
+            // An agent/tool edit produced this revision. Refetch, unless our own
+            // edit batch is in flight — then remember it and refetch when the
+            // queue drains (otherwise the page stays on a stale project).
+            if (inflightRef.current === 0) refresh();
+            else pendingRevRef.current = Math.max(pendingRevRef.current, payload.rev);
+          }
+          if (payload.dirty !== undefined) {
+            setState((current) => (current ? Object.assign({}, current, { dirty: payload.dirty }) : current));
+          }
+        };
+        return () => {
+          try {
+            source.close();
+          } catch (error) {
+            /* ignore */
+          }
+        };
+      }, [refresh]);
+
+      /** Push one op batch to the Host, serialised so baseRev stays current. */
+      const pushOps = useCallback(
+        (ops) => {
+          inflightRef.current += 1;
+          const send = async (batch, attempt) => {
+            const baseRev = serverRevRef.current;
+            try {
+              const result = await fetchJson(EDIT_URL, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ baseRev, ops: batch }),
+              });
+              if (result && Number.isFinite(result.rev)) serverRevRef.current = result.rev;
+              if (!mountedRef.current) return;
+              setState((current) =>
+                current
+                  ? Object.assign({}, current, {
+                      rev: result && Number.isFinite(result.rev) ? result.rev : current.rev,
+                      dirty: result && result.dirty !== undefined ? result.dirty : true,
+                    })
+                  : current,
+              );
+              const errors = result && Array.isArray(result.errors) ? result.errors : [];
+              const rejected = result && result.changed === false;
+              if (errors.length > 0 || rejected) {
+                setNotice({ kind: 'error', text: t0('errorPrefix') + (errors.length > 0 ? errors.join('; ') : t0('errorGeneric')) });
+                // The Host did not (fully) accept the batch: resync so the page
+                // never shows an edit the document does not contain.
+                refresh();
+              }
+            } catch (failure) {
+              if (failure && failure.status === 409 && attempt === 0) {
+                // Someone else changed the revision: resync, re-apply the batch
+                // on top of the fresh state, then retry once with the new baseRev.
+                await refresh();
+                if (projectRef.current) applyOptimisticRef.current(batch);
+                return send(batch, 1);
+              }
+              if (mountedRef.current) {
+                setNotice({ kind: 'error', text: t0('errorPrefix') + String((failure && failure.message) || failure) });
+                if (failure && failure.status === 409) refresh();
+              }
+            }
+          };
+          queueRef.current = queueRef.current
+            .then(() => send(ops, 0))
+            .catch(() => undefined)
+            .then(() => {
+              inflightRef.current = Math.max(0, inflightRef.current - 1);
+              if (inflightRef.current === 0 && mountedRef.current && pendingRevRef.current > serverRevRef.current) {
+                pendingRevRef.current = 0;
+                refresh();
+              }
+            });
+          return queueRef.current;
+        },
+        [refresh],
+      );
+
+      /**
+       * Apply one op batch optimistically against the latest project and mirror
+       * it into React state. Returns the inverse ops and any local errors.
+       */
+      const applyOptimistic = useCallback((ops) => {
+        const current = stateRef.current;
+        const base = projectRef.current;
+        if (!current || !base) return { inverse: [], errors: ['no open project'] };
+        const result = applyOpsLocal(base, ops, current.catalog);
+        projectRef.current = result.project;
+        setState((previous) => (previous ? Object.assign({}, previous, { project: result.project, dirty: true }) : previous));
+        return { inverse: result.inverse, errors: result.errors };
+      }, []);
+      const applyOptimisticRef = useRef(applyOptimistic);
+      applyOptimisticRef.current = applyOptimistic;
+
+      /**
+       * Apply ops (instant UI) and queue them for the Host. When `record` is
+       * true the inverse ops land on the undo stack. The inverse is computed
+       * synchronously here — never inside a setState updater, which React may
+       * defer until after this function returns.
+       */
+      const edit = useCallback(
+        (ops, options) => {
+          const settings = options || {};
+          if (!Array.isArray(ops) || ops.length === 0) return;
+          const result = applyOptimistic(ops);
+          if (settings.record !== false) {
+            historyRef.current.past.push({ ops: deepClone(ops), inverse: deepClone(result.inverse) });
+            if (historyRef.current.past.length > MAX_HISTORY) historyRef.current.past.shift();
+            historyRef.current.future = [];
+          }
+          if (result.errors.length > 0) setNotice({ kind: 'error', text: result.errors.join('; ') });
+          if (settings.sync !== false) pushOps(ops);
+        },
+        [applyOptimistic, pushOps],
+      );
+
+      /** Undo the last recorded op batch (local + Host). Inverse ops run in reverse. */
+      const undo = useCallback(() => {
+        const entry = historyRef.current.past.pop();
+        if (!entry) return;
+        const inverseOps = entry.inverse.slice().reverse();
+        applyOptimistic(inverseOps);
+        historyRef.current.future.push(entry);
+        pushOps(inverseOps);
+      }, [applyOptimistic, pushOps]);
+
+      /** Redo the last undone batch. */
+      const redo = useCallback(() => {
+        const entry = historyRef.current.future.pop();
+        if (!entry) return;
+        applyOptimistic(entry.ops);
+        historyRef.current.past.push(entry);
+        pushOps(entry.ops);
+      }, [applyOptimistic, pushOps]);
+
+      /** POST /open with an absolute path or a library name. */
+      const openProject = useCallback(
+        async (dir) => {
+          setSaving(false);
+          try {
+            const payload = await fetchJson(OPEN_URL, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ dir }),
+            });
+            acceptState(payload);
+            return true;
+          } catch (failure) {
+            setNotice({ kind: 'error', text: t0('loadFailed') + ': ' + String((failure && failure.message) || failure) });
+            return false;
+          }
+        },
+        [acceptState],
+      );
+
+      /** Force a Host-side save of the open project. */
+      const save = useCallback(async () => {
+        if (!stateRef.current || !stateRef.current.project) return false;
+        setSaving(true);
+        try {
+          await queueRef.current;
+          const result = await fetchJson(SAVE_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+          setState((current) => (current ? Object.assign({}, current, { dirty: false }) : current));
+          setNotice({
+            kind: result && result.errors && result.errors.length > 0 ? 'error' : 'ok',
+            text:
+              result && result.errors && result.errors.length > 0
+                ? result.errors.join('; ')
+                : t0('saved') + (result && result.written ? ' · ' + result.written.length : ''),
+          });
+          return true;
+        } catch (failure) {
+          setNotice({ kind: 'error', text: t0('errorGeneric') + ': ' + String((failure && failure.message) || failure) });
+          return false;
+        } finally {
+          setSaving(false);
+        }
+      }, []);
+
+      /** Re-read the project from disk. */
+      const reload = useCallback(async () => {
+        try {
+          const payload = await fetchJson(RELOAD_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+          acceptState(payload);
+          setNotice({ kind: 'ok', text: t0('reload') });
+        } catch (failure) {
+          setNotice({ kind: 'error', text: String((failure && failure.message) || failure) });
+        }
+      }, [acceptState]);
+
+      return {
+        state,
+        phase,
+        error,
+        connection,
+        saving,
+        notice,
+        setNotice,
+        refresh,
+        edit,
+        undo,
+        redo,
+        canUndo: () => historyRef.current.past.length > 0,
+        canRedo: () => historyRef.current.future.length > 0,
+        historyRef,
+        openProject,
+        save,
+        reload,
+      };
+    }
+
+    /** Translation for code outside React (notices): best-effort zh default. */
+    function t0(key) {
+      return zh[key] !== undefined ? zh[key] : key;
+    }
+
+    // =======================================================================
+    // Audio: waveform peaks + a transport backed by an <audio> element.
+    // =======================================================================
+
+    /** Peak count used for the timeline waveform strip. */
+    const WAVE_BINS = 4096;
+
+    /** Read a 16/24/32-bit PCM WAV into a mono peak array. */
+    function wavPeaks(buffer, bins) {
+      const view = new DataView(buffer);
+      if (view.byteLength < 44) return null;
+      const readAscii = (offset, length) => {
+        let text = '';
+        for (let i = 0; i < length; i += 1) text += String.fromCharCode(view.getUint8(offset + i));
+        return text;
+      };
+      if (readAscii(0, 4) !== 'RIFF' || readAscii(8, 4) !== 'WAVE') return null;
+      let offset = 12;
+      let audioFormat = 1;
+      let channels = 2;
+      let sampleRate = 44100;
+      let bits = 16;
+      let dataOffset = -1;
+      let dataLength = 0;
+      while (offset + 8 <= view.byteLength) {
+        const id = readAscii(offset, 4);
+        const size = view.getUint32(offset + 4, true);
+        const body = offset + 8;
+        if (id === 'fmt ') {
+          audioFormat = view.getUint16(body, true);
+          channels = view.getUint16(body + 2, true) || 1;
+          sampleRate = view.getUint32(body + 4, true) || 44100;
+          bits = view.getUint16(body + 14, true) || 16;
+        } else if (id === 'data') {
+          dataOffset = body;
+          dataLength = Math.min(size, view.byteLength - body);
+          break;
+        }
+        offset = body + size + (size % 2);
+      }
+      if (dataOffset < 0 || dataLength <= 0) return null;
+      if (audioFormat !== 1 || [8, 16, 24, 32].indexOf(bits) === -1) return null;
+      const bytesPerSample = bits / 8;
+      const frameBytes = bytesPerSample * channels;
+      const frames = Math.floor(dataLength / frameBytes);
+      if (frames <= 0) return null;
+      const peaks = new Float32Array(bins);
+      const step = frames / bins;
+      for (let bin = 0; bin < bins; bin += 1) {
+        const from = Math.floor(bin * step);
+        const to = Math.min(frames, Math.floor((bin + 1) * step));
+        let peak = 0;
+        for (let frame = from; frame < to; frame += 1) {
+          const base = dataOffset + frame * frameBytes;
+          let sample = 0;
+          if (bits === 16) sample = view.getInt16(base, true) / 32768;
+          else if (bits === 24) {
+            const raw = view.getUint8(base) | (view.getUint8(base + 1) << 8) | (view.getInt8(base + 2) << 16);
+            sample = raw / 8388608;
+          } else if (bits === 32) sample = view.getFloat32(base, true);
+          else sample = (view.getUint8(base) - 128) / 128;
+          const magnitude = Math.abs(sample);
+          if (magnitude > peak) peak = magnitude;
+        }
+        peaks[bin] = peak;
+      }
+      return { peaks, duration: frames / sampleRate, sampleRate, channels };
+    }
+
+    /** Decode non-WAV audio through Web Audio as a fallback for the waveform. */
+    async function decodePeaks(buffer, bins) {
+      const OfflineCtor = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      if (!OfflineCtor) return null;
+      const context = new OfflineCtor(1, 1, 44100);
+      const decoded = await new Promise((resolve, reject) => {
+        try {
+          const result = context.decodeAudioData(buffer.slice(0), resolve, reject);
+          if (result && typeof result.then === 'function') result.then(resolve, reject);
+        } catch (error) {
+          reject(error);
+        }
+      });
+      if (!decoded) return null;
+      const channel = decoded.getChannelData(0);
+      const peaks = new Float32Array(bins);
+      const step = channel.length / bins;
+      for (let bin = 0; bin < bins; bin += 1) {
+        const from = Math.floor(bin * step);
+        const to = Math.min(channel.length, Math.floor((bin + 1) * step));
+        let peak = 0;
+        for (let i = from; i < to; i += 1) {
+          const magnitude = Math.abs(channel[i]);
+          if (magnitude > peak) peak = magnitude;
+        }
+        peaks[bin] = peak;
+      }
+      return { peaks, duration: decoded.duration, sampleRate: decoded.sampleRate, channels: decoded.numberOfChannels };
+    }
+
+    /** File URL for one project asset (absolute path). */
+    function assetUrl(filePath) {
+      return FILE_URL + '?path=' + encodeURIComponent(filePath || '');
+    }
+
+    /** Load and analyse the project audio for the waveform strip. */
+    function useWaveform(audioFile, audioPath) {
+      const [wave, setWave] = useState(null);
+      const [status, setStatus] = useState(audioFile ? 'loading' : 'none');
+      useEffect(() => {
+        let cancelled = false;
+        setWave(null);
+        if (!audioFile) {
+          setStatus('none');
+          return undefined;
+        }
+        setStatus('loading');
+        const target = audioPath || audioFile;
+        fetch(assetUrl(target), { cache: 'no-store' })
+          .then((response) => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.arrayBuffer();
+          })
+          .then((buffer) => {
+            if (cancelled) return;
+            let result = null;
+            try {
+              result = wavPeaks(buffer, WAVE_BINS);
+            } catch (error) {
+              result = null;
+            }
+            if (result) {
+              setWave(result);
+              setStatus('ready');
+              return null;
+            }
+            return decodePeaks(buffer, WAVE_BINS)
+              .then((decoded) => {
+                if (cancelled) return;
+                if (decoded) {
+                  setWave(decoded);
+                  setStatus('ready');
+                } else {
+                  setStatus('error');
+                }
+              })
+              .catch(() => {
+                if (!cancelled) setStatus('error');
+              });
+          })
+          .catch(() => {
+            if (!cancelled) setStatus('error');
+          });
+        return () => {
+          cancelled = true;
+        };
+      }, [audioFile, audioPath]);
+      return { wave, status };
+    }
+
+    /**
+     * Transport: owns one <audio> element for the project audio, exposes the
+     * live playhead and the usual play/pause/seek/rate controls.
+     */
+    function useTransport(audioPath, fallbackDuration, chartOffset) {
+      const audioRef = useRef(null);
+      const [time, setTime] = useState(0);
+      const [playing, setPlaying] = useState(false);
+      const [rate, setRateState] = useState(1);
+      const [duration, setDuration] = useState(fallbackDuration || 0);
+      const [muted, setMuted] = useState(false);
+      const timeRef = useRef(0);
+      const rafRef = useRef(0);
+      const startRef = useRef(0);
+      // Chart time = audio time + audioOffset (the audio staff's PeriodConfig
+      // timeOffset, e.g. Song.g has 0.373 s).
+      const offsetRef = useRef(Number.isFinite(chartOffset) ? chartOffset : 0);
+      offsetRef.current = Number.isFinite(chartOffset) ? chartOffset : 0;
+      // Loop inputs kept in refs so the RAF callback never closes over stale
+      // state and so audio can be started once the chart playhead reaches the
+      // audio start (charts may begin before the audio does).
+      const playingRef = useRef(false);
+      const rateRef = useRef(1);
+      const mutedRef = useRef(false);
+      const durationRef = useRef(0);
+      const audioPreStartRef = useRef(false);
+
+      useEffect(() => {
+        if (fallbackDuration && fallbackDuration > 0) setDuration(fallbackDuration);
+      }, [fallbackDuration]);
+
+      useEffect(
+        () => () => {
+          if (rafRef.current) cancelAnimationFrame(rafRef.current);
+          rafRef.current = 0;
+          const audio = audioRef.current;
+          if (audio) {
+            try {
+              audio.pause();
+              audio.removeAttribute('src');
+            } catch (error) {
+              /* ignore */
+            }
+          }
+        },
+        [],
+      );
+
+      // A different project means a different audio file: drop the old element.
+      // Duration-only changes (a Host refresh recomputes it) must NOT reset the
+      // transport, so this effect is keyed on the audio path alone.
+      useEffect(() => {
+        const audio = audioRef.current;
+        if (audio) {
+          try {
+            audio.pause();
+            audio.removeAttribute('src');
+          } catch (error) {
+            /* ignore */
+          }
+        }
+        audioRef.current = null;
+        audioPreStartRef.current = false;
+        timeRef.current = 0;
+        startRef.current = performance.now();
+        playingRef.current = false;
+        setTime(0);
+        setPlaying(false);
+        if (rafRef.current) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = 0;
+        }
+      }, [audioPath]);
+
+      const tick = useCallback(() => {
+        if (!playingRef.current) {
+          rafRef.current = 0;
+          return;
+        }
+        const audio = audioRef.current;
+        const offset = offsetRef.current;
+        let current;
+        const audioAuthoritative = !!audio && !audio.error && audio.readyState >= 2 && !audio.paused;
+        if (audioAuthoritative) {
+          current = audio.currentTime + offset;
+        } else {
+          // Wall clock while the media is loading or while the chart playhead is
+          // still before the audio start.
+          current = Math.max(0, (performance.now() - startRef.current) / 1000);
+          if (audio && audioPreStartRef.current && current >= offset) {
+            audioPreStartRef.current = false;
+            try {
+              audio.currentTime = Math.max(0, current - offset);
+            } catch (error) {
+              /* ignore */
+            }
+            audio.playbackRate = rateRef.current;
+            audio.muted = mutedRef.current;
+            const promise = audio.play();
+            if (promise && typeof promise.catch === 'function') promise.catch(() => undefined);
+          }
+        }
+        if (Math.abs(current - timeRef.current) > 0.004) {
+          timeRef.current = current;
+          setTime(current);
+        }
+        if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+          const total = Math.max(audio.duration + offset, durationRef.current || 0);
+          if (Math.abs(durationRef.current - total) > 0.01) {
+            durationRef.current = total;
+            setDuration(total);
+          }
+        }
+        rafRef.current = requestAnimationFrame(tick);
+      }, []);
+
+      const ensureAudio = useCallback(() => {
+        if (audioRef.current) return audioRef.current;
+        if (typeof Audio !== 'function' || !audioPath) return null;
+        const audio = new Audio();
+        audio.preload = 'auto';
+        audio.src = assetUrl(audioPath);
+        audioRef.current = audio;
+        // Stop the clock when the track ends: without this the RAF loop would
+        // keep running for the lifetime of the page.
+        audio.addEventListener('ended', () => {
+          playingRef.current = false;
+          setPlaying(false);
+          if (rafRef.current) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = 0;
+          }
+          setTime(timeRef.current);
+        });
+        return audio;
+      }, [audioPath]);
+
+      const play = useCallback(() => {
+        const audio = ensureAudio();
+        const offset = offsetRef.current;
+        const startChartTime = timeRef.current;
+        playingRef.current = true;
+        setPlaying(true);
+        startRef.current = performance.now() - startChartTime * 1000;
+        audioPreStartRef.current = !!audio && startChartTime < offset;
+        if (audio) {
+          audio.playbackRate = rate;
+          audio.muted = muted;
+          if (!audioPreStartRef.current) {
+            try {
+              audio.currentTime = Math.max(0, startChartTime - offset);
+            } catch (error) {
+              /* ignore */
+            }
+            const promise = audio.play();
+            if (promise && typeof promise.catch === 'function') {
+              promise.catch(() => {
+                playingRef.current = false;
+                setPlaying(false);
+              });
+            }
+          }
+        }
+        if (!rafRef.current) rafRef.current = requestAnimationFrame(tick);
+      }, [ensureAudio, muted, rate, tick]);
+
+      const pause = useCallback(() => {
+        playingRef.current = false;
+        setPlaying(false);
+        audioPreStartRef.current = false;
+        const audio = audioRef.current;
+        if (audio) {
+          try {
+            audio.pause();
+          } catch (error) {
+            /* ignore */
+          }
+        }
+        if (rafRef.current) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = 0;
+        }
+        setTime(timeRef.current);
+      }, []);
+
+      const seek = useCallback((seconds) => {
+        const limit = durationRef.current > 0 ? durationRef.current : Infinity;
+        const target = clamp(seconds, 0, limit);
+        const audio = audioRef.current;
+        const offset = offsetRef.current;
+        timeRef.current = target;
+        startRef.current = performance.now() - target * 1000;
+        setTime(target);
+        if (!audio) return;
+        if (playingRef.current && target < offset) {
+          // Before the audio starts: hold the media until the playhead reaches it.
+          audioPreStartRef.current = true;
+          try {
+            audio.pause();
+          } catch (error) {
+            /* ignore */
+          }
+          return;
+        }
+        audioPreStartRef.current = false;
+        try {
+          audio.currentTime = Math.max(0, target - offset);
+        } catch (error) {
+          /* ignore */
+        }
+        if (playingRef.current && audio.paused) {
+          audio.playbackRate = rateRef.current;
+          audio.muted = mutedRef.current;
+          const promise = audio.play();
+          if (promise && typeof promise.catch === 'function') promise.catch(() => undefined);
+        }
+      }, []);
+
+      const setRate = useCallback((value) => {
+        rateRef.current = value;
+        setRateState(value);
+        const audio = audioRef.current;
+        if (audio) audio.playbackRate = value;
+      }, []);
+
+      const toggleMute = useCallback(() => {
+        const next = !mutedRef.current;
+        mutedRef.current = next;
+        setMuted(next);
+        const audio = audioRef.current;
+        if (audio) audio.muted = next;
+      }, []);
+
+      playingRef.current = playing;
+      rateRef.current = rate;
+      mutedRef.current = muted;
+      durationRef.current = duration > 0 ? duration : durationRef.current;
+
+      return { time, timeRef, playing, duration, rate, muted, play, pause, seek, setRate, toggleMute };
+    }
+
+    // =======================================================================
+    // UI primitives.
+    // =======================================================================
+
+    /** Inline 16px glyphs; stroke uses currentColor so theme colours apply. */
+    const ICON_PATHS = {
+      play: ['M5 3.5v9l8-4.5z'],
+      pause: ['M5 3.5h2.2v9H5z', 'M8.8 3.5H11v9H8.8z'],
+      stop: ['M4.5 4.5h7v7h-7z'],
+      rewind: ['M10.5 3.5L4 8l6.5 4.5z'],
+      save: ['M3.5 3.5h7.2l2 2v7H3.5z', 'M5.5 3.5v3.2h4.2V3.5'],
+      folder: ['M2.5 5.2h4l1.1 1.4h5.9v6.2h-11z'],
+      undo: ['M6.4 4.2L3.2 7.4l3.2 3.2', 'M3.4 7.4h6.1a3.7 3.7 0 0 1 0 7.4H6.2'],
+      redo: ['M9.6 4.2l3.2 3.2-3.2 3.2', 'M12.6 7.4H6.5a3.7 3.7 0 0 0 0 7.4h3.3'],
+      plus: ['M8 3.6v8.8', 'M3.6 8h8.8'],
+      minus: ['M3.6 8h8.8'],
+      trash: ['M3.6 5h8.8', 'M6.3 5V3.6h3.4V5', 'M5 5l.5 8h5l.5-8'],
+      duplicate: ['M5.4 5.4h7v7h-7z', 'M3.6 10.6V3.6h7'],
+      zoomIn: ['M7.9 3.4a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9z', 'M11.2 11.2l2.4 2.4', 'M7.9 5.9v4', 'M5.9 7.9h4'],
+      zoomOut: ['M7.9 3.4a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9z', 'M11.2 11.2l2.4 2.4', 'M5.9 7.9h4'],
+      fit: ['M3.2 6.2V3.4h3', 'M12.8 6.2V3.4h-3', 'M3.2 9.8v2.8h3', 'M12.8 9.8v2.8h-3'],
+      select: ['M3.4 3.4l9 4-4 1.2-1.2 4z'],
+      tap: ['M8 3.4l3 4.6-3 4.6-3-4.6z'],
+      drag: ['M3.4 8h9.2', 'M9.9 5.2L12.6 8l-2.7 2.8', 'M3.4 5.2h2.4', 'M3.4 10.8h2.4'],
+      hold: ['M5 3.6h6v8.8H5z', 'M5 8h6'],
+      lane: ['M2.6 10.6C5 10.6 5.6 5.4 8 5.4s3 5.2 5.4 5.2'],
+      guide: ['M2.6 11.4C5.2 11.4 6 4.6 8 4.6s2.8 6.8 5.4 6.8', 'M2.6 11.4C5.2 11.4 6 8 8 8s2.8 3.4 5.4 3.4'],
+      curve: ['M2.6 11.6C5 11.6 5.6 4.4 8 4.4s3 7.2 5.4 7.2'],
+      dot: ['M8 6.6a1.4 1.4 0 1 1 0 2.8 1.4 1.4 0 0 1 0-2.8z'],
+      chevron: ['M5.6 6.6L8 9l2.4-2.4'],
+      info: ['M8 3.4a4.6 4.6 0 1 1 0 9.2 4.6 4.6 0 0 1 0-9.2z', 'M8 7.4v3', 'M8 5.6v.2'],
+      reload: ['M12.6 4.4v3.2H9.4', 'M3.4 11.6V8.4h3.2', 'M4 6a4.5 4.5 0 0 1 7.6-1.4', 'M12 10a4.5 4.5 0 0 1-7.6 1.4'],
+      grid: ['M3 6.2h10', 'M3 9.8h10', 'M6.2 3v10', 'M9.8 3v10'],
+      volume: ['M3.6 6.4h2.2L8.4 3.8v8.4L5.8 9.6H3.6z', 'M10.4 6.2a2.6 2.6 0 0 1 0 3.6'],
+      mute: ['M3.6 6.4h2.2L8.4 3.8v8.4L5.8 9.6H3.6z', 'M10.8 6.4l2.8 3.2', 'M13.6 6.4l-2.8 3.2'],
+      close: ['M4.2 4.2l7.6 7.6', 'M11.8 4.2l-7.6 7.6'],
+      preview: ['M2.6 4.4h10.8v7.2H2.6z', 'M6.7 6.2v3.6l3.6-1.8z'],
+    };
+
+    /** One inline icon. */
+    function Icon(props) {
+      const name = props.name || 'dot';
+      const size = props.size || 15;
+      const paths = ICON_PATHS[name] || ICON_PATHS.dot;
+      return h(
+        'svg',
+        {
+          className: 'dgc-icon',
+          viewBox: '0 0 16 16',
+          width: size,
+          height: size,
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': 'true',
+          style: { display: 'block' },
+        },
+        paths.map((d, index) => h('path', { key: index, d })),
+      );
+    }
+
+    /** A labelled toolbar/panel button. */
+    function Button(props) {
+      const className =
+        'dgc-btn' +
+        (props.variant === 'primary' ? ' is-primary' : '') +
+        (props.variant === 'ghost' ? ' is-ghost' : '') +
+        (props.variant === 'danger' ? ' is-danger' : '') +
+        (props.active ? ' is-active' : '') +
+        (props.className ? ' ' + props.className : '');
+      return h(
+        'button',
+        {
+          type: 'button',
+          className,
+          title: props.title,
+          disabled: props.disabled,
+          'aria-pressed': props.active === undefined ? undefined : !!props.active,
+          onClick: props.onClick,
+          style: props.style,
+        },
+        props.icon ? h(Icon, { name: props.icon, size: props.iconSize || 15 }) : null,
+        props.children === undefined || props.children === null ? null : h('span', null, props.children),
+      );
+    }
+
+    /** Label + control row used by the inspector. */
+    function FieldRow(props) {
+      return h(
+        'div',
+        { className: 'dgc-field' },
+        h('span', { className: 'dgc-fieldLabel', title: props.title || props.label }, props.label),
+        h('span', { className: 'dgc-fieldBody', style: props.wide ? { display: 'block' } : undefined }, props.children),
+      );
+    }
+
+    /**
+     * Numeric input that keeps a local text draft and commits on blur/Enter, so
+     * one edit is one undo step. Arrow keys nudge by `step`.
+     */
+    function NumberField(props) {
+      const value = props.value;
+      const [text, setText] = useState(value === null || value === undefined ? '' : numberText(value));
+      const focusedRef = useRef(false);
+      useEffect(() => {
+        if (!focusedRef.current) setText(value === null || value === undefined ? '' : numberText(value));
+      }, [value]);
+      const commit = useCallback(
+        (raw) => {
+          const parsed = parseNumberInput(raw);
+          // A JSON number field can never carry ±Infinity/NaN: JSON.stringify
+          // turns them into null, which would corrupt the .g value. Reject them
+          // here and keep the last valid text instead.
+          if (parsed === null || !Number.isFinite(parsed)) {
+            setText(props.value === null || props.value === undefined ? '' : numberText(props.value));
+            return;
+          }
+          if (props.value !== null && props.value !== undefined && Math.abs(parsed - props.value) < 1e-12) return;
+          if (props.onCommit) props.onCommit(parsed);
+        },
+        [props.value, props.onCommit],
+      );
+      return h(
+        'div',
+        { className: 'dgc-numWrap' },
+        h('input', {
+          className: 'dgc-input is-mono',
+          value: text,
+          inputMode: 'decimal',
+          spellCheck: false,
+          placeholder: props.placeholder,
+          disabled: props.disabled,
+          onFocus: () => {
+            focusedRef.current = true;
+          },
+          onChange: (event) => setText(event.target.value),
+          onBlur: (event) => {
+            focusedRef.current = false;
+            commit(event.target.value);
+          },
+          onKeyDown: (event) => {
+            if (event.key === 'Enter') {
+              event.currentTarget.blur();
+            } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+              event.preventDefault();
+              const current = parseNumberInput(text);
+              if (current === null) return;
+              const step = props.step === undefined ? (event.shiftKey ? 1 : 0.1) : props.step;
+              const next = round(current + (event.key === 'ArrowUp' ? step : -step), 6);
+              setText(numberText(next));
+              if (props.onCommit) props.onCommit(next);
+            } else if (event.key === 'Escape') {
+              setText(props.value === null || props.value === undefined ? '' : numberText(props.value));
+              event.currentTarget.blur();
+            }
+          },
+        }),
+      );
+    }
+
+    /** Text input that commits on blur/Enter. */
+    function TextField(props) {
+      const [text, setText] = useState(props.value === null || props.value === undefined ? '' : String(props.value));
+      const focusedRef = useRef(false);
+      useEffect(() => {
+        if (!focusedRef.current) setText(props.value === null || props.value === undefined ? '' : String(props.value));
+      }, [props.value]);
+      return h('input', {
+        className: 'dgc-input',
+        value: text,
+        spellCheck: false,
+        disabled: props.disabled,
+        placeholder: props.placeholder,
+        onFocus: () => {
+          focusedRef.current = true;
+        },
+        onChange: (event) => setText(event.target.value),
+        onBlur: (event) => {
+          focusedRef.current = false;
+          if (props.onCommit && event.target.value !== props.value) props.onCommit(event.target.value);
+        },
+        onKeyDown: (event) => {
+          if (event.key === 'Enter') event.currentTarget.blur();
+          else if (event.key === 'Escape') {
+            setText(props.value === null || props.value === undefined ? '' : String(props.value));
+            event.currentTarget.blur();
+          }
+        },
+      });
+    }
+
+    /** Checkbox row. */
+    function Checkbox(props) {
+      return h(
+        'label',
+        { style: { display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' } },
+        h('input', {
+          type: 'checkbox',
+          checked: !!props.checked,
+          disabled: props.disabled,
+          onChange: (event) => props.onChange && props.onChange(event.target.checked),
+        }),
+        props.label ? h('span', { style: { fontSize: 12 } }, props.label) : null,
+      );
+    }
+
+    /** Hex/alpha colour editor for ColorArgb-like values. */
+    function ColorField(props) {
+      const value = props.value;
+      const fields = isTypedValue(value) && value.t === 'obj' ? value.fields || {} : {};
+      const channel = (name, fallback) => {
+        const raw = valueAsNumber(fields[name]);
+        if (raw === null) return fallback;
+        return raw > 1 ? clamp(raw / 255, 0, 1) : clamp(raw, 0, 1);
+      };
+      const red = channel('r', 1);
+      const green = channel('g', 1);
+      const blue = channel('b', 1);
+      const alpha = channel('a', 1);
+      const hex = '#' + [red, green, blue].map((c) => Math.round(c * 255).toString(16).padStart(2, '0')).join('');
+      const write = (nextRed, nextGreen, nextBlue, nextAlpha) => {
+        if (!props.onChange) return;
+        const base = isTypedValue(value) && value.t === 'obj' ? deepClone(value) : { t: 'obj', type: 'GorgeFramework.ColorArgb', fields: {} };
+        base.fields = base.fields || {};
+        base.fields.r = round(nextRed, 4);
+        base.fields.g = round(nextGreen, 4);
+        base.fields.b = round(nextBlue, 4);
+        base.fields.a = round(nextAlpha, 4);
+        props.onChange(base);
+      };
+      return h(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 6, width: '100%' } },
+        h('input', {
+          type: 'color',
+          value: hex,
+          disabled: props.disabled,
+          style: { width: 34, height: 24, padding: 0, border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 6, background: 'transparent' },
+          onChange: (event) => {
+            const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(event.target.value);
+            if (!match) return;
+            write(parseInt(match[1], 16) / 255, parseInt(match[2], 16) / 255, parseInt(match[3], 16) / 255, alpha);
+          },
+        }),
+        h('div', { style: { flex: '1 1 auto', minWidth: 0 } }, NumberFieldWrapped({ value: alpha, onCommit: (next) => write(red, green, blue, next), step: 0.05, title: 'a' })),
+      );
+    }
+
+    /** Small wrapper so ColorField can render an alpha NumberField inline. */
+    function NumberFieldWrapped(props) {
+      return h(NumberField, { value: props.value, onCommit: props.onCommit, step: props.step, placeholder: props.title });
+    }
+
+    // =======================================================================
+    // Generic value editor (recursive over the typed value tree).
+    // =======================================================================
+
+    /** Field descriptor lookup inside a value-type schema. */
+    function fieldSchema(schema, name) {
+      if (!schema || !schema.fields || !schema.fields[name]) return null;
+      return schema.fields[name];
+    }
+
+    /**
+     * True only for a single ARGB colour object. Colour *curves*
+     * (`LerpColorCurve`, `ColorCurve`) must fall through to the object tree:
+     * they hold gradient stops and a progress curve, not r/g/b/a.
+     */
+    function isColorValue(value, schema) {
+      if (!isTypedValue(value) || value.t !== 'obj') return false;
+      const type = stripNamespace(value.type);
+      if (/ColorCurve|Curve/.test(type)) return false;
+      const fields = value.fields || {};
+      const hasRgb = fields.r !== undefined || fields.g !== undefined || fields.b !== undefined;
+      if (/^ColorArgb$|^Color$|^ColorRgb$/.test(type)) return true;
+      if (schema && schema.type === 'color' && hasRgb) return true;
+      return false;
+    }
+
+    /** True when a value is a curve-ish object. */
+    function isCurveValue(value, schema) {
+      if (schema && schema.type === 'curve') return true;
+      return isDrawableCurve(value);
+    }
+
+    /**
+     * Editable tree for one Value. Every change produces the complete new
+     * subtree through `onChange`; the inspector turns that into a patch op.
+     */
+    function ValueEditor(props) {
+      const { value, onChange, schema, t, depth } = props;
+      const level = depth || 0;
+      const disabled = props.disabled === true;
+
+      if (isColorValue(value, schema)) {
+        return h(ColorField, { value, onChange, disabled });
+      }
+
+      if (isTypedValue(value)) {
+        if (value.t === 'ref') {
+          return h(TextField, {
+            value: value.path,
+            disabled,
+            onCommit: (text) => onChange({ t: 'ref', path: text }),
+          });
+        }
+        if (value.t === 'expr') {
+          return h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 6, width: '100%' } },
+            h(NumberField, {
+              value: typeof value.special === 'number' ? value.special : null,
+              disabled,
+              onCommit: (next) =>
+                onChange(
+                  Number.isFinite(next)
+                    ? { t: 'expr', src: numberText(next), special: next }
+                    : { t: 'expr', src: next > 0 ? '(1.0/0.0)' : next < 0 ? '(-1.0/0.0)' : '(0.0/0.0)', special: next },
+                ),
+            }),
+            h('span', { className: 'dgc-mono', style: { opacity: 0.6 } }, value.src),
+          );
+        }
+        if (value.t === 'arr') {
+          const items = Array.isArray(value.items) ? value.items : [];
+          const itemSchema = (schema && schema.itemSchema) || null;
+          return h(
+            'div',
+            { className: 'dgc-tree' },
+            h(
+              'div',
+              { className: 'dgc-treeHead' },
+              h('span', { className: 'dgc-tag' }, stripNamespace(value.type) || 'array'),
+              h('span', null, items.length + ' 项'),
+              h('span', { className: 'dgc-spacer' }),
+              h(Button, {
+                variant: 'ghost',
+                icon: 'plus',
+                title: t('addPoint'),
+                disabled,
+                onClick: () => {
+                  const blank = itemSchema && itemSchema.defaultValue !== undefined ? deepClone(itemSchema.defaultValue) : makeBlankValue(itemSchema);
+                  onChange({ t: 'arr', type: value.type, items: items.concat([blank]) });
+                },
+              }),
+            ),
+            items.map((item, index) =>
+              h(
+                'div',
+                { key: index, style: { display: 'flex', alignItems: 'flex-start', gap: 4, padding: '2px 0' } },
+                h('span', { className: 'dgc-listRowSlim', style: { width: 18, paddingTop: 4 } }, String(index)),
+                h('div', { style: { flex: '1 1 auto', minWidth: 0 } }, h(ValueEditor, {
+                  value: item,
+                  schema: itemSchema,
+                  t,
+                  depth: level + 1,
+                  disabled,
+                  onChange: (next) => {
+                    const copy = items.slice();
+                    copy[index] = next;
+                    onChange({ t: 'arr', type: value.type, items: copy });
+                  },
+                })),
+                h(Button, {
+                  variant: 'ghost',
+                  icon: 'trash',
+                  title: t('delete'),
+                  disabled,
+                  onClick: () => {
+                    const copy = items.slice();
+                    copy.splice(index, 1);
+                    onChange({ t: 'arr', type: value.type, items: copy });
+                  },
+                }),
+              ),
+            ),
+          );
+        }
+        // Typed object.
+        const fields = value.fields || {};
+        const known = schema && schema.fields ? Object.keys(schema.fields) : [];
+        const names = Object.keys(fields);
+        const ordered = known.filter((name) => names.indexOf(name) !== -1).concat(names.filter((name) => known.indexOf(name) === -1));
+        const collapsed = level > 0 && props.collapsible !== false;
+        const header = h(
+          'div',
+          { className: 'dgc-treeHead' },
+          h('span', { className: 'dgc-tag' }, stripNamespace(value.type) || 'object'),
+          h('span', { className: 'dgc-listRowSlim' }, String(ordered.length) + ' 字段'),
+          props.onEditCurve
+            ? h(Button, {
+                variant: 'ghost',
+                icon: 'curve',
+                title: t('curveEditor'),
+                onClick: () => props.onEditCurve(value, onChange),
+              })
+            : null,
+        );
+        const body = ordered.map((name) => {
+          const childSchema = fieldSchema(schema, name);
+          const child = fields[name];
+          const rowKey = name;
+          const content = h(ValueEditor, {
+            value: child,
+            schema: childSchema,
+            t,
+            depth: level + 1,
+            disabled,
+            collapsible: false,
+            onEditCurve: props.onEditCurve,
+            onChange: (next) => {
+              const copy = deepClone(value);
+              copy.fields = copy.fields || {};
+              copy.fields[name] = next;
+              onChange(copy);
+            },
+          });
+          return h(
+            'div',
+            { key: rowKey, className: 'dgc-field', style: { gridTemplateColumns: '112px minmax(0,1fr)' } },
+            h('span', { className: 'dgc-fieldLabel', title: (childSchema && childSchema.label) || name }, (childSchema && childSchema.label) || name),
+            h('span', { className: 'dgc-fieldBody' }, content),
+          );
+        });
+        if (!collapsed) {
+          const showHeader = level > 0 || !!props.onEditCurve;
+          return h('div', { className: level === 0 ? 'dgc-tree' : 'dgc-tree' }, showHeader ? header : null, body);
+        }
+        return h(
+          'details',
+          { className: 'dgc-tree', open: level <= 1 },
+          h('summary', { className: 'dgc-treeHead', style: { cursor: 'pointer' } }, h(Icon, { name: 'chevron', size: 13 }), h('span', { className: 'dgc-tag' }, stripNamespace(value.type) || 'object'), h('span', { className: 'dgc-listRowSlim' }, String(ordered.length))),
+          body,
+        );
+      }
+
+      // Scalars.
+      if (typeof value === 'number') {
+        if (schema && (schema.format === 'percent' || schema.unit === '%')) {
+          return h(NumberField, { value, disabled, onCommit: onChange });
+        }
+        return h(NumberField, { value, disabled, step: props.step || (schema && schema.step), onCommit: onChange });
+      }
+      if (typeof value === 'boolean') {
+        return h(Checkbox, { checked: value, disabled, onChange });
+      }
+      if (typeof value === 'string') {
+        return h(TextField, { value, disabled, onCommit: onChange });
+      }
+      if (value === null || value === undefined) {
+        return h('span', { className: 'dgc-listRowSlim' }, 'null');
+      }
+      return h('span', { className: 'dgc-listRowSlim' }, describeValue(value));
+    }
+
+    /**
+     * Value to materialise for a catalog field that the parsed element omits
+     * (its injector default). Patching it creates the field in the `.g` object.
+     */
+    function defaultValueForSchema(schema) {
+      if (!schema) return 0;
+      if (schema.default !== undefined) return deepClone(schema.default);
+      switch (schema.type) {
+        case 'int':
+        case 'number':
+        case 'float':
+          return 0;
+        case 'string':
+          return '';
+        case 'boolean':
+        case 'bool':
+          return false;
+        case 'color':
+          return { t: 'obj', type: 'GorgeFramework.ColorArgb', fields: {} };
+        case 'curve':
+          return { t: 'obj', type: 'GorgeFramework.LinearCurve', fields: {} };
+        case 'vector2':
+          return { t: 'obj', type: 'GorgeFramework.Vector2', fields: { x: 0, y: 0 } };
+        default:
+          return makeBlankValue(schema);
+      }
+    }
+
+    /** Blank value for a new array item when the schema has no default. */
+    function makeBlankValue(schema) {
+      if (!schema) return { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { startX: 0, endX: 0 } };
+      if (schema.defaultValue !== undefined) return deepClone(schema.defaultValue);
+      if (schema.kind === 'curve' || schema.type === 'curve') {
+        return { t: 'obj', type: 'GorgeFramework.LinearCurve', fields: { timeStart: 0, valueStart: 0, timeEnd: 1, valueEnd: 0 } };
+      }
+      if (schema.type === 'number') return 0;
+      if (schema.type === 'string') return '';
+      if (schema.type === 'boolean') return false;
+      return { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: {} };
+    }
+
+    // =======================================================================
+    // Curve editor dialog — plot, drag handles, and numeric tree in one modal.
+    // =======================================================================
+
+    /** Walk a value tree and collect draggable handles (as root-relative paths). */
+    function collectHandles(value) {
+      const handles = [];
+
+      /** Recurse with a path prefix relative to the root value. */
+      const walk = (node, path, parentType) => {
+        if (!isTypedValue(node)) return;
+        if (node.t === 'arr') {
+          (node.items || []).forEach((item, index) => walk(item, path.concat(['items', index]), parentType));
+          return;
+        }
+        if (node.t !== 'obj') return;
+        const type = stripNamespace(node.type);
+        const fields = node.fields || {};
+        const fieldPath = (name) => path.concat(['fields', name]);
+
+        if (type === 'Vector2' || type === 'Vector2Int' || type === 'Vector') {
+          if (typeof fields.x === 'number' && typeof fields.y === 'number') {
+            handles.push({ kind: 'point', label: pathLabel(path, parentType), xPath: fieldPath('x'), yPath: fieldPath('y') });
+            return;
+          }
+        }
+        if (type === 'LinearCurve') {
+          handles.push({
+            kind: 'point',
+            label: 'start',
+            xPath: fieldPath('timeStart'),
+            yPath: fieldPath('valueStart'),
+          });
+          handles.push({
+            kind: 'point',
+            label: 'end',
+            xPath: fieldPath('timeEnd'),
+            yPath: fieldPath('valueEnd'),
+          });
+        } else if (type === 'CubicHermiteSpline' || type === 'HermiteSpline') {
+          // The endpoints are nested Vector2s, collected by the generic walk.
+        } else if (type === 'ConstantFunctionCurve' || type === 'ConstantCurve') {
+          if (typeof fields.value === 'number') handles.push({ kind: 'y', label: 'value', yPath: fieldPath('value') });
+        } else if (type === 'FunctionPiece') {
+          if (typeof fields.startX === 'number') handles.push({ kind: 'x', label: 'startX', xPath: fieldPath('startX') });
+          if (typeof fields.endX === 'number') handles.push({ kind: 'x', label: 'endX', xPath: fieldPath('endX') });
+        } else if (type === 'LinearFunctionCurve') {
+          if (typeof fields.k === 'number') handles.push({ kind: 'none', label: 'k=' + formatNum(fields.k) });
+        }
+
+        for (const key of Object.keys(fields)) walk(fields[key], fieldPath(key), type);
+      };
+
+      walk(value, [], 'root');
+      return handles;
+    }
+
+    /** Short label for a nested path (last meaningful segment). */
+    function pathLabel(path, parentType) {
+      for (let i = path.length - 1; i >= 0; i -= 1) {
+        const segment = path[i];
+        if (typeof segment === 'string' && segment !== 'fields' && segment !== 'items') return segment;
+      }
+      return parentType || 'value';
+    }
+
+    /** Read the current [x, y] of a point handle. */
+    function handlePoint(root, handle) {
+      const x = valueAsNumber(getAtPath(root, handle.xPath));
+      const y = valueAsNumber(getAtPath(root, handle.yPath));
+      if (x === null && y === null) return null;
+      return [x === null ? 0 : x, y === null ? 0 : y];
+    }
+
+    /** Apply a drag to a handle, returning the new root value. */
+    function moveHandle(root, handle, x, y) {
+      let next = root;
+      if (handle.xPath && x !== null) next = setAtPath(next, handle.xPath, round(x, 6));
+      if (handle.yPath && y !== null) next = setAtPath(next, handle.yPath, round(y, 6));
+      return next;
+    }
+
+    /** Auto x-range for a curve: union of handles and nested time fields. */
+    function curveRange(value) {
+      const xs = [];
+      const push = (node) => {
+        if (!isTypedValue(node)) return;
+        if (node.t === 'arr') {
+          (node.items || []).forEach(push);
+          return;
+        }
+        if (node.t !== 'obj') return;
+        const fields = node.fields || {};
+        for (const key of ['timeStart', 'timeEnd', 'startX', 'endX']) {
+          const raw = valueAsNumber(fields[key]);
+          if (raw !== null && Number.isFinite(raw)) xs.push(raw);
+        }
+        const pointX = (point) => {
+          if (isTypedValue(point) && point.fields) {
+            const raw = valueAsNumber(point.fields.x);
+            if (raw !== null && Number.isFinite(raw)) xs.push(raw);
+          }
+        };
+        pointX(fields.startPoint);
+        pointX(fields.endPoint);
+        for (const key of Object.keys(fields)) push(fields[key]);
+      };
+      push(value);
+      if (xs.length === 0) return [-1, 1];
+      let lo = Math.min.apply(null, xs);
+      let hi = Math.max.apply(null, xs);
+      if (hi - lo < 1e-6) {
+        lo -= 0.5;
+        hi += 0.5;
+      }
+      const pad = (hi - lo) * 0.12;
+      return [lo - pad, hi + pad];
+    }
+
+    /** Auto y-range from samples plus handle y values. */
+    function curveValueRange(value, x0, x1) {
+      const ys = [];
+      const series = sampleCurveSeries(value, x0, x1, 120);
+      for (const pair of series) ys.push(pair[1]);
+      for (const handle of collectHandles(value)) {
+        if (handle.yPath) {
+          const raw = valueAsNumber(getAtPath(value, handle.yPath));
+          if (raw !== null && Number.isFinite(raw)) ys.push(raw);
+        }
+      }
+      if (ys.length === 0) return [-1, 1];
+      let lo = Math.min.apply(null, ys);
+      let hi = Math.max.apply(null, ys);
+      if (hi - lo < 1e-6) {
+        lo -= 1;
+        hi += 1;
+      }
+      const pad = (hi - lo) * 0.18;
+      return [lo - pad, hi + pad];
+    }
+
+    /**
+     * Modal curve editor. Edits a draft copy; Apply commits one patch op so the
+     * whole dialog interaction is a single undo step.
+     */
+    function CurveDialog(props) {
+      const t = props.t;
+      const [draft, setDraft] = useState(() => deepClone(props.value));
+      const canvasRef = useRef(null);
+      const [hover, setHover] = useState(-1);
+      const dragRef = useRef(null);
+      const boundsRef = useRef(null);
+
+      const handles = useMemo(() => collectHandles(draft), [draft]);
+      const range = useMemo(() => curveRange(draft), [draft]);
+      const valueRange = useMemo(() => curveValueRange(draft, range[0], range[1]), [draft, range]);
+
+      boundsRef.current = { x0: range[0], x1: range[1], y0: valueRange[0], y1: valueRange[1] };
+
+      const paint = useCallback(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = Math.max(80, Math.round(rect.width));
+        const height = Math.max(80, Math.round(rect.height));
+        if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+          canvas.width = Math.round(width * dpr);
+          canvas.height = Math.round(height * dpr);
+        }
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        const bounds = boundsRef.current;
+        const padLeft = 46;
+        const padRight = 16;
+        const padTop = 16;
+        const padBottom = 26;
+        const plotW = Math.max(10, width - padLeft - padRight);
+        const plotH = Math.max(10, height - padTop - padBottom);
+        const toX = (x) => padLeft + ((x - bounds.x0) / (bounds.x1 - bounds.x0)) * plotW;
+        const toY = (y) => padTop + plotH - ((y - bounds.y0) / (bounds.y1 - bounds.y0)) * plotH;
+        const fromX = (px) => bounds.x0 + ((px - padLeft) / plotW) * (bounds.x1 - bounds.x0);
+        const fromY = (py) => bounds.y0 + ((padTop + plotH - py) / plotH) * (bounds.y1 - bounds.y0);
+
+        const labelColor = cssToken('--dsw-alias-label-secondary', '#8b93a7');
+        const lineColor = cssToken('--dsw-alias-border-l1', '#2c3446');
+        const brand = cssToken('--dsw-alias-brand-primary', '#5b8cff');
+
+        // Grid.
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 1;
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.fillStyle = labelColor;
+        for (let i = 0; i <= 4; i += 1) {
+          const gy = padTop + (plotH * i) / 4;
+          ctx.beginPath();
+          ctx.moveTo(padLeft, gy);
+          ctx.lineTo(padLeft + plotW, gy);
+          ctx.stroke();
+          const value = bounds.y1 - ((bounds.y1 - bounds.y0) * i) / 4;
+          ctx.fillText(formatNum(value, 3), 4, gy + 3);
+        }
+        for (let i = 0; i <= 4; i += 1) {
+          const gx = padLeft + (plotW * i) / 4;
+          ctx.beginPath();
+          ctx.moveTo(gx, padTop);
+          ctx.lineTo(gx, padTop + plotH);
+          ctx.stroke();
+          const value = bounds.x0 + ((bounds.x1 - bounds.x0) * i) / 4;
+          ctx.fillText(formatNum(value, 3), gx - 10, height - 8);
+        }
+        // Zero line.
+        if (bounds.y0 < 0 && bounds.y1 > 0) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+          ctx.beginPath();
+          ctx.moveTo(padLeft, toY(0));
+          ctx.lineTo(padLeft + plotW, toY(0));
+          ctx.stroke();
+        }
+
+        // Piece boundaries.
+        const boundaries = [];
+        (function gather(node) {
+          if (!isTypedValue(node)) return;
+          if (node.t === 'arr') {
+            (node.items || []).forEach(gather);
+            return;
+          }
+          if (node.t !== 'obj') return;
+          const type = stripNamespace(node.type);
+          if (type === 'FunctionPiece') {
+            const fields = node.fields || {};
+            for (const key of ['startX', 'endX']) {
+              const raw = valueAsNumber(fields[key]);
+              if (raw !== null && Number.isFinite(raw)) boundaries.push(raw);
+            }
+          }
+          const fields = node.fields || {};
+          for (const key of Object.keys(fields)) gather(fields[key]);
+        })(draft);
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = 'rgba(124,140,255,0.5)';
+        for (const boundary of boundaries) {
+          if (boundary < bounds.x0 || boundary > bounds.x1) continue;
+          const px = toX(boundary);
+          ctx.beginPath();
+          ctx.moveTo(px, padTop);
+          ctx.lineTo(px, padTop + plotH);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+
+        // Curve.
+        const series = sampleCurveSeries(draft, bounds.x0, bounds.x1, Math.max(80, Math.round(plotW)));
+        if (series.length > 1) {
+          ctx.strokeStyle = brand;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          series.forEach(([x, y], index) => {
+            const px = toX(x);
+            const py = toY(y);
+            if (index === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          });
+          ctx.stroke();
+        }
+
+        // Handles.
+        handles.forEach((handle, index) => {
+          let px;
+          let py;
+          if (handle.kind === 'point') {
+            const point = handlePoint(draft, handle);
+            if (!point) return;
+            px = toX(point[0]);
+            py = toY(point[1]);
+          } else if (handle.kind === 'y') {
+            const y = valueAsNumber(getAtPath(draft, handle.yPath));
+            if (y === null) return;
+            px = padLeft + plotW * 0.5;
+            py = toY(y);
+          } else if (handle.kind === 'x') {
+            const x = valueAsNumber(getAtPath(draft, handle.xPath));
+            if (x === null) return;
+            px = toX(x);
+            py = padTop + plotH - 8;
+          } else {
+            return;
+          }
+          const active = index === hover || (dragRef.current && dragRef.current.index === index);
+          ctx.beginPath();
+          ctx.arc(px, py, active ? 6.5 : 5, 0, Math.PI * 2);
+          ctx.fillStyle = active ? '#ffffff' : brand;
+          ctx.fill();
+          ctx.lineWidth = 1.6;
+          ctx.strokeStyle = active ? brand : 'rgba(255,255,255,0.85)';
+          ctx.stroke();
+        });
+      }, [draft, handles, hover]);
+
+      useEffect(() => {
+        paint();
+      }, [paint]);
+
+      useEffect(() => {
+        const onResize = () => paint();
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+      }, [paint]);
+
+      /** Data coordinates from a pointer event. */
+      const pointFromEvent = useCallback((event) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return null;
+        const rect = canvas.getBoundingClientRect();
+        const padLeft = 46;
+        const padRight = 16;
+        const padTop = 16;
+        const padBottom = 26;
+        const plotW = Math.max(10, rect.width - padLeft - padRight);
+        const plotH = Math.max(10, rect.height - padTop - padBottom);
+        // While dragging, keep the bounds captured at pointer-down: otherwise a
+        // handle that changes the curve range would move the axes under the
+        // cursor and the handle would jump.
+        const bounds = (dragRef.current && dragRef.current.bounds) || boundsRef.current;
+        const px = event.clientX - rect.left;
+        const py = event.clientY - rect.top;
+        return {
+          x: (px - padLeft) / plotW,
+          y: (padTop + plotH - py) / plotH,
+          dataX: bounds.x0 + ((px - padLeft) / plotW) * (bounds.x1 - bounds.x0),
+          dataY: bounds.y0 + ((padTop + plotH - py) / plotH) * (bounds.y1 - bounds.y0),
+          plotW,
+          plotH,
+          padLeft,
+          padTop,
+        };
+      }, []);
+
+      /** Closest handle to the pointer, in pixels. */
+      const hitHandle = useCallback(
+        (event) => {
+          const canvas = canvasRef.current;
+          if (!canvas) return -1;
+          const rect = canvas.getBoundingClientRect();
+          const bounds = (dragRef.current && dragRef.current.bounds) || boundsRef.current;
+          const padLeft = 46;
+          const padRight = 16;
+          const padTop = 16;
+          const padBottom = 26;
+          const plotW = Math.max(10, rect.width - padLeft - padRight);
+          const plotH = Math.max(10, rect.height - padTop - padBottom);
+          const toX = (x) => padLeft + ((x - bounds.x0) / (bounds.x1 - bounds.x0)) * plotW;
+          const toY = (y) => padTop + plotH - ((y - bounds.y0) / (bounds.y1 - bounds.y0)) * plotH;
+          let best = -1;
+          let bestDistance = 12 * 12;
+          handles.forEach((handle, index) => {
+            let hx;
+            let hy;
+            if (handle.kind === 'point') {
+              const point = handlePoint(draft, handle);
+              if (!point) return;
+              hx = toX(point[0]);
+              hy = toY(point[1]);
+            } else if (handle.kind === 'y') {
+              const y = valueAsNumber(getAtPath(draft, handle.yPath));
+              if (y === null) return;
+              hx = padLeft + plotW * 0.5;
+              hy = toY(y);
+            } else if (handle.kind === 'x') {
+              const x = valueAsNumber(getAtPath(draft, handle.xPath));
+              if (x === null) return;
+              hx = toX(x);
+              hy = padTop + plotH - 8;
+            } else {
+              return;
+            }
+            const dx = hx - (event.clientX - rect.left);
+            const dy = hy - (event.clientY - rect.top);
+            const distance = dx * dx + dy * dy;
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              best = index;
+            }
+          });
+          return best;
+        },
+        [draft, handles],
+      );
+
+      const onPointerDown = useCallback(
+        (event) => {
+          const index = hitHandle(event);
+          if (index < 0) return;
+          event.preventDefault();
+          const bounds = boundsRef.current;
+          dragRef.current = { index, bounds };
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+          } catch (error) {
+            /* ignore */
+          }
+          setHover(index);
+        },
+        [hitHandle],
+      );
+
+      const onPointerMove = useCallback(
+        (event) => {
+          const drag = dragRef.current;
+          if (!drag) {
+            const index = hitHandle(event);
+            if (index !== hover) setHover(index);
+            return;
+          }
+          const point = pointFromEvent(event);
+          if (!point) return;
+          const handle = handles[drag.index];
+          if (!handle) return;
+          // Snap very small movements to a tenth.
+          const sx = event.shiftKey ? Math.round(point.dataX * 100) / 100 : Math.round(point.dataX * 1000) / 1000;
+          const sy = event.shiftKey ? Math.round(point.dataY * 100) / 100 : Math.round(point.dataY * 1000) / 1000;
+          setDraft((current) => {
+            // Recompute against the CURRENT handle paths but with drag-time bounds frozen.
+            const liveHandles = collectHandles(current);
+            const liveHandle = liveHandles[drag.index];
+            if (!liveHandle) return current;
+            return moveHandle(current, liveHandle, liveHandle.xPath ? sx : null, liveHandle.yPath ? sy : null);
+          });
+        },
+        [handles, hitHandle, hover, pointFromEvent],
+      );
+
+      const onPointerUp = useCallback((event) => {
+        if (dragRef.current) {
+          dragRef.current = null;
+          try {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          } catch (error) {
+            /* ignore */
+          }
+        }
+      }, []);
+
+      const summary = describeValue(draft);
+
+      return h(
+        'div',
+        { className: 'dgc-modalBackdrop', role: 'dialog', 'aria-modal': 'true' },
+        h(
+          'div',
+          { className: 'dgc-modal' },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h(Icon, { name: 'curve' }),
+            h('h3', null, (props.title || t('curveEditor')) + ' · ' + summary),
+            h(Button, { variant: 'ghost', icon: 'reload', title: t('reset'), onClick: () => setDraft(deepClone(props.value)) }),
+            h(Button, { variant: 'ghost', onClick: props.onClose, title: t('close') }, '×'),
+          ),
+          h(
+            'div',
+            { className: 'dgc-modalBody' },
+            h('div', { className: 'dgc-modalCanvas' }, h('canvas', {
+              ref: canvasRef,
+              className: 'dgc-canvas',
+              style: { cursor: hover >= 0 ? 'grab' : 'default' },
+              onPointerDown,
+              onPointerMove,
+              onPointerUp,
+              onPointerCancel: onPointerUp,
+              onPointerLeave: () => {
+                if (!dragRef.current) setHover(-1);
+              },
+            })),
+            h(
+              'div',
+              { className: 'dgc-modalSide' },
+              h('div', { className: 'dgc-sectionTitle' }, t('numeric')),
+              h(ValueEditor, {
+                value: draft,
+                schema: props.schema || null,
+                t,
+                depth: 0,
+                onChange: (next) => setDraft(next),
+              }),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'dgc-modalFoot' },
+            h('span', { className: 'dgc-listRowSlim', style: { flex: '1 1 auto' } }, props.hint || t('dragHint')),
+            h(Button, { onClick: props.onClose }, t('cancel')),
+            h(
+              Button,
+              {
+                variant: 'primary',
+                onClick: () => {
+                  if (props.onApply) props.onApply(draft);
+                  props.onClose();
+                },
+              },
+              t('apply'),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // =======================================================================
+    // Left pane: staff list and element list.
+    // =======================================================================
+
+    /** One staff row with a kind badge and element count. */
+    function StaffRow(props) {
+      const { staff, active, hidden, onSelect, onToggleHidden, t } = props;
+      const kindLabel =
+        staff.kind === 'audio'
+          ? t('staffAudio')
+          : staff.kind === 'storyboard'
+            ? t('staffStoryboard')
+            : staff.kind === 'chart'
+              ? t('staffChart')
+              : t('staffOther');
+      const count = (staff.periods || []).reduce((total, period) => total + (period.elements || []).length, 0);
+      return h(
+        'div',
+        {
+          className: 'dgc-row' + (active ? ' is-active' : ''),
+          onClick: () => onSelect(staff.id),
+          title: staff.file,
+        },
+        h('button', {
+          className: 'dgc-rowBtn',
+          title: hidden ? t('show') : t('hide'),
+          onClick: (event) => {
+            event.stopPropagation();
+            onToggleHidden(staff.id);
+          },
+          style: { opacity: hidden ? 0.35 : 0.75 },
+        }, h(Icon, { name: hidden ? 'mute' : 'volume', size: 13 })),
+        h('span', { className: 'dgc-rowLabel', style: hidden ? { opacity: 0.5 } : undefined }, staff.displayName || staff.className || staff.id),
+        h('span', { className: 'dgc-rowMeta' }, kindLabel + ' · ' + count),
+      );
+    }
+
+    /** The whole left pane. */
+    function LeftPane(props) {
+      const { project, catalog, t, selection, activeStaff, setActiveStaff, hiddenStaffs, toggleStaff, selectElement, seek } = props;
+      const [query, setQuery] = useState('');
+      const [filter, setFilter] = useState('all');
+
+      const staffs = (project && project.staffs) || [];
+      const lanes = useMemo(() => {
+        const names = [];
+        for (const staff of staffs) {
+          for (const period of staff.periods || []) {
+            for (const element of period.elements || []) {
+              if (element.category === 'lane' && element.fields && typeof element.fields.name === 'string' && names.indexOf(element.fields.name) === -1) {
+                names.push(element.fields.name);
+              }
+            }
+          }
+        }
+        return names;
+      }, [staffs]);
+
+      const elements = useMemo(() => {
+        const rows = [];
+        for (const staff of staffs) {
+          if (staff.kind === 'audio') continue;
+          if (activeStaff && staff.id !== activeStaff) continue;
+          for (const period of staff.periods || []) {
+            for (const element of period.elements || []) {
+              if (element.category === 'inner') continue;
+              rows.push({ element, staffId: staff.id, periodId: period.id });
+            }
+          }
+        }
+        rows.sort((a, b) => (a.element.start || 0) - (b.element.start || 0) || String(a.element.id).localeCompare(String(b.element.id)));
+        return rows;
+      }, [staffs, activeStaff]);
+
+      const filtered = useMemo(() => {
+        const needle = query.trim().toLowerCase();
+        return elements.filter((row) => {
+          const category = row.element.category;
+          if (filter === 'notes' && category !== 'note' && category !== 'hold' && category !== 'inner') return false;
+          if (filter === 'lanes' && category !== 'lane') return false;
+          if (filter === 'other' && (category === 'note' || category === 'hold' || category === 'lane' || category === 'inner')) return false;
+          if (!needle) return true;
+          const haystack = [row.element.type, row.element.lane, row.element.id, describeValue(row.element.fields && row.element.fields.name)]
+            .join(' ')
+            .toLowerCase();
+          return haystack.indexOf(needle) !== -1;
+        });
+      }, [elements, filter, query]);
+
+      /** Display list with a 谱表 group header before each staff's elements. */
+      const displayRows = useMemo(() => {
+        if (activeStaff) return filtered.map((row) => Object.assign({ kind: 'row' }, row));
+        const order = new Map(staffs.map((staff, index) => [staff.id, index]));
+        const sorted = filtered
+          .slice()
+          .sort((a, b) => (order.get(a.staffId) || 0) - (order.get(b.staffId) || 0) || (a.element.start || 0) - (b.element.start || 0));
+        const counts = new Map();
+        for (const row of sorted) counts.set(row.staffId, (counts.get(row.staffId) || 0) + 1);
+        const out = [];
+        let lastStaff = null;
+        for (const row of sorted) {
+          if (row.staffId !== lastStaff) {
+            lastStaff = row.staffId;
+            const staff = staffs.find((item) => item.id === row.staffId);
+            out.push({
+              kind: 'header',
+              key: 'header::' + row.staffId,
+              staffId: row.staffId,
+              label: staff ? staff.displayName || staff.className || staff.id : row.staffId,
+              sublabel: staff ? staff.className || '' : '',
+              count: counts.get(row.staffId) || 0,
+            });
+          }
+          out.push(Object.assign({ kind: 'row' }, row));
+        }
+        return out;
+      }, [activeStaff, filtered, staffs]);
+
+
+      return h(
+        'div',
+        { className: 'dgc-side' },
+        h(
+          'div',
+          { className: 'dgc-sideSection is-staffs' },
+          h('div', { className: 'dgc-sideHead' }, h('span', null, t('staffs')), h('span', { className: 'dgc-spacer' }), h('span', { className: 'dgc-listRowSlim' }, String(staffs.length))),
+          h(
+            'div',
+            { className: 'dgc-list' },
+            h(
+              'div',
+              { className: 'dgc-row' + (activeStaff ? '' : ' is-active'), onClick: () => setActiveStaff(null) },
+              h('span', { className: 'dgc-rowLabel' }, t('filterAll')),
+              h('span', { className: 'dgc-rowMeta' }, String(elements.length)),
+            ),
+            staffs.map((staff) =>
+              h(StaffRow, {
+                key: staff.id,
+                staff,
+                active: staff.id === activeStaff,
+                hidden: hiddenStaffs.has(staff.id),
+                onSelect: setActiveStaff,
+                onToggleHidden: toggleStaff,
+                t,
+              }),
+            ),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dgc-sideSection is-elements' },
+          h(
+            'div',
+            { className: 'dgc-sideHead' },
+            h('span', null, t('elements')),
+            h('span', { className: 'dgc-spacer' }),
+            h('span', { className: 'dgc-listRowSlim' }, String(filtered.length) + '/' + String(elements.length)),
+          ),
+          h(
+            'div',
+            { style: { padding: '0 10px 6px', display: 'flex', flexDirection: 'column', gap: 5 } },
+            h('input', {
+              className: 'dgc-input',
+              placeholder: t('search'),
+              value: query,
+              onChange: (event) => setQuery(event.target.value),
+            }),
+            h(
+              'div',
+              { className: 'dgc-chips' },
+              [
+                ['all', t('filterAll')],
+                ['notes', t('filterNotes')],
+                ['lanes', t('filterLanes')],
+                ['other', t('filterOther')],
+              ].map(([value, label]) =>
+                h('button', {
+                  key: value,
+                  className: 'dgc-chip' + (filter === value ? ' is-active' : ''),
+                  onClick: () => setFilter(value),
+                }, label),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'dgc-list' },
+            filtered.length === 0
+              ? h('div', { className: 'dgc-hint' }, t('emptyElementList'))
+              : displayRows.slice(0, 4000).map((row) => {
+                  if (row.kind === 'header') {
+                    // Staff group header for the merged ("全部") element list.
+                    return h(
+                      'div',
+                      { key: row.key, className: 'dgc-groupHead', title: row.staffId },
+                      h(Icon, { name: 'lane', size: 12 }),
+                      h('span', { className: 'dgc-rowLabel' }, row.label),
+                      h('span', { className: 'dgc-spacer' }),
+                      h('span', { className: 'dgc-rowMeta' }, String(row.count)),
+                    );
+                  }
+                  const element = row.element;
+                  const active = selection.indexOf(element.id) !== -1;
+                  const lane = element.lane || (element.fields && typeof element.fields.name === 'string' ? element.fields.name : '');
+                  return h(
+                    'div',
+                    {
+                      key: element.id,
+                      className: 'dgc-row' + (active ? ' is-active' : ''),
+                      onClick: (event) => selectElement(element.id, event.shiftKey || event.metaKey || event.ctrlKey),
+                      onDoubleClick: () => seek(Math.max(0, element.start || 0)),
+                      title: element.type + ' · ' + element.id,
+                    },
+                    h('span', { className: 'dgc-dot', style: { background: elementColor(catalog, element.type) } }),
+                    h('span', { className: 'dgc-rowLabel' }, shortType(element.type)),
+                    lane ? h('span', { className: 'dgc-rowMeta', style: { maxWidth: 86, overflow: 'hidden', textOverflow: 'ellipsis' } }, lane) : null,
+                    h('span', { className: 'dgc-rowMeta', style: { width: 58, textAlign: 'right' } }, formatTime(element.start || 0)),
+                  );
+                }),
+          ),
+        ),
+      );
+    }
+
+    /**
+     * Memoized panes. The transport clock is page state that changes every
+     * animation frame, so without memoisation the whole left list and the
+     * recursive inspector tree would re-render ~60 times a second while
+     * playing. The comparator ignores callback props (cheap closures over
+     * stable setters) and compares the data that actually drives output.
+     */
+    const LeftPaneMemo = React.memo(LeftPane, (prev, next) => {
+      return (
+        prev.project === next.project &&
+        prev.catalog === next.catalog &&
+        prev.selection === next.selection &&
+        prev.activeStaff === next.activeStaff &&
+        prev.hiddenStaffs === next.hiddenStaffs &&
+        prev.t === next.t
+      );
+    });
+
+    // =======================================================================
+    // Inspector: project summary, multi-selection, and one element's fields.
+    // =======================================================================
+
+    /** Editable project metadata (BPM / offset / title) plus counts. */
+    function ProjectPanel(props) {
+      const { project, catalog, t, onEdit } = props;
+      const counts = useMemo(() => {
+        let elements = 0;
+        let periods = 0;
+        for (const staff of project.staffs || []) {
+          periods += (staff.periods || []).length;
+          for (const period of staff.periods || []) elements += (period.elements || []).length;
+        }
+        return { elements, periods, staffs: (project.staffs || []).length };
+      }, [project]);
+      const tempo = project.tempo || { bpm: 120, offset: 0 };
+      return h(
+        'div',
+        null,
+        h('div', { className: 'dgc-sectionTitle' }, t('projectInfo')),
+        h(FieldRow, { label: t('tempo') }, h(NumberField, {
+          value: tempo.bpm,
+          step: 1,
+          onCommit: (bpm) => onEdit([{ op: 'setMeta', tempo: { bpm } }]),
+        })),
+        h(FieldRow, { label: t('offset') }, h(NumberField, {
+          value: tempo.offset,
+          step: 0.1,
+          onCommit: (offset) => onEdit([{ op: 'setMeta', tempo: { offset } }]),
+        })),
+        h(FieldRow, { label: t('duration') }, h('span', { className: 'dgc-mono' }, formatTime(project.duration || 0))),
+        h(FieldRow, { label: t('staffCount') }, h('span', { className: 'dgc-mono' }, String(counts.staffs))),
+        h(FieldRow, { label: t('periodCount') }, h('span', { className: 'dgc-mono' }, String(counts.periods))),
+        h(FieldRow, { label: t('elementCount') }, h('span', { className: 'dgc-mono' }, String(counts.elements))),
+        project.audio ? h(FieldRow, { label: t('audio') }, h('span', { className: 'dgc-mono', style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, project.audio.name || '')) : null,
+        (project.warnings || []).length > 0
+          ? h(
+              'div',
+              null,
+              h('div', { className: 'dgc-sectionTitle' }, t('warnings')),
+              (project.warnings || []).slice(0, 8).map((warning, index) => h('div', { key: index, className: 'dgc-listRowSlim dgc-err' }, warning)),
+            )
+          : null,
+        h('div', { className: 'dgc-sectionTitle' }, t('shortcuts')),
+        h('div', { className: 'dgc-hint', style: { padding: '0 0 4px' } }, t('helpBody')),
+        (project.assets && project.assets.images || []).length > 0
+          ? h(
+              'div',
+              null,
+              h('div', { className: 'dgc-sectionTitle' }, t('assetImages')),
+              (project.assets.images || []).slice(0, 24).map((name, index) => h('div', { key: index, className: 'dgc-listRowSlim dgc-mono' }, name)),
+            )
+          : null,
+      );
+    }
+
+    /** The one-element inspector. */
+    function ElementInspector(props) {
+      const { project, catalog, t, elementId, onEdit, onDelete, onDuplicate, seek } = props;
+      const found = useMemo(() => findElement(project, elementId), [project, elementId]);
+      const curveState = useState(null);
+      const [curveTarget, setCurveTarget] = curveState;
+
+      if (!found) return h('div', { className: 'dgc-hint' }, t('noSelection'));
+
+      const { staff, period, element } = found;
+      const entry = catalogEntry(catalog, element.type);
+      const timing = (entry && entry.timing) || {};
+      const fields = element.fields || {};
+      const schemaFields = (entry && entry.fields) || [];
+      const knownNames = schemaFields.map((field) => field.name);
+      const unknownNames = Object.keys(fields).filter((name) => knownNames.indexOf(name) === -1);
+      const offset = Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+
+      /** Commit one top-level field change. */
+      const patchField = (name, value) => {
+        onEdit([{ op: 'patch', elementId: element.id, path: [name], value }]);
+      };
+
+      // The catalog descriptor decides the timing fields; a field missing from
+      // the parsed element is simply at its injector default (0) and a patch
+      // materialises it.
+      const startField = resolveStartField(catalog, element);
+      const durationField = resolveDurationField(catalog, element);
+      const startValue = startField ? valueAsNumber(fields[startField]) : null;
+      const durationValue = durationField ? valueAsNumber(fields[durationField]) : null;
+
+      const lanes = props.lanes || [];
+      const laneFieldName = timing.lane || 'laneName';
+
+      const fieldRowFor = (name) => {
+        const schema = schemaFields.find((field) => field.name === name) || null;
+        const value = fields[name];
+        if (value === undefined) {
+          // Injector-default field the .g file left implicit: offer to
+          // materialise it so it becomes editable (patching creates it).
+          return h(
+            FieldRow,
+            { key: name, label: (schema && schema.label) || name, title: name },
+            h(
+              Button,
+              { variant: 'ghost', icon: 'plus', title: t('addField'), onClick: () => patchField(name, defaultValueForSchema(schema)) },
+              h('span', { className: 'dgc-listRowSlim' }, t('addField')),
+            ),
+          );
+        }
+        return h(
+          FieldRow,
+          { key: name, label: (schema && schema.label) || name, title: name },
+          h(ValueEditor, {
+            value,
+            schema,
+            t,
+            depth: 0,
+            onChange: (next) => patchField(name, next),
+            onEditCurve: (current, apply) => setCurveTarget({ name, value: current, apply }),
+          }),
+        );
+      };
+
+      return h(
+        'div',
+        null,
+        h(
+          'div',
+          { className: 'dgc-sectionTitle' },
+          h('span', { style: { width: 8, height: 8, borderRadius: 2, background: elementColor(catalog, element.type), display: 'inline-block' } }),
+          h('span', null, shortType(element.type)),
+          h('span', { className: 'dgc-spacer', style: { flex: 1 } }),
+          h('span', { className: 'dgc-listRowSlim', style: { textTransform: 'none', letterSpacing: 0 } }, element.id),
+        ),
+        h(FieldRow, { label: t('editTime') }, h(NumberField, {
+          value: round(offset + (startValue === null ? 0 : startValue), 6),
+          step: 0.05,
+          onCommit: (next) => {
+            if (!startField) return;
+            patchField(startField, round(next - offset, 6));
+          },
+        })),
+        durationField
+          ? h(FieldRow, { label: t('length') }, h(NumberField, {
+              value: durationValue,
+              step: 0.05,
+              onCommit: (next) => patchField(durationField, Math.max(0, round(next, 6))),
+            }))
+          : null,
+        fields[laneFieldName] !== undefined
+          ? h(
+              FieldRow,
+              { label: t('laneName') },
+              h(
+                'div',
+                { style: { display: 'flex', gap: 4, width: '100%' } },
+                h(TextField, { value: valueAsString(fields[laneFieldName]), onCommit: (text) => patchField(laneFieldName, text) }),
+                h('select', {
+                  className: 'dgc-select',
+                  value: '',
+                  onChange: (event) => {
+                    if (event.target.value) patchField(laneFieldName, event.target.value);
+                  },
+                }, h('option', { value: '' }, '…'), lanes.map((lane) => h('option', { key: lane, value: lane }, lane))),
+              ),
+            )
+          : null,
+        h(
+          'div',
+          { className: 'dgc-rowActions', style: { margin: '8px 0 4px' } },
+          h(Button, { icon: 'duplicate', onClick: () => onDuplicate(element.id) }, t('duplicate')),
+          h(Button, { icon: 'trash', variant: 'danger', onClick: () => onDelete([element.id]) }, t('delete')),
+          h(Button, { icon: 'dot', onClick: () => seek(Math.max(0, element.start || 0)) }, t('goto')),
+        ),
+        h('div', { className: 'dgc-sectionTitle' }, t('field')),
+        knownNames.map((name) => fieldRowFor(name)),
+        unknownNames.length > 0
+          ? h(
+              'details',
+              { className: 'dgc-tree', open: false },
+              h('summary', { className: 'dgc-treeHead', style: { cursor: 'pointer' } }, h(Icon, { name: 'chevron', size: 13 }), h('span', null, t('advanced')), h('span', { className: 'dgc-listRowSlim' }, String(unknownNames.length))),
+              h('div', { className: 'dgc-listRowSlim', style: { paddingBottom: 4 } }, t('advancedHint')),
+              unknownNames.map((name) => fieldRowFor(name)),
+            )
+          : null,
+        curveTarget
+          ? h(CurveDialog, {
+              t,
+              title: (curveTarget.name || '') + ' · ' + t('curveEditor'),
+              value: curveTarget.value,
+              schema: (schemaFields.find((field) => field.name === curveTarget.name) || {}).schema || null,
+              onClose: () => setCurveTarget(null),
+              onApply: (next) => curveTarget.apply(next),
+            })
+          : null,
+      );
+    }
+
+    /** Multi-selection summary with the bulk actions that make sense. */
+    function MultiPanel(props) {
+      const { project, catalog, t, selection, onEdit, onDelete, seek, transport } = props;
+      const found = selection.map((id) => ({ id, found: findElement(project, id) })).filter((item) => item.found);
+      return h(
+        'div',
+        null,
+        h('div', { className: 'dgc-sectionTitle' }, t('multiSelection').replace('{count}', String(found.length))),
+        h(
+          'div',
+          { className: 'dgc-list' },
+          found.slice(0, 60).map((item) =>
+            h(
+              'div',
+              { key: item.id, className: 'dgc-row' },
+              h('span', { className: 'dgc-dot', style: { background: elementColor(catalog, item.found.element.type) } }),
+              h('span', { className: 'dgc-rowLabel' }, shortType(item.found.element.type)),
+              h('span', { className: 'dgc-rowMeta' }, formatTime(item.found.element.start || 0)),
+            ),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dgc-rowActions', style: { margin: '8px 0' } },
+          h(Button, {
+            icon: 'dot',
+            onClick: () => {
+              const delta = (transport ? transport.time : 0) - (found[0] ? found[0].found.element.start || 0 : 0);
+              onEdit(
+                found.map((item) => {
+                  const startField = resolveStartField(catalog, item.found.element);
+                  if (!startField) return null;
+                  const current = valueAsNumber(item.found.element.fields[startField]);
+                  if (current === null) return null;
+                  return { op: 'patch', elementId: item.id, path: [startField], value: round(current + delta, 6) };
+                }).filter(Boolean),
+              );
+            },
+          }, t('goto')),
+          h(Button, { icon: 'trash', variant: 'danger', onClick: () => onDelete(selection) }, t('delete')),
+        ),
+      );
+    }
+
+    /** Right pane container. */
+    function InspectorPane(props) {
+      const { project, catalog, t, selection } = props;
+      let body;
+      if (!project) body = h('div', { className: 'dgc-hint' }, t('noProject'));
+      else if (selection.length === 0) body = h(ProjectPanel, props);
+      else if (selection.length === 1) body = h(ElementInspector, Object.assign({ elementId: selection[0] }, props));
+      else body = h(MultiPanel, props);
+      return h(
+        'aside',
+        { className: 'dgc-inspector' },
+        h('div', { className: 'dgc-sideHead' }, h('span', null, t('inspector')), h('span', { className: 'dgc-spacer' })),
+        h('div', { className: 'dgc-inspectorBody' }, body),
+      );
+    }
+
+    /** Memoized inspector (see LeftPaneMemo for why). */
+    const InspectorPaneMemo = React.memo(InspectorPane, (prev, next) => {
+      return (
+        prev.project === next.project &&
+        prev.catalog === next.catalog &&
+        prev.selection === next.selection &&
+        prev.lanes === next.lanes &&
+        prev.t === next.t
+      );
+    });
+
+    // =======================================================================
+    // Transport bar.
+    // =======================================================================
+
+    /** Bottom transport: play/pause, clock, beat, scrubber, rate, follow. */
+    function TransportBar(props) {
+      const { t, transport, project, follow, setFollow, selection } = props;
+      const tempo = (project && project.tempo) || { bpm: 120, offset: 0 };
+      const duration = Math.max(1, transport.duration || (project && project.duration) || 0);
+      const beat = ((transport.time - (tempo.offset || 0)) * (tempo.bpm || 120)) / 60;
+      const rateOptions = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+      return h(
+        'div',
+        { className: 'dgc-transport' },
+        h(
+          Button,
+          {
+            variant: 'primary',
+            icon: transport.playing ? 'pause' : 'play',
+            onClick: () => (transport.playing ? transport.pause() : transport.play()),
+            title: transport.playing ? t('pause') : t('play'),
+          },
+          transport.playing ? t('pause') : t('play'),
+        ),
+        h(Button, { icon: 'rewind', onClick: () => transport.seek(0), title: t('jumpToStart') }),
+        h('div', { className: 'dgc-clock' }, formatTime(transport.time) + ' / ' + formatTime(duration)),
+        h('div', { className: 'dgc-clock', style: { minWidth: 84 } }, t('beat') + ' ' + formatNum(beat, 3)),
+        h(
+          'div',
+          { className: 'dgc-scrub' },
+          h('input', {
+            type: 'range',
+            min: 0,
+            max: 1000,
+            step: 1,
+            value: Math.round((clamp(transport.time / duration, 0, 1)) * 1000),
+            onChange: (event) => transport.seek((Number(event.target.value) / 1000) * duration),
+            'aria-label': t('time'),
+          }),
+        ),
+        h(
+          'label',
+          { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12 } },
+          h('span', { style: { color: 'var(--dsw-alias-label-secondary)' } }, t('rate')),
+          h(
+            'select',
+            {
+              className: 'dgc-select',
+              value: String(transport.rate),
+              onChange: (event) => transport.setRate(Number(event.target.value)),
+            },
+            rateOptions.map((value) => h('option', { key: value, value: String(value) }, value + 'x')),
+          ),
+        ),
+        h(Button, {
+          icon: transport.muted ? 'mute' : 'volume',
+          variant: 'ghost',
+          active: transport.muted,
+          onClick: transport.toggleMute,
+          title: transport.muted ? 'unmute' : 'mute',
+        }),
+        h(Button, {
+          icon: 'grid',
+          variant: follow ? 'primary' : 'ghost',
+          onClick: () => setFollow(!follow),
+          title: t('autoScroll'),
+        }),
+        h('span', { className: 'dgc-status' }, selection.length > 0 ? t('selected') + ': ' + selection.length : ''),
+      );
+    }
+
+    // =======================================================================
+    // Timeline layout model.
+    // =======================================================================
+
+    /** Flatten a staff into absolute-time elements (already derived by the Host). */
+    function staffElements(staff) {
+      const out = [];
+      for (const period of staff.periods || []) {
+        for (const element of period.elements || []) {
+          out.push({ element, period, staff });
+        }
+      }
+      return out;
+    }
+
+    /**
+     * Build the timeline rows: one row per lane (with its notes) plus a misc row
+     * per staff. Rows keep the file order of lane declarations.
+     */
+    function buildRows(project, hiddenStaffs, collapsedStaffs) {
+      const rows = [];
+      if (!project || !Array.isArray(project.staffs)) return rows;
+      for (const staff of project.staffs) {
+        if (staff.kind === 'audio') continue;
+        if (hiddenStaffs && hiddenStaffs.has && hiddenStaffs.has(staff.id)) continue;
+        const laneNames = [];
+        // Several periods of one staff legitimately reuse a lane name (e.g.
+        // DremuStaff2.g has 82 lane elements over 33 names): the row is per
+        // NAME, but every element must stay visible and selectable.
+        const laneElementsByName = new Map();
+        const notesByLane = new Map();
+        const misc = [];
+        for (const item of staffElements(staff)) {
+          const element = item.element;
+          const category = element.category;
+          if (category === 'inner') continue;
+          if (category === 'lane') {
+            const name = element.fields && typeof element.fields.name === 'string' ? element.fields.name : element.id;
+            if (laneNames.indexOf(name) === -1) laneNames.push(name);
+            if (!laneElementsByName.has(name)) laneElementsByName.set(name, []);
+            laneElementsByName.get(name).push(element);
+            continue;
+          }
+          const lane = element.lane;
+          if (lane) {
+            if (!notesByLane.has(lane)) notesByLane.set(lane, []);
+            notesByLane.get(lane).push(element);
+          } else {
+            misc.push(element);
+          }
+        }
+        for (const lane of notesByLane.keys()) {
+          if (laneNames.indexOf(lane) === -1) laneNames.push(lane);
+        }
+        const staffRows = [];
+        for (const lane of laneNames) {
+          const laneElements = (laneElementsByName.get(lane) || []).slice().sort((a, b) => (a.start || 0) - (b.start || 0));
+          staffRows.push({
+            key: staff.id + '::' + lane,
+            staffId: staff.id,
+            staff,
+            lane,
+            laneElement: laneElements[0] || null,
+            laneElements,
+            notes: (notesByLane.get(lane) || []).sort((a, b) => (a.start || 0) - (b.start || 0)),
+          });
+        }
+        if (misc.length > 0) {
+          staffRows.push({
+            key: staff.id + '::__misc',
+            staffId: staff.id,
+            staff,
+            lane: null,
+            laneElement: null,
+            notes: misc.sort((a, b) => (a.start || 0) - (b.start || 0)),
+            misc: true,
+          });
+        }
+        // Group the staff's lanes under one collapsible header so the timeline
+        // reads as "谱表 -> 轨道" instead of repeating the staff name per row.
+        const collapsed = !!(collapsedStaffs && collapsedStaffs.has && collapsedStaffs.has(staff.id));
+        const laneCount = laneNames.length;
+        const noteCount = staffRows.reduce((total, row) => total + row.notes.length, 0);
+        rows.push({
+          kind: 'group',
+          key: staff.id + '::__group',
+          staffId: staff.id,
+          staff,
+          label: staff.displayName || staff.className || staff.id,
+          sublabel: staff.className && staff.className !== (staff.displayName || '') ? staff.className : '',
+          laneCount,
+          noteCount,
+          collapsed,
+        });
+        if (!collapsed) {
+          for (const row of staffRows) rows.push(Object.assign({ kind: 'row' }, row));
+        }
+      }
+      return rows;
+    }
+
+    /** Height of one timeline row (staff headers are shorter than lane rows). */
+    function rowHeight(row) {
+      return row && row.kind === 'group' ? GROUP_H : ROW_H;
+    }
+
+    /** Snap a time to the beat grid. */
+    function snapTime(time, tempo, division, enabled) {
+      if (!enabled || !division) return time;
+      const bpm = tempo && Number.isFinite(tempo.bpm) && tempo.bpm > 0 ? tempo.bpm : 120;
+      const origin = tempo && Number.isFinite(tempo.offset) ? tempo.offset : 0;
+      const secondsPerBeat = 60 / bpm;
+      const step = 1 / division;
+      const beat = (time - origin) / secondsPerBeat;
+      return origin + Math.round(beat / step) * step * secondsPerBeat;
+    }
+
+    /** Resolve one of the placement tools to a catalog element type. */
+    function typeForTool(catalog, tool) {
+      const wanted = { tap: 'DremuTap', drag: 'DremuDrag', hold: 'DremuHold', lane: 'DremuMainLane', guide: 'DremuGuideLane' }[tool];
+      if (!wanted) return null;
+      const entries = (catalog && catalog.elements) || [];
+      const match = entries.find((entry) => shortType(entry.type) === wanted);
+      return match ? match.type : null;
+    }
+
+    /** Build the default field object for a new element of `type`. */
+    function fieldsForNewElement(catalog, type) {
+      const entry = catalogEntry(catalog, type);
+      const fields = {};
+      if (entry && Array.isArray(entry.fields)) {
+        for (const field of entry.fields) {
+          if (field.default === undefined) continue;
+          fields[field.name] = deepClone(field.default);
+        }
+      }
+      if (entry && entry.category === 'lane' && fields.name === undefined) fields.name = 'lane01';
+      if (entry && entry.category !== 'lane' && fields.hitTime === undefined && entry.timing && entry.timing.start) {
+        fields[entry.timing.start] = 0;
+      }
+      return fields;
+    }
+
+    /** Unique lane name inside a staff (optionally avoiding names being added now). */
+    function uniqueLaneName(project, staffId, reserved) {
+      const staff = (project.staffs || []).find((item) => item.id === staffId);
+      const used = reserved instanceof Set ? reserved : new Set();
+      if (staff) {
+        for (const item of staffElements(staff)) {
+          if (item.element.fields && typeof item.element.fields.name === 'string') used.add(item.element.fields.name);
+        }
+      }
+      let index = 1;
+      while (used.has('lane' + String(index).padStart(2, '0'))) index += 1;
+      return 'lane' + String(index).padStart(2, '0');
+    }
+
+    /** ID generator for newly created elements (accepted by the Host). */
+    function makeElementId(prefix) {
+      return 'n' + (prefix ? String(prefix) + '-' : '') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    }
+
+    // =======================================================================
+    // Timeline canvas.
+    // =======================================================================
+
+    /**
+     * The central timeline: beat ruler, waveform strip, lane rows, notes, hold
+     * bodies, selection, grid, playhead and all direct-manipulation gestures.
+     */
+    function TimelineCanvas(props) {
+      const {
+        project,
+        catalog,
+        t,
+        selection,
+        setSelection,
+        tool,
+        setTool,
+        snapOn,
+        setSnapOn,
+        snapDiv,
+        tempo,
+        transport,
+        follow,
+        hiddenStaffs,
+        activeStaff,
+        onEdit,
+        onNotice,
+        wave,
+        waveStatus,
+        audioOffset,
+      } = props;
+
+      const wrapRef = useRef(null);
+      const canvasRef = useRef(null);
+      const [size, setSize] = useState({ w: 0, h: 0 });
+      const [view, setView] = useState({ t0: 0, pps: PPS_DEFAULT, scrollY: 0 });
+      const [hover, setHover] = useState(null);
+      // Which staff groups are collapsed in the timeline gutter.
+      const [collapsedStaffs, setCollapsedStaffs] = useState(() => new Set());
+      const dragRef = useRef(null);
+      const viewRef = useRef(view);
+      const sizeRef = useRef(size);
+      const projectRef = useRef(project);
+      const selectionRef = useRef(selection);
+      const transportRef = useRef(transport);
+      const rowsRef = useRef([]);
+      const layoutRef = useRef({ tops: [], total: 0 });
+      const tempoRef = useRef(tempo);
+      const waveRef = useRef(wave);
+      const hoverRef = useRef(hover);
+      const waveStatusRef = useRef(waveStatus);
+      const audioOffsetRef = useRef(Number.isFinite(audioOffset) ? audioOffset : 0);
+
+      viewRef.current = view;
+      sizeRef.current = size;
+      projectRef.current = project;
+      selectionRef.current = selection;
+      transportRef.current = transport;
+      tempoRef.current = tempo;
+      waveRef.current = wave;
+      hoverRef.current = hover;
+      waveStatusRef.current = waveStatus;
+      audioOffsetRef.current = Number.isFinite(audioOffset) ? audioOffset : 0;
+
+      const rows = useMemo(() => buildRows(project, hiddenStaffs, collapsedStaffs), [project, hiddenStaffs, collapsedStaffs]);
+      rowsRef.current = rows;
+
+      // Variable row heights: staff group headers are shorter than lane rows,
+      // so row tops are cumulative offsets rather than index * ROW_H.
+      const layout = useMemo(() => {
+        const tops = [];
+        let total = 0;
+        for (const row of rows) {
+          tops.push(total);
+          total += rowHeight(row);
+        }
+        return { tops, total };
+      }, [rows]);
+      layoutRef.current = layout;
+
+      const headerH = RULER_H + WAVE_H;
+
+      // --- Resize tracking -------------------------------------------------
+      useEffect(() => {
+        const node = wrapRef.current;
+        if (!node || typeof ResizeObserver !== 'function') {
+          const onResize = () => {
+            if (!wrapRef.current) return;
+            const rect = wrapRef.current.getBoundingClientRect();
+            setSize({ w: Math.round(rect.width), h: Math.round(rect.height) });
+          };
+          onResize();
+          window.addEventListener('resize', onResize);
+          return () => window.removeEventListener('resize', onResize);
+        }
+        const observer = new ResizeObserver(() => {
+          if (!wrapRef.current) return;
+          const rect = wrapRef.current.getBoundingClientRect();
+          setSize({ w: Math.round(rect.width), h: Math.round(rect.height) });
+        });
+        observer.observe(node);
+        return () => observer.disconnect();
+      }, []);
+
+      // Collapsing staff groups shrinks the content: keep the scroll position
+      // inside the new range instead of showing empty rows.
+      useEffect(() => {
+        const maxScroll = Math.max(0, layout.total - Math.max(0, size.h - headerH));
+        setView((previous) => (previous.scrollY > maxScroll ? Object.assign({}, previous, { scrollY: maxScroll }) : previous));
+      }, [layout, size.h, headerH]);
+
+      // --- Geometry helpers -------------------------------------------------
+      const xForTime = useCallback((time, currentView) => GUTTER_W + (time - currentView.t0) * currentView.pps, []);
+      const timeForX = useCallback((x, currentView) => currentView.t0 + (x - GUTTER_W) / currentView.pps, []);
+      const rowTop = useCallback((index, currentView) => {
+        const tops = layoutRef.current.tops;
+        const offset = index >= 0 && index < tops.length ? tops[index] : (index < 0 ? 0 : layoutRef.current.total);
+        return headerH + offset - currentView.scrollY;
+      }, [headerH]);
+
+      /** Row index (into rowsRef.current) at a canvas y, or -1. */
+      const rowIndexAt = useCallback(
+        (y, currentView) => {
+          const currentRows = rowsRef.current;
+          const tops = layoutRef.current.tops;
+          if (currentRows.length === 0) return -1;
+          const target = y - headerH + currentView.scrollY;
+          if (target < 0 || target >= layoutRef.current.total) return -1;
+          // Small row counts (<200), a linear scan keeps this simple and exact.
+          for (let index = currentRows.length - 1; index >= 0; index -= 1) {
+            if (tops[index] <= target) return index;
+          }
+          return -1;
+        },
+        [headerH],
+      );
+
+      /** Bounding box of one element inside its row, in CSS pixels. */
+      const elementBox = useCallback(
+        (element, rowIndex, currentView) => {
+          const top = rowTop(rowIndex, currentView);
+          const centerY = top + ROW_H / 2;
+          const x = xForTime(element.start || 0, currentView);
+          const category = element.category;
+          if (category === 'lane') {
+            const width = Math.max(3, (element.duration || 0) * currentView.pps);
+            return { x, y: top + 4, w: width, h: ROW_H - 8, kind: 'bar' };
+          }
+          if (element.duration !== null && element.duration !== undefined && element.duration > 0) {
+            const width = Math.max(3, element.duration * currentView.pps);
+            return { x, y: centerY - 7, w: width, h: 14, kind: 'bar' };
+          }
+          const radius = NOTE_R + 2;
+          return { x: x - radius, y: centerY - radius, w: radius * 2, h: radius * 2, kind: 'point', cx: x, cy: centerY };
+        },
+        [rowTop, xForTime],
+      );
+
+      /** Time grid: choose a beat step that keeps labels ≥ 64px apart. */
+      const gridStep = useCallback(
+        (currentView) => {
+          const bpm = tempo && tempo.bpm > 0 ? tempo.bpm : 120;
+          const secondsPerBeat = 60 / bpm;
+          let step = 1 / 16;
+          while (step * secondsPerBeat * currentView.pps < 58) {
+            step *= 2;
+            if (step > 64) break;
+          }
+          return step;
+        },
+        [tempo],
+      );
+
+      // --- Painting ---------------------------------------------------------
+      const paint = useCallback(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const currentView = viewRef.current;
+        const currentSize = sizeRef.current;
+        const width = Math.max(60, currentSize.w || canvas.clientWidth || 600);
+        const height = Math.max(60, currentSize.h || canvas.clientHeight || 400);
+        const dpr = window.devicePixelRatio || 1;
+        if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+          canvas.width = Math.round(width * dpr);
+          canvas.height = Math.round(height * dpr);
+        }
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+
+        const bg = cssToken('--dsw-alias-bg-base', '#10131a');
+        const layerOne = cssToken('--dsw-alias-bg-layer-1', '#171b24');
+        const layerTwo = cssToken('--dsw-alias-bg-layer-2', '#1e2330');
+        const border = cssToken('--dsw-alias-border-l1', '#2b3244');
+        const labelPrimary = cssToken('--dsw-alias-label-primary', '#eef1f7');
+        const labelSecondary = cssToken('--dsw-alias-label-secondary', '#8b93a7');
+        const brand = cssToken('--dsw-alias-brand-primary', '#5b8cff');
+
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, width, height);
+        const timeLeft = GUTTER_W;
+        const timeWidth = Math.max(10, width - GUTTER_W);
+
+        // Ruler background.
+        ctx.fillStyle = layerOne;
+        ctx.fillRect(0, 0, width, headerH);
+        ctx.fillStyle = layerTwo;
+        ctx.fillRect(0, 0, GUTTER_W, headerH);
+
+        // Beat grid + labels.
+        const step = gridStep(currentView);
+        const bpm = tempo && tempo.bpm > 0 ? tempo.bpm : 120;
+        const secondsPerBeat = 60 / bpm;
+        const origin = tempo && Number.isFinite(tempo.offset) ? tempo.offset : 0;
+        const totalBeats = (currentView.t0 + timeWidth / currentView.pps - origin) / secondsPerBeat;
+        const firstBeat = Math.floor(((currentView.t0 - origin) / secondsPerBeat) / step) * step;
+        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.textBaseline = 'middle';
+        for (let beat = firstBeat; beat <= totalBeats + step; beat += step) {
+          const time = origin + beat * secondsPerBeat;
+          const x = xForTime(time, currentView);
+          if (x < timeLeft - 1 || x > width) continue;
+          const isBar = Math.abs(beat - Math.round(beat)) < 1e-9;
+          const isBeat = Math.abs(beat - Math.round(beat)) < 1e-9;
+          ctx.strokeStyle = isBeat ? border : 'rgba(120,130,150,0.16)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(x) + 0.5, RULER_H);
+          ctx.lineTo(Math.round(x) + 0.5, height);
+          ctx.stroke();
+          // Beat label in the ruler.
+          if (isBar && (Math.abs(beat % 4) < 1e-9 || currentView.pps > 90)) {
+            ctx.fillStyle = labelSecondary;
+            ctx.fillText('♪' + formatNum(beat, 0), x + 3, RULER_H / 2);
+          }
+        }
+
+        // Seconds labels along the ruler top (dense enough at any zoom).
+        const secondsStep = (() => {
+          const candidates = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120];
+          for (const candidate of candidates) if (candidate * currentView.pps >= 72) return candidate;
+          return 240;
+        })();
+        const firstSecond = Math.floor(currentView.t0 / secondsStep) * secondsStep;
+        for (let second = firstSecond; second <= currentView.t0 + timeWidth / currentView.pps + secondsStep; second += secondsStep) {
+          const x = xForTime(second, currentView);
+          if (x < timeLeft || x > width) continue;
+          ctx.fillStyle = labelPrimary;
+          ctx.fillText(formatTime(second), x + 3, 8);
+          ctx.strokeStyle = border;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(x) + 0.5, 0);
+          ctx.lineTo(Math.round(x) + 0.5, RULER_H);
+          ctx.stroke();
+        }
+
+        // Waveform strip.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(timeLeft, RULER_H, timeWidth, WAVE_H);
+        ctx.clip();
+        const currentWave = waveRef.current;
+        if (currentWave && currentWave.peaks && currentWave.peaks.length > 0) {
+          const peaks = currentWave.peaks;
+          const bins = peaks.length;
+          const duration = currentWave.duration || 0;
+          const midY = RULER_H + WAVE_H / 2;
+          const amplitude = WAVE_H / 2 - 4;
+          ctx.fillStyle = 'rgba(124,140,255,0.34)';
+          for (let px = 0; px < timeWidth; px += 1) {
+            const time = timeForX(timeLeft + px, currentView) - audioOffsetRef.current;
+            if (duration <= 0 || time < 0) continue;
+            const bin = Math.floor((time / duration) * bins);
+            if (bin < 0 || bin >= bins) continue;
+            const peak = peaks[bin];
+            const h2 = Math.max(0.5, peak * amplitude);
+            ctx.fillRect(timeLeft + px, midY - h2, 1, h2 * 2);
+          }
+        } else {
+          ctx.fillStyle = labelSecondary;
+          ctx.font = '11px sans-serif';
+          ctx.fillText(
+            waveStatusRef.current === 'loading' ? t('waveLoading') : waveStatusRef.current === 'error' ? t('waveUnavailable') : t('audioMissing'),
+            timeLeft + 10,
+            RULER_H + WAVE_H / 2,
+          );
+        }
+        ctx.restore();
+
+        ctx.strokeStyle = border;
+        ctx.beginPath();
+        ctx.moveTo(0, headerH + 0.5);
+        ctx.lineTo(width, headerH + 0.5);
+        ctx.stroke();
+
+        // Rows.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, headerH, width, height - headerH);
+        ctx.clip();
+        const currentRows = rowsRef.current;
+        const drag = dragRef.current;
+        const selectedIds = new Set(selectionRef.current);
+        currentRows.forEach((row, rowIndex) => {
+          const rowH = rowHeight(row);
+          const top = rowTop(rowIndex, currentView);
+          if (top > height || top + rowH < headerH) return;
+          const activeFocus = activeStaff && row.staffId === activeStaff;
+
+          // ---- Staff (谱表) group header -------------------------------
+          if (row && row.kind === 'group') {
+            const hovered = hoverRef.current && hoverRef.current.rowIndex === rowIndex;
+            ctx.fillStyle = 'rgba(255,255,255,0.05)';
+            ctx.fillRect(0, top, width, rowH);
+            ctx.fillStyle = 'rgba(255,255,255,0.09)';
+            ctx.fillRect(0, top, GUTTER_W, rowH);
+            if (activeFocus) {
+              ctx.fillStyle = 'rgba(91,140,255,0.16)';
+              ctx.fillRect(0, top, width, rowH);
+            } else if (hovered) {
+              ctx.fillStyle = 'rgba(255,255,255,0.04)';
+              ctx.fillRect(0, top, width, rowH);
+            }
+            ctx.strokeStyle = 'rgba(170,180,200,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, Math.round(top) + 0.5);
+            ctx.lineTo(width, Math.round(top) + 0.5);
+            ctx.stroke();
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(0, top, width, rowH);
+            ctx.clip();
+            ctx.textBaseline = 'middle';
+            // Collapse/expand chevron.
+            const cx = 13;
+            const cy = top + rowH / 2;
+            ctx.fillStyle = labelSecondary;
+            ctx.beginPath();
+            if (row.collapsed) {
+              ctx.moveTo(cx - 3, cy - 4.5);
+              ctx.lineTo(cx + 3.5, cy);
+              ctx.lineTo(cx - 3, cy + 4.5);
+            } else {
+              ctx.moveTo(cx - 4.5, cy - 2.5);
+              ctx.lineTo(cx + 4.5, cy - 2.5);
+              ctx.lineTo(cx, cy + 3.5);
+            }
+            ctx.closePath();
+            ctx.fill();
+            // Name + class name share the gutter with a hard pixel budget, so
+            // they are ellipsized instead of running into each other or into
+            // the time area.
+            const nameX = 24;
+            const nameBudget = GUTTER_W - 6 - nameX;
+            ctx.fillStyle = labelPrimary;
+            ctx.font = '600 12px sans-serif';
+            const groupName = fitText(ctx, row.label || row.staffId, nameBudget);
+            ctx.fillText(groupName, nameX, cy);
+            const groupNameWidth = ctx.measureText(groupName).width;
+            if (row.sublabel) {
+              const subX = nameX + groupNameWidth + 7;
+              const subBudget = GUTTER_W - 6 - subX;
+              if (subBudget >= 28) {
+                ctx.fillStyle = labelSecondary;
+                ctx.font = '10px sans-serif';
+                ctx.fillText(fitText(ctx, row.sublabel, subBudget), subX, cy + 0.5);
+              }
+            }
+            ctx.restore();
+            // Counts live in the time column (header band only), never over the
+            // staff name.
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(GUTTER_W, top, Math.max(0, width - GUTTER_W), rowH);
+            ctx.clip();
+            ctx.fillStyle = labelSecondary;
+            ctx.font = '9.5px sans-serif';
+            ctx.textBaseline = 'middle';
+            const countsText = t('lanes') + ' ' + row.laneCount + ' · ' + t('notes') + ' ' + row.noteCount;
+            ctx.fillText(fitText(ctx, countsText, width - GUTTER_W - 20), GUTTER_W + 10, cy);
+            ctx.restore();
+            return;
+          }
+
+          // ---- Lane row -----------------------------------------------
+          const stripe = rowIndex % 2 === 0;
+          ctx.fillStyle = stripe ? 'rgba(255,255,255,0.018)' : 'rgba(0,0,0,0.06)';
+          ctx.fillRect(0, top, width, rowH);
+          if (activeFocus) {
+            ctx.fillStyle = 'rgba(91,140,255,0.06)';
+            ctx.fillRect(0, top, width, rowH);
+          }
+          if (hoverRef.current && hoverRef.current.rowIndex === rowIndex) {
+            ctx.fillStyle = 'rgba(255,255,255,0.035)';
+            ctx.fillRect(0, top, width, rowH);
+          }
+          ctx.strokeStyle = 'rgba(120,130,150,0.12)';
+          ctx.beginPath();
+          ctx.moveTo(0, Math.round(top + rowH) + 0.5);
+          ctx.lineTo(width, Math.round(top + rowH) + 0.5);
+          ctx.stroke();
+
+          // Gutter label: a type dot plus the lane name (the staff name lives
+          // in the group header above).
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, top, GUTTER_W, rowH);
+          ctx.clip();
+          ctx.textBaseline = 'middle';
+          const firstLaneElement = (row.laneElements && row.laneElements[0]) || row.laneElement || null;
+          const rowColor = firstLaneElement ? elementColor(catalog, firstLaneElement.type) : 'rgba(150,160,180,0.55)';
+          ctx.fillStyle = rowColor;
+          ctx.beginPath();
+          ctx.arc(12, top + rowH / 2, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = labelPrimary;
+          ctx.font = '11.5px sans-serif';
+          const laneLabel = row.misc ? t('miscRow') : row.lane || t('laneOrphan');
+          ctx.fillText(fitText(ctx, laneLabel, GUTTER_W - 22 - 8), 22, top + rowH / 2);
+          ctx.restore();
+
+          // Lane bodies (every lane element that carries this row's name).
+          const laneElementsOnRow = row.laneElements || (row.laneElement ? [row.laneElement] : []);
+          for (let laneIndex = 0; laneIndex < laneElementsOnRow.length; laneIndex += 1) {
+            const laneElement = laneElementsOnRow[laneIndex];
+            const durationValue = Number.isFinite(laneElement.duration) ? laneElement.duration : null;
+            const laneStart = laneElement.start || 0;
+            const laneEnd = durationValue === null ? laneStart + 0.05 : laneStart + durationValue;
+            const x0 = Math.max(timeLeft, xForTime(laneStart, currentView));
+            const x1 = Math.min(width, xForTime(laneEnd, currentView));
+            if (x1 <= x0) continue;
+            const color = elementColor(catalog, laneElement.type);
+            ctx.fillStyle = color + (laneIndex === 0 ? '22' : '14');
+            ctx.fillRect(x0, top + 3, x1 - x0, rowH - 6);
+            ctx.strokeStyle = color + '66';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x0 + 0.5, top + 3.5, Math.max(0, x1 - x0 - 1), rowH - 7);
+            if (selectedIds.has(laneElement.id)) {
+              ctx.strokeStyle = '#ffffff';
+              ctx.lineWidth = 2;
+              ctx.strokeRect(x0 + 1, top + 4, Math.max(0, x1 - x0 - 2), rowH - 8);
+            }
+            // Type label lives INSIDE its bar: clipped to the bar rect and
+            // ellipsized to the bar width, so a short bar never spills text over
+            // its neighbours (most Dremu lanes are ~50 px wide at 1x zoom).
+            if (laneIndex === 0) {
+              const barWidth = x1 - x0;
+              const labelBudget = barWidth - 12;
+              // Below ~60 px there is no room for anything readable: the bar's
+              // colour + the gutter row already identify it, and the hover
+              // tooltip shows the type, so draw nothing rather than noise.
+              if (labelBudget >= 48) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(x0, top + 3, barWidth, rowH - 6);
+                ctx.clip();
+                ctx.fillStyle = color;
+                ctx.font = '10.5px sans-serif';
+                ctx.textBaseline = 'middle';
+                const label =
+                  laneElementsOnRow.length > 1
+                    ? shortType(laneElement.type) + ' ×' + laneElementsOnRow.length
+                    : shortType(laneElement.type);
+                ctx.fillText(fitText(ctx, label, labelBudget), x0 + 5, top + rowH / 2);
+                ctx.restore();
+              }
+            }
+          }
+
+          // Elements on this row.
+          const visibleFrom = currentView.t0 - 4;
+          const visibleTo = currentView.t0 + timeWidth / currentView.pps + 4;
+          for (const element of row.notes) {
+            let start = element.start || 0;
+            let duration = element.duration;
+            const isSelected = selectedIds.has(element.id);
+            const dragged = drag && drag.mode === 'move' && drag.ids && drag.ids.indexOf(element.id) !== -1;
+            const resized = drag && drag.mode === 'resize' && drag.ids && drag.ids.indexOf(element.id) !== -1;
+            if (dragged) start += drag.delta;
+            if (resized) duration = Math.max(0, (duration || 0) + drag.delta);
+            if (start > visibleTo || start + (duration || 0) < visibleFrom) continue;
+            const color = elementColor(catalog, element.type);
+            const category = element.category;
+            const centerY = top + rowH / 2;
+            const x = xForTime(start, currentView);
+            if (duration !== null && duration !== undefined && duration > 0) {
+              // Hold body / timed block.
+              const width = Math.max(2, duration * currentView.pps);
+              ctx.fillStyle = color + 'cc';
+              ctx.fillRect(x, centerY - 6, width, 12);
+              ctx.fillStyle = 'rgba(0,0,0,0.32)';
+              ctx.fillRect(x, centerY - 6, Math.min(width, 3), 12);
+              if (category === 'hold' && Array.isArray(element.fields && element.fields.innerNotes ? element.fields.innerNotes.items : null)) {
+                for (const inner of element.fields.innerNotes.items) {
+                  const innerStart = valueAsNumber(inner && inner.fields ? inner.fields.hitTime : null);
+                  if (innerStart === null) continue;
+                  // Inner notes are relative to the hold start.
+                  const ix2 = xForTime(start + innerStart, currentView);
+                  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+                  ctx.fillRect(ix2 - 1, centerY - 6, 2, 12);
+                }
+              }
+              if (isSelected) {
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x - 1, centerY - 7, width + 2, 14);
+              }
+              if (drag && drag.mode === 'resize' && drag.primaryId === element.id) {
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(x + width - 2, centerY - 8, 4, 16);
+              }
+            } else {
+              // Instant note marker.
+              const radius = NOTE_R;
+              ctx.beginPath();
+              if (category === 'hold') {
+                ctx.arc(x, centerY, radius, 0, Math.PI * 2);
+              } else if (shortType(element.type).toLowerCase().indexOf('drag') !== -1) {
+                ctx.moveTo(x - radius, centerY - radius);
+                ctx.lineTo(x, centerY);
+                ctx.lineTo(x - radius, centerY + radius);
+                ctx.closePath();
+              } else {
+                ctx.moveTo(x, centerY - radius);
+                ctx.lineTo(x + radius, centerY);
+                ctx.lineTo(x, centerY + radius);
+                ctx.lineTo(x - radius, centerY);
+                ctx.closePath();
+              }
+              ctx.fillStyle = color;
+              ctx.fill();
+              ctx.lineWidth = isSelected ? 2 : 1;
+              ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.42)';
+              ctx.stroke();
+            }
+          }
+        });
+        ctx.restore();
+
+        // Gutter divider.
+        ctx.strokeStyle = border;
+        ctx.beginPath();
+        ctx.moveTo(GUTTER_W + 0.5, 0);
+        ctx.lineTo(GUTTER_W + 0.5, height);
+        ctx.stroke();
+
+        // Playhead.
+        const playheadX = xForTime(transportRef.current.time, currentView);
+        if (playheadX >= timeLeft - 1 && playheadX <= width) {
+          ctx.strokeStyle = '#ff5f7a';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(playheadX, 0);
+          ctx.lineTo(playheadX, height);
+          ctx.stroke();
+          ctx.fillStyle = '#ff5f7a';
+          ctx.beginPath();
+          ctx.moveTo(playheadX - 5, 0);
+          ctx.lineTo(playheadX + 5, 0);
+          ctx.lineTo(playheadX, 8);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        // Box selection overlay.
+        if (drag && drag.mode === 'box' && drag.box) {
+          const box = drag.box;
+          ctx.fillStyle = 'rgba(91,140,255,0.16)';
+          ctx.strokeStyle = brand;
+          ctx.lineWidth = 1;
+          const bx = Math.min(box.x0, box.x1);
+          const by = Math.min(box.y0, box.y1);
+          const bw = Math.abs(box.x1 - box.x0);
+          const bh = Math.abs(box.y1 - box.y0);
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
+        }
+
+        // Hover tooltip for the element under the pointer.
+        if (hoverRef.current && hoverRef.current.element) {
+          const element = hoverRef.current.element;
+          const text = shortType(element.type) + ' · ' + formatTime(element.start || 0) + (element.lane ? ' · ' + element.lane : '');
+          ctx.font = '11px sans-serif';
+          const textWidth = ctx.measureText(text).width + 12;
+          let bx = hoverRef.current.x + 10;
+          if (bx + textWidth > width - 6) bx = hoverRef.current.x - textWidth - 10;
+          const by = clamp(hoverRef.current.y - 22, 2, height - 24);
+          ctx.fillStyle = 'rgba(0,0,0,0.78)';
+          ctx.fillRect(bx, by, textWidth, 18);
+          ctx.fillStyle = '#ffffff';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(text, bx + 6, by + 9);
+        }
+
+        // Empty-state hint.
+        if (currentRows.length === 0) {
+          ctx.fillStyle = labelSecondary;
+          ctx.font = '12px sans-serif';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(t('timelineEmpty'), GUTTER_W + 16, headerH + 30);
+        }
+      }, [activeStaff, catalog, gridStep, headerH, rowTop, t, timeForX, xForTime]);
+
+      // Redraw on any relevant change.
+      useEffect(() => {
+        paint();
+      }, [paint, view, size, rows, selection, hover, project, wave, waveStatus, follow]);
+
+      // Playhead animation while playing (no React re-render per frame).
+      useEffect(() => {
+        if (!transport.playing) {
+          paint();
+          return undefined;
+        }
+        let frame = 0;
+        const loop = () => {
+          paint();
+          if (follow) {
+            const currentView = viewRef.current;
+            const currentSize = sizeRef.current;
+            const time = transportRef.current.time;
+            const visibleFrom = currentView.t0;
+            const visibleTo = currentView.t0 + Math.max(1, currentSize.w - GUTTER_W) / currentView.pps;
+            if (time < visibleFrom || time > visibleTo - 0.02) {
+              setView((previous) => Object.assign({}, previous, { t0: Math.max(0, time - 0.15 * (visibleTo - visibleFrom)) }));
+            } else {
+              paint();
+            }
+          }
+          frame = requestAnimationFrame(loop);
+        };
+        frame = requestAnimationFrame(loop);
+        return () => {
+          if (frame) cancelAnimationFrame(frame);
+        };
+      }, [transport.playing, follow, paint]);
+
+      // --- Pointer/hit helpers ---------------------------------------------
+      const localPoint = useCallback((event) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return { x: 0, y: 0 };
+        const rect = canvas.getBoundingClientRect();
+        return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      }, []);
+
+      /** Element at a canvas point (rows area only). */
+      const hitTest = useCallback(
+        (point) => {
+          const currentView = viewRef.current;
+          const currentRows = rowsRef.current;
+          if (point.y < headerH) return null;
+          const rowIndex = rowIndexAt(point.y, currentView);
+          if (rowIndex < 0 || rowIndex >= currentRows.length) return null;
+          const row = currentRows[rowIndex];
+          if (row.kind === 'group') return { row, rowIndex, element: null, group: true };
+          if (point.x < GUTTER_W) return { row, rowIndex, element: null };
+          // Search from the right so later elements win overlaps.
+          for (let i = row.notes.length - 1; i >= 0; i -= 1) {
+            const element = row.notes[i];
+            const box = elementBox(element, rowIndex, currentView);
+            if (point.x >= box.x - 2 && point.x <= box.x + box.w + 2 && point.y >= box.y - 2 && point.y <= box.y + box.h + 2) {
+              return { row, rowIndex, element, box };
+            }
+          }
+          const time = timeForX(point.x, currentView);
+          const laneElementsOnRow = row.laneElements || (row.laneElement ? [row.laneElement] : []);
+          for (let i = laneElementsOnRow.length - 1; i >= 0; i -= 1) {
+            const laneElement = laneElementsOnRow[i];
+            const laneStart = laneElement.start || 0;
+            const durationValue = Number.isFinite(laneElement.duration) ? laneElement.duration : null;
+            const laneEnd = durationValue === null ? laneStart + 0.05 : laneStart + durationValue;
+            if (time >= laneStart - 0.02 && time <= laneEnd + 0.02) {
+              return { row, rowIndex, element: laneElement, lane: true, box: elementBox(laneElement, rowIndex, currentView) };
+            }
+          }
+          return { row, rowIndex, element: null };
+        },
+        [elementBox, headerH, rowIndexAt, timeForX],
+      );
+
+      /** Start a move of the current selection. */
+      const beginMove = useCallback(
+        (point, hit, additive) => {
+          const id = hit.element.id;
+          let ids;
+          if (additive) ids = selection.indexOf(id) === -1 ? Array.from(new Set(selection.concat([id]))) : selection;
+          else ids = selection.indexOf(id) !== -1 ? selection : [id];
+          setSelection(ids);
+          const primary = hit.element;
+          dragRef.current = {
+            mode: 'move',
+            ids,
+            primaryId: primary.id,
+            primaryStart: primary.start || 0,
+            delta: 0,
+            startX: point.x,
+            startY: point.y,
+            // Time at pointer-down: converting the pointer through timeForX on
+            // every move keeps the drag stable even if the zoom changed.
+            anchorTime: timeForX(point.x, viewRef.current),
+            moved: false,
+          };
+        },
+        [selection, setSelection, timeForX],
+      );
+
+      /** Start a resize when grabbing the right edge of a timed element. */
+      const beginResize = useCallback((point, hit) => {
+        setSelection([hit.element.id]);
+        dragRef.current = {
+          mode: 'resize',
+          ids: [hit.element.id],
+          primaryId: hit.element.id,
+          primaryStart: hit.element.start || 0,
+          primaryDuration: hit.element.duration || 0,
+          delta: 0,
+          startX: point.x,
+          startY: point.y,
+          anchorTime: timeForX(point.x, viewRef.current),
+          moved: false,
+        };
+      }, [setSelection, timeForX]);
+
+      const onPointerDown = useCallback(
+        (event) => {
+          if (event.button !== 0 && event.button !== 1) return;
+          const point = localPoint(event);
+          const currentView = viewRef.current;
+          canvasRef.current && canvasRef.current.focus && canvasRef.current.focus();
+          // Capture immediately: scrubbing and panning must survive the pointer
+          // leaving the canvas.
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+          } catch (error) {
+            /* ignore */
+          }
+          if (event.button === 1 || event.altKey) {
+            dragRef.current = { mode: 'pan', startX: point.x, startY: point.y, t0: currentView.t0, scrollY: currentView.scrollY };
+            event.preventDefault();
+            return;
+          }
+          if (point.y < headerH) {
+            // Scrub.
+            dragRef.current = { mode: 'scrub', startX: point.x, startY: point.y };
+            transport.seek(Math.max(0, timeForX(point.x, currentView)));
+            event.preventDefault();
+            return;
+          }
+          const hit = hitTest(point);
+          if (hit && hit.group) {
+            // Clicking a 谱表 header collapses/expands its lanes.
+            const staffId = hit.row.staffId;
+            setCollapsedStaffs((current) => {
+              const next = new Set(current);
+              if (next.has(staffId)) next.delete(staffId);
+              else next.add(staffId);
+              return next;
+            });
+            setHover(null);
+            return;
+          }
+          if (hit && hit.element) {
+            const box = hit.box || elementBox(hit.element, hit.rowIndex, currentView);
+            // Only a real right-edge handle resizes: a narrow element must stay
+            // draggable, so the handle needs ~6 px and the box ~16 px.
+            const boxWidth = box ? box.w : 0;
+            const handleSize = Math.min(6, Math.max(3, boxWidth / 3));
+            const nearRightEdge = hit.element.duration > 0 && boxWidth >= 16 && point.x >= box.x + boxWidth - handleSize;
+            if (nearRightEdge) {
+              beginResize(point, hit);
+            } else {
+              beginMove(point, hit, event.shiftKey || event.metaKey || event.ctrlKey);
+            }
+          } else {
+            if (!event.shiftKey && !event.metaKey && !event.ctrlKey) setSelection([]);
+            dragRef.current = {
+              mode: 'box',
+              box: { x0: point.x, y0: point.y, x1: point.x, y1: point.y },
+              additive: event.shiftKey || event.metaKey || event.ctrlKey,
+              startX: point.x,
+              startY: point.y,
+              moved: false,
+            };
+          }
+        },
+        [beginMove, beginResize, elementBox, headerH, hitTest, localPoint, setSelection, timeForX, transport],
+      );
+
+      const onPointerMove = useCallback(
+        (event) => {
+          const point = localPoint(event);
+          const drag = dragRef.current;
+          const currentView = viewRef.current;
+          if (!drag) {
+            const hit = hitTest(point);
+            const next =
+              hit && hit.element
+                ? { rowIndex: hit.rowIndex, element: hit.element, x: point.x, y: point.y, lane: hit.lane }
+                : hit
+                  ? { rowIndex: hit.rowIndex, element: null }
+                  : null;
+            const currentId = hover && hover.element ? hover.element.id : null;
+            const nextId = next && next.element ? next.element.id : null;
+            const currentRow = hover ? hover.rowIndex : -1;
+            const nextRow = next ? next.rowIndex : -1;
+            if (currentId !== nextId || currentRow !== nextRow) setHover(next);
+            return;
+          }
+          if (drag.mode === 'scrub') {
+            transport.seek(Math.max(0, timeForX(point.x, currentView)));
+            return;
+          }
+          if (drag.mode === 'pan') {
+            setView((previous) =>
+              Object.assign({}, previous, {
+                t0: Math.max(0, drag.t0 - (point.x - drag.startX) / previous.pps),
+                scrollY: Math.max(0, drag.scrollY - (point.y - drag.startY)),
+              }),
+            );
+            return;
+          }
+          if (drag.mode === 'box') {
+            drag.box.x1 = point.x;
+            drag.box.y1 = point.y;
+            drag.moved = drag.moved || Math.abs(point.x - drag.startX) > 3 || Math.abs(point.y - drag.startY) > 3;
+            paint();
+            return;
+          }
+          const deltaX = point.x - drag.startX;
+          const deltaTime = timeForX(point.x, currentView) - (drag.anchorTime === undefined ? timeForX(drag.startX, currentView) : drag.anchorTime);
+          if (Math.abs(deltaX) > 2) drag.moved = true;
+          if (drag.mode === 'move') {
+            const target = snapTime(drag.primaryStart + deltaTime, tempoRef.current, snapDiv, snapOn);
+            drag.delta = target - drag.primaryStart;
+            paint();
+            return;
+          }
+          if (drag.mode === 'resize') {
+            const targetEnd = snapTime(drag.primaryStart + drag.primaryDuration + deltaTime, tempoRef.current, snapDiv, snapOn);
+            drag.delta = Math.max(-drag.primaryDuration, targetEnd - (drag.primaryStart + drag.primaryDuration));
+            paint();
+          }
+        },
+        [hitTest, hover, localPoint, paint, snapDiv, snapOn, timeForX, transport],
+      );
+
+      const onPointerUp = useCallback(
+        (event) => {
+          const drag = dragRef.current;
+          dragRef.current = null;
+          if (!drag) return;
+          try {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          } catch (error) {
+            /* ignore */
+          }
+          const currentView = viewRef.current;
+          if (drag.mode === 'box') {
+            const box = drag.box;
+            const currentRows = rowsRef.current;
+            const ids = [];
+            currentRows.forEach((row, rowIndex) => {
+              if (row.kind === 'group') return;
+              const rowH = rowHeight(row);
+              const top = headerH + (layoutRef.current.tops[rowIndex] || 0) - currentView.scrollY;
+              if (top + rowH < Math.min(box.y0, box.y1) || top > Math.max(box.y0, box.y1)) return;
+              const minX = Math.min(box.x0, box.x1);
+              const maxX = Math.max(box.x0, box.x1);
+              for (const element of row.notes) {
+                const elementXBox = elementBox(element, rowIndex, currentView);
+                if (elementXBox.x + elementXBox.w < minX || elementXBox.x > maxX) continue;
+                ids.push(element.id);
+              }
+              if (row.laneElement) {
+                const laneBox = elementBox(row.laneElement, rowIndex, currentView);
+                if (laneBox.x + laneBox.w >= minX && laneBox.x <= maxX) ids.push(row.laneElement.id);
+              }
+            });
+            if (ids.length > 0) {
+              setSelection(drag.additive ? Array.from(new Set(selection.concat(ids))) : ids);
+            }
+            paint();
+            return;
+          }
+          if (drag.mode === 'move' && drag.moved && Math.abs(drag.delta) > 1e-9) {
+            const ops = [];
+            for (const id of drag.ids) {
+              const found = findElement(project, id);
+              if (!found) continue;
+              const startField = resolveStartField(catalog, found.element);
+              if (!startField) continue;
+              const current = valueAsNumber(found.element.fields[startField]);
+              if (current === null) continue;
+              ops.push({ op: 'patch', elementId: id, path: [startField], value: round(current + drag.delta, 6) });
+            }
+            if (ops.length > 0) onEdit(ops);
+          } else if (drag.mode === 'resize' && drag.moved && Math.abs(drag.delta) > 1e-9) {
+            const found = findElement(project, drag.primaryId);
+            if (found) {
+              const durationField = resolveDurationField(catalog, found.element);
+              if (durationField) {
+                const current = valueAsNumber(found.element.fields[durationField]) || 0;
+                const next = Math.max(0, round(current + drag.delta, 6));
+                if (Math.abs(next - current) > 1e-9) {
+                  onEdit([{ op: 'patch', elementId: drag.primaryId, path: [durationField], value: next }]);
+                }
+              }
+            }
+          }
+          paint();
+        },
+        [catalog, elementBox, headerH, onEdit, paint, project, selection, setSelection, xForTime],
+      );
+
+      /** Pointer cancel aborts the gesture instead of committing it. */
+      const onPointerCancel = useCallback(
+        (event) => {
+          dragRef.current = null;
+          try {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          } catch (error) {
+            /* ignore */
+          }
+          paint();
+        },
+        [paint],
+      );
+
+      /** Double-click on empty space places the current tool. */
+      const onDoubleClick = useCallback(
+        (event) => {
+          if (tool === 'select') return;
+          const point = localPoint(event);
+          if (point.y < headerH || point.x < GUTTER_W) return;
+          const currentView = viewRef.current;
+          const currentRows = rowsRef.current;
+          const rowIndex = rowIndexAt(point.y, currentView);
+          const row = currentRows[rowIndex];
+          const type = typeForTool(catalog, tool);
+          if (!row || row.kind === 'group' || !type) return;
+          const time = Math.max(0, snapTime(timeForX(point.x, currentView), tempoRef.current, snapDiv, snapOn));
+          const staffId = row.staffId;
+          const periodId = pickPeriod(project, staffId, time);
+          const staff = (project.staffs || []).find((item) => item.id === staffId);
+          const period = staff && (staff.periods || []).find((item) => item.id === periodId);
+          if (!period) {
+            onNotice({ kind: 'error', text: t('errorGeneric') });
+            return;
+          }
+          const periodOffset = Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+          const entry = catalogEntry(catalog, type);
+          const timing = (entry && entry.timing) || {};
+          const fields = fieldsForNewElement(catalog, type);
+          if (entry && entry.category === 'lane') {
+            fields.name = uniqueLaneName(project, staffId);
+            if (fields[timing.start || 'generateTime'] !== undefined) fields[timing.start || 'generateTime'] = round(time - periodOffset, 6);
+            if (fields.keepTime !== undefined) fields.keepTime = 8;
+          } else {
+            const startField = timing.start || 'hitTime';
+            fields[startField] = round(time - periodOffset, 6);
+            if (row.lane) fields[timing.lane || 'laneName'] = row.lane;
+            if (fields.keepTime !== undefined) fields.keepTime = 1;
+            if (fields.holdTime !== undefined) fields.holdTime = 1;
+          }
+          const id = makeElementId(periodId);
+          onEdit([{ op: 'add', staffId, periodId, element: { id, type, fields } }]);
+          setSelection([id]);
+          setTool('select');
+        },
+        [catalog, headerH, localPoint, onEdit, onNotice, project, rowIndexAt, setSelection, setTool, snapDiv, snapOn, t, timeForX, tool],
+      );
+
+      /** Wheel: zoom (ctrl), pan time (shift), scroll rows (default). */
+      const onWheel = useCallback(
+        (event) => {
+          if (dragRef.current) return;
+          const point = localPoint(event);
+          const currentView = viewRef.current;
+          if (event.ctrlKey || event.metaKey) {
+            event.preventDefault();
+            const factor = Math.exp(-event.deltaY * 0.0015);
+            const nextPps = clamp(currentView.pps * factor, MIN_PPS, MAX_PPS);
+            const anchorTime = timeForX(Math.max(GUTTER_W, point.x), currentView);
+            setView((previous) => {
+              const t0 = anchorTime - (Math.max(GUTTER_W, point.x) - GUTTER_W) / nextPps;
+              return { t0: Math.max(0, t0), pps: nextPps, scrollY: previous.scrollY };
+            });
+            return;
+          }
+          if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+            event.preventDefault();
+            const delta = (event.shiftKey ? event.deltaY : event.deltaX) / currentView.pps;
+            setView((previous) => Object.assign({}, previous, { t0: Math.max(0, previous.t0 + delta) }));
+            return;
+          }
+          const currentSize = sizeRef.current;
+          const maxScroll = Math.max(0, layoutRef.current.total - Math.max(0, currentSize.h - headerH));
+          if (maxScroll <= 0) return;
+          event.preventDefault();
+          setView((previous) => Object.assign({}, previous, { scrollY: clamp(previous.scrollY + event.deltaY, 0, maxScroll) }));
+        },
+        [headerH, localPoint, timeForX],
+      );
+
+      // Expose zoom helpers to the toolbar via props callbacks.
+      useEffect(() => {
+        if (props.onReady) {
+          props.onReady({
+            zoomIn: () => setView((previous) => Object.assign({}, previous, { pps: clamp(previous.pps * 1.3, MIN_PPS, MAX_PPS) })),
+            zoomOut: () => setView((previous) => Object.assign({}, previous, { pps: clamp(previous.pps / 1.3, MIN_PPS, MAX_PPS) })),
+            fit: () => {
+              const currentSize = sizeRef.current;
+              const duration = Math.max(1, (projectRef.current && projectRef.current.duration) || 30);
+              const width = Math.max(120, currentSize.w - GUTTER_W - 24);
+              setView({ t0: 0, pps: clamp(width / duration, MIN_PPS, MAX_PPS), scrollY: 0 });
+            },
+            center: (time) => {
+              const currentSize = sizeRef.current;
+              const width = Math.max(120, currentSize.w - GUTTER_W);
+              setView((previous) => Object.assign({}, previous, { t0: Math.max(0, time - width / previous.pps / 2) }));
+            },
+            reveal: (time) => {
+              const currentSize = sizeRef.current;
+              const visible = Math.max(120, currentSize.w - GUTTER_W);
+              const from = viewRef.current.t0;
+              const to = from + visible / viewRef.current.pps;
+              if (time < from || time > to) {
+                setView((previous) => Object.assign({}, previous, { t0: Math.max(0, time - visible / previous.pps / 3) }));
+              }
+            },
+            viewRef,
+          });
+        }
+      }, [props.onReady]);
+
+      return h(
+        'div',
+        { className: 'dgc-canvasWrap', ref: wrapRef },
+        h('canvas', {
+          ref: canvasRef,
+          className: 'dgc-canvas',
+          tabIndex: 0,
+          style: { cursor: tool !== 'select' ? 'crosshair' : 'default' },
+          onPointerDown,
+          onPointerMove,
+          onPointerUp,
+          onPointerCancel: onPointerCancel,
+          onPointerLeave: () => {
+            if (!dragRef.current) setHover(null);
+          },
+          onDoubleClick,
+          onWheel,
+          onContextMenu: (event) => event.preventDefault(),
+          'aria-label': t('timeline'),
+        }),
+      );
+    }
+
+    // =======================================================================
+    // Open-project dialog.
+    // =======================================================================
+
+    /** Modal listing the chart library and accepting a manual path. */
+    function OpenProjectDialog(props) {
+      const { t, state, onOpen, onClose,
+      } = props;
+      const [path, setPath] = useState('');
+      const [busy, setBusy] = useState(false);
+      const projects = (state && state.projects) || [];
+      const recent = (state && state.recent) || [];
+      const submit = useCallback(
+        async (target) => {
+          const value = (target || path || '').trim();
+          if (!value) return;
+          setBusy(true);
+          const ok = await onOpen(value);
+          setBusy(false);
+          if (ok) onClose();
+        },
+        [onOpen, onClose, path],
+      );
+      return h(
+        'div',
+        { className: 'dgc-modalBackdrop', role: 'dialog', 'aria-modal': 'true', onClick: (event) => {
+          if (event.target === event.currentTarget) onClose();
+        } },
+        h(
+          'div',
+          { className: 'dgc-modal', style: { maxWidth: 620 } },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h(Icon, { name: 'folder' }),
+            h('h3', null, t('openProject')),
+            h(Button, { variant: 'ghost', onClick: onClose, title: t('close') }, '×'),
+          ),
+          h(
+            'div',
+            { className: 'dgc-modalBody', style: { flexDirection: 'column', overflow: 'auto' } },
+            h(
+              'div',
+              { style: { padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 8 } },
+              h('div', { style: { display: 'flex', gap: 8 } },
+                h('input', {
+                  className: 'dgc-input is-mono',
+                  placeholder: t('openProjectPlaceholder'),
+                  value: path,
+                  onChange: (event) => setPath(event.target.value),
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter') submit();
+                  },
+                  autoFocus: true,
+                }),
+                h(Button, { variant: 'primary', disabled: busy, onClick: () => submit() }, busy ? t('loading') : t('open')),
+              ),
+              recent.length > 0
+                ? h(
+                    'div',
+                    null,
+                    h('div', { className: 'dgc-sectionTitle' }, t('recent')),
+                    recent.slice(0, 8).map((item) =>
+                      h(
+                        'div',
+                        { key: item, className: 'dgc-row', onClick: () => submit(item), title: item },
+                        h(Icon, { name: 'dot', size: 12 }),
+                        h('span', { className: 'dgc-rowLabel dgc-mono' }, item),
+                      ),
+                    ),
+                  )
+                : null,
+              h(
+                'div',
+                null,
+                h('div', { className: 'dgc-sectionTitle' }, t('projects')),
+                projects.length === 0
+                  ? h('div', { className: 'dgc-hint', style: { padding: '2px 0' } }, t('noProjectHint'))
+                  : projects.slice(0, 40).map((item) => {
+                      const dir = typeof item === 'string' ? item : item.dir;
+                      const title = typeof item === 'string' ? item.split('/').filter(Boolean).pop() : item.title || item.dir;
+                      const counts = typeof item === 'object' && item.staffs !== undefined ? ' · ' + item.staffs + ' 谱表' : '';
+                      return h(
+                        'div',
+                        { key: dir, className: 'dgc-row', onClick: () => submit(dir), title: dir },
+                        h(Icon, { name: 'folder', size: 13 }),
+                        h('span', { className: 'dgc-rowLabel' }, title),
+                        h('span', { className: 'dgc-rowMeta' }, counts),
+                      );
+                    }),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // =======================================================================
+    // Playback scene (Dremu form renderer — playback only, no chart signals)
+    // =======================================================================
+    //
+    // Ports the *visual* part of the Unity GorgeStudio "Dremu" form to a 2D
+    // canvas so a chart can be previewed in the browser. The formulas, engine
+    // defaults and known deviations are documented in docs/playback-model.md.
+    //
+    // Deliberately NOT implemented: the Gorge signal system (SignalTsiga, touch
+    // / float / bool signals), judgement, scoring, respond hints, inner-note
+    // hits and hold audio effects. The only "state" is PLAYER.hideHeadAtHit, a
+    // fixed autoplay visual rule: note heads vanish at their hit time and hold
+    // bodies shrink from the judgement line until the release time.
+
+    /** 16:10 content box + camera constants (GamePlay scene, orthographic 5). */
+    const PLAYER = {
+      aspect: 16 / 10,
+      cameraHeight: 10,
+      laneWidth: 0.1,
+      noteWidth: 2.0,
+      noteHeight: 0.4,
+      hideHeadAtHit: true,
+      clearColor: '#314d79',
+      maxPointCount: 2000,
+      rateOptions: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2],
+    };
+
+    /**
+     * Dremu note sprites, embedded from the Unity form package
+     * (Packages/cn.starbow.gorge.sampleforms/Dremu/Dremu/FormAsset/*.png).
+     * 200x40 white RGB + alpha; drawn at 2.0x0.4 world units (100 px/unit), so
+     * the nine-slice borders are the identity at that size.
+     */
+    const PLAYER_SPRITES = {
+      tap: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAAAoCAYAAAC7HLUcAAAACXBIWXMAAAsTAAALEwEAmpwYAAACcElEQVR4nO2d2W7iQBREC5T/pvhy5gEyE8DLXcptZ6gjIWNs+nakOsZL2zndbjcIuTymV2WjxgThy7TNl6oh3OXgj3lLYkZC/NtAf8+3OSsawbscxHNnjdkS4jlvr3ksoxBkrjOEJTHbQ0znTCJJV5C1ThCWxGwHsZyvtiQdQaLFCUti9BCxXLUkqQqSLUpYEqODyOWpLElFkGoxwpKYPkQtR6XcZgXp7tMRlsTUIXr5Sec3I4jq1BlhSUweQpObVI6jgsjOKz84Cdsyn4FyyEc4zxFB1HJcxe2Zz0Cdm1Cu1wSxHOZIDJdkSRDLYY7IUEnmBLEc5sgMk2RKkL3kuOB+IOaXXxesM0SSV0EmV2qQkUNZ1/xuiINIcl5a2MRymA7EASQ5T30owHIYBcTOknzBcphjw8d07Q7V7+VcWinBBbj/gqivat+C6/lquokSzYo8y2fcjVPeP07EfhbVdc3/SXSPhNCO8SOA6/nnjLhxS2K67CoH8HwW6++HwiKWxFTZXQ7g/TrI00JRMUtishxCDgA4zTw4bvPCxjQhBmR0bizW5MrN4so/xnw2xKAN+NJo3tkvNTphSUwXYuDezdr9IItfLnbGkpgqxOBd/8gdhauNJCEsiclD7HBcHL0nPdRYAl9FN1miIzQiEME8Z55qEm50Bd88ZSqockMkcpx9Llaq8Qksh+nQzQ+RzG9WkFKRB5bDKKjmiCjktiJIpZjlMEqyeSKKez5VQTJFLYfZgsxwlPJhQUeQSHHLYbZkLV9E88RSV5ClTlgOM4K5nBGCs64KQYD3zlgOM5LXvBGi63bK/3LLmffGjOB1Ay3hD4ECL19aoJfNAAAAAElFTkSuQmCC',
+      drag: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAAAoCAYAAAC7HLUcAAAACXBIWXMAAAsTAAALEwEAmpwYAAACWUlEQVR4nO3dPXLTUBiF4deU2UmCS6C1sgmgFHU2wSaooxLYBHLJT2nCTtyK4kbg0ciKLH2KJc/7zKiyo0lmvjP3SLp2VlVVIandi3P/AtKcGRCpgwGROhgQqUNkQK6Ae6Dy8DjjcU+axRCroLtY18BXYB1xMmmkHfAOeBh7oogVJAd+YTg0H2vgJ2k2RxkTkLpShS5pUpCQ+RxasaxUWpLBlWvICpJjpdKyDK5cpwTESqUlGzS/fSuWlUqXZAe8B34/9cY+K0iOlUqXZQ38oEfl6gqIlUqXrNd8HwvINfCdgPvILbbALbDy8DjhuCXNTrScNOsv215sC0jONJVqS/ojM6AMPrcuX0manSmCcrRyHV6kXwGf2t400hb4iKFQrIw0V5vg8xbAHbCH/wG5Ab4Qu2oYDD2HjPig/LvLtaqqKietHFEX4gZD55ARG5Q9cDfF50HqbcfSc5pk7uqKtSZVrJvAc5ekRE9x50GqbUhzlgWe8w/wFtjVK8gOeE26QImSkULyjfgLKWlDmq2S2HAUwCtSJlq3muTEXpPUSlxRNN4UKwY8XnPQWCSO7cWaonLVSgyKTjdVMOCgUjVf6NqsONVzEWlOCg6eezR13cXaAx8ej9Yflhas13z33e6+Bj5zZL+KtDBHK1VT3+cgO+ANsXe5pHMoOLhL9ZRTHhRaubRkg+Z36Jc2WLm0JL0rVdPQrSZWLi1FwQmVqmnMXiwrl+YsZD6jvnrUyqU5eSB9D9agVeNQ1G5eK5fmoiDtKxwdDohbQaSL5P8HkToYEKmDAZE6GBCpw194qkdqEvQK2gAAAABJRU5ErkJggg==',
+      taplik: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAAAoCAYAAAC7HLUcAAAACXBIWXMAAAsTAAALEwEAmpwYAAADDUlEQVR4nO2d646rMAyE3aN978w+uffHUp22y8WOHXLRfFLEVltsE81AgBIeqiqJlG35nRmUECP4WIb5ygokv+bAy2eahNwJ5P8O+vk5zL+MIPLXHJD3YglpCeRdb596rCbDIEfFQGgS0h7Ivs5STBI1yFUREJqEtANyrq+wSSIGsSaH0CQkH4hNVyGT1BrEmxRCk5A8ID49VZukxiC1ySA0CYkDqdNRlW69BomO6SDrmSRze0qDeCsBiW2TX7+qam1F8yiOvKO3rO0pyf3zjNe7f7IaNA9Y81qPIGnXlTceibFGAJK7Z8uOtwKZP/mw94/BRSXRuS73TtJeKRXrl5O+yojXu38y21lf1XCpxeEKmrB9UhzrFkOfReP17p/sZukzD6eaHKaQidsexbBecfRdJF7v/mnRPH1n4VCb3QtYoB1RTtYp9q4Lx+vdP63a2TbXsKvRbolvyNsCj0FU90VdAvlr4nlrHoGig5iE5vBRI7aiudvpjTejQVQHMQnN4aNWbEXz7yNZ481qENUBTEJz+JhRbDPW/ErRjib5ct00sfFtjLfizSySD7bl1ROqz//j7EsOisjvb7Gy72pb73iudjedtMOqlXwtb4cnJB+eitoOi9l5WzPjcGXGml+xDtebaLh5AkObySQzim3Gmp90NYfq38u8NMk5M4ptxppVBzCH7hiEJjlnRrHNWPMQ5lBVeajunlNDch+2gaw7T1bqzHsNWPViCOQGjR49D7L75WDy1Z5uI/2A3LQDP3tg6nClQBE0CYkCuXF0czX1KLZlVkHPeCsNt1YdwowI5Oahv+WR28sgTiA8khA/kA7nxdZn0k3BHHCvS7xkXgyBGPXsmfbHHPQC62+1CHklSzcQh46982K5gu9Ac5AIUf1AnPqtmVnRnWSD5iAZ1OoIUqHb2rl5vcloDpKJV0+QypFPZHZ3a1Kag7TAqitI4LQg+n6Qq+Q0B2nJlb4gwQtLGW+YOiqC5iB3cKQzSMJV16x3FELei6E5yJ186g2SdN8u8y23OPibkDv43EGn8AOcxPEhcNaELQAAAABJRU5ErkJggg==',
+    };
+
+    /** Cached HTMLImageElements for the note sprites (null when unavailable). */
+    const PLAYER_SPRITE_STATE = { tap: null, drag: null, taplik: null, v: 0 };
+
+    /** DremuRespondHint / Heart textures (same form package). */
+    const PLAYER_EFFECT_SPRITES = {
+      hint: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAVQAAAFUCAYAAAB7ksS1AAAACXBIWXMAAAsTAAALEwEAmpwYAAALRWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6eG1wTU09Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9tbS8iIHhtbG5zOnN0RXZ0PSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvc1R5cGUvUmVzb3VyY2VFdmVudCMiIHhtbG5zOnN0UmVmPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvc1R5cGUvUmVzb3VyY2VSZWYjIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtbG5zOnRpZmY9Imh0dHA6Ly9ucy5hZG9iZS5jb20vdGlmZi8xLjAvIiB4bWxuczpleGlmPSJodHRwOi8vbnMuYWRvYmUuY29tL2V4aWYvMS4wLyIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHhtcDpDcmVhdGVEYXRlPSIyMDIzLTA0LTI2VDAzOjUwOjU1KzA4OjAwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDIzLTA0LTI2VDA0OjA4OjQ1KzA4OjAwIiB4bXA6TW9kaWZ5RGF0ZT0iMjAyMy0wNC0yNlQwNDowODo0NSswODowMCIgZGM6Zm9ybWF0PSJpbWFnZS9wbmciIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6NjA5MjAyYjQtMmYzMC0wZDQ1LTg3NDYtMzE0MzAwYTYxMGRkIiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6YjA4Mjg0ZDgtM2E0ZS0yMzQ0LThlYmUtZGM5NjFlYTM5NjA5IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6OTlkOWQ1ZGUtOGI3Yy1mNTQ0LWIxZjktYjgwYjRlNjM5Mzk0IiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHRpZmY6T3JpZW50YXRpb249IjEiIHRpZmY6WFJlc29sdXRpb249IjcyMDAwMC8xMDAwMCIgdGlmZjpZUmVzb2x1dGlvbj0iNzIwMDAwLzEwMDAwIiB0aWZmOlJlc29sdXRpb25Vbml0PSIyIiBleGlmOkNvbG9yU3BhY2U9IjEiIGV4aWY6UGl4ZWxYRGltZW5zaW9uPSIzNDAiIGV4aWY6UGl4ZWxZRGltZW5zaW9uPSIzNDAiPiA8eG1wTU06SGlzdG9yeT4gPHJkZjpTZXE+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjcmVhdGVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOjk5ZDlkNWRlLThiN2MtZjU0NC1iMWY5LWI4MGI0ZTYzOTM5NCIgc3RFdnQ6d2hlbj0iMjAyMy0wNC0yNlQwMzo1MDo1NSswODowMCIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDozZTQyZWZhZi1kZmVkLTUwNDgtOWFhMS1lNGM4M2NiNWQ1ZmUiIHN0RXZ0OndoZW49IjIwMjMtMDQtMjZUMDM6NTg6MDgrMDg6MDAiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6OWU4M2YzNGUtZGNkYi02ZDRiLWFkNTEtZGYxYjcxNDBkOTk2IiBzdEV2dDp3aGVuPSIyMDIzLTA0LTI2VDA0OjA4OjQ1KzA4OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNvbnZlcnRlZCIgc3RFdnQ6cGFyYW1ldGVycz0iZnJvbSBhcHBsaWNhdGlvbi92bmQuYWRvYmUucGhvdG9zaG9wIHRvIGltYWdlL3BuZyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iZGVyaXZlZCIgc3RFdnQ6cGFyYW1ldGVycz0iY29udmVydGVkIGZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOjYwOTIwMmI0LTJmMzAtMGQ0NS04NzQ2LTMxNDMwMGE2MTBkZCIgc3RFdnQ6d2hlbj0iMjAyMy0wNC0yNlQwNDowODo0NSswODowMCIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDwvcmRmOlNlcT4gPC94bXBNTTpIaXN0b3J5PiA8eG1wTU06RGVyaXZlZEZyb20gc3RSZWY6aW5zdGFuY2VJRD0ieG1wLmlpZDo5ZTgzZjM0ZS1kY2RiLTZkNGItYWQ1MS1kZjFiNzE0MGQ5OTYiIHN0UmVmOmRvY3VtZW50SUQ9ImFkb2JlOmRvY2lkOnBob3Rvc2hvcDoxODRkZWIzMS05N2ZkLWU3NDAtYThkNC03MTM4MjhkZjY1ZTQiIHN0UmVmOm9yaWdpbmFsRG9jdW1lbnRJRD0ieG1wLmRpZDo5OWQ5ZDVkZS04Yjdj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',
+      heart: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAYAAABe3VzdAAAACXBIWXMAAAsTAAALEwEAmpwYAAAE8GlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgOS4xLWMwMDIgNzkuYTZhNjM5NiwgMjAyNC8wMy8xMi0wNzo0ODoyMyAgICAgICAgIj4gPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4gPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIiB4bWxuczpkYz0iaHR0cDovL3B1cmwub3JnL2RjL2VsZW1lbnRzLzEuMS8iIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIiB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIDI1LjExIChXaW5kb3dzKSIgeG1wOkNyZWF0ZURhdGU9IjIwMjQtMTEtMjNUMjM6MDM6MjIrMDg6MDAiIHhtcDpNZXRhZGF0YURhdGU9IjIwMjQtMTEtMjNUMjM6MDM6MjIrMDg6MDAiIHhtcDpNb2RpZnlEYXRlPSIyMDI0LTExLTIzVDIzOjAzOjIyKzA4OjAwIiBkYzpmb3JtYXQ9ImltYWdlL3BuZyIgeG1wTU06SW5zdGFuY2VJRD0ieG1wLmlpZDo0YWY0OTk3YS0zNDNjLTc4NDEtODdhMy0wN2Y5NGYyMzhkOTkiIHhtcE1NOkRvY3VtZW50SUQ9InhtcC5kaWQ6NGFmNDk5N2EtMzQzYy03ODQxLTg3YTMtMDdmOTRmMjM4ZDk5IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6NGFmNDk5N2EtMzQzYy03ODQxLTg3YTMtMDdmOTRmMjM4ZDk5IiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIj4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo0YWY0OTk3YS0zNDNjLTc4NDEtODdhMy0wN2Y5NGYyMzhkOTkiIHN0RXZ0OndoZW49IjIwMjQtMTEtMjNUMjM6MDM6MjIrMDg6MDAiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCAyNS4xMSAoV2luZG93cykiLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDwvcmRmOkRlc2NyaXB0aW9uPiA8L3JkZjpSREY+IDwveDp4bXBtZXRhPiA8P3hwYWNrZXQgZW5kPSJyIj8+Xn4pGgAAAONJREFUWIXN19sKgzAQhOEIvnfSJ59e1LZ42GR3ZzwsiLmQnw+CEScAxTF1ub88D0t7AEZXxX+q43lpLxJTIMO9aIxBpnqZWAaZ7mVjESTVY2IeJN1jYz2kpKeI7aLK3rwcmk1w+DZjTfXmUsokiK2iwpm+W9IEW6Kehs1L8iRkg3HMPAH5w8E4qO9ErnDofOruQO5wPeDVyEPcCHgV0sR5gGcjuzgv8CzkEBcBqpEuXBSoQrpxGSCLDOGywCwyjGOAUWQKxwK9yDROARwhKZwKaCFpnBK4RUpwwOefRDXNWFPzBgYjM6jf31slAAAAAElFTkSuQmCC',
+    };
+    /** DremuNativeResources @InstantAudio RespondA (RespondEffect.wav). */
+    const PLAYER_RESPONSE_SOUND = 'data:audio/wav;base64,UklGRkTIAABXQVZFZm10IBIAAAABAAIARKwAABCxAgAEABAAAABkYXRhZLQAACgAOwALAIX/Z/+P/3EA0v/+/wIAs/+PAG4Axf+g/zMA6f+NAJYAGwAn/0X/FAC6/5cAVAAc/+z/NQDJ/0sAVv8IAGkB1v+k/w0AHf8pAW4BhP/v/6H/Mv9y/5//B/8M/ycBgQK2APD/6/84/0v/WgBI/w7///87Ab4A/P/L/1P+2/6f/4wBewEGAJgBQv/y/6j/Vf7x/iv/MAJbAboAAgD9/bv9Hv/TAuf/nv+LAWH/XQFBAij+xf5i/3L+0//3/i3/7AHFASkCyAA6/lIAkAD1/bQAmv///fkAUP/V/ogB/wJTAiT/Fv61/gr/rQB5/gz9zgFVAHoBVQIZ/a0ACQI+AXkA1v8//or6kgCt/6j9+ANQBB4A1wLc/zr83P+u/6YALP05/70A4/8UAtD+Ef84/p4AhANmAVgCPP+J/Ur/nv0pACQADAD6AFX+OALKAXL+LQGo/nkA3wFE/77+uv1bATkAeQOnAHr+NgPz+oP/kv95+yMB9f8GAa8CcgMxAOAApAB5/oX+sP6WAAf/a/+b/HD/nwES/5QCuQDm/w4EGgTD/w7/Avu1+r3+NP+9ApkCLQIA//f/6gAy/d8BgP9R/TP/BwBlAnsBAgCuAeL/yACx/1T9eADd+z//nwRX/3YDmQBX/P/99gCh/1P+SAaV/2sAYQGq/o3/av0F/Sf4vAFcBq0HTAEw/d/+BfzXASz/eP6A/rABtAAt/5MGi/obAPAEXfzmApECRACg+GP7xAGt+zIE9wMZ/gcDqAQfAVL9vvsV/Q4CRP+d/cgBm/ztAD0D7P9yBFoDxf+i/VH9ff2V/28BdgNu/yD30wGRAngAMgcF+Mz6oAU3AtUEnQOb/9sB7AAe+Yj04vmUA4wBhALsCMf/LwIlBbP7xfwk/qYC2QQo/Vn+nvy1/Xz/bvk5Ae8C+wRwBw7/n/8G//EBmv3R+RL/FQCZAjkDQv2t/NH8Gf1bA4YH5gRwAgQCyP8V/HP8lv8HAEgBhf/s+ikAJQKl+wQCRwDx/toB0wMd/y8AfQgK/YcAy/yk+xMAJvttA9/+7f++/z4BaQd8/Ln+F/7p/ncGWgIW/sAAyf0J/w4Aw/5c/Rz5DwGrBgMEuwL8/wb7YP9ACM37BvzH/6cDeQjY/OL55PT3/pAE6gRoBJT8sv/CAf4IL/3k9mAC//6eA93/5/fF/S8EOgUkAd758/kZBcwDFgeKALz4VfteAZ4HI//VBbH5xfazDOgBT/if/7gD3P6XAU37qPXG/LwKtwdPAgMDbvoU/3AEgflY9xIDHwQ9/3oBcwD39r38ugZOASL9nQcWCRz/dwGzAuD5EvVg/PT60/59A34CTAU8B2MDsfzU/Bz6fgN5CbMEIQG3+mH3av7wCRX83+8fBRkjKUJKStcORNAU1YD3QBLQDUXgV8tH9fYmT0TxLvLyg+2a/tcOFg1c7GDctOMoAQYOhRO/HlQHlxR2CIHu0fUI8EX7i/KDBLIBz/R5FZIKdgFt/9sATgeQD6/8KOTe6Hb5JxWBElsHPe708qED/ABfFRkCoABO9soD6wEp16wBtv0pHOw9NwzR6qvUTvqnCgkQxgRV3ibrsgTJHJcWEAiGAE78BQsMDYbvmuL26svn0v1XB9wQ8xr4FBwm0QZWA4MBKuEu7KncfeTK6qH51h3rI/83wyDABMX7ffZk+kbxae3n3oDg5AC6GEAMbgWj9XcGSz5xNkwWTN4ltYPRBQSKEMXfgeBR7Q4TfFa5NQ4H6ucn7eMJyQkh8mPKLN6XA+kdeiTxC9nwv/m6G3AM5A2NCl3oX+Bf1iHezAITL9wggvs89o8DRSa0NRP2A7JKuOn10jqhLgIKOdt05z4+9UX2C5S+BayX5/YjRUGdDhPKptVh62oBNR2aGz0NPhUHKAEI0/vABYzQPcob3zLfUhOONyw+Txl5AhYVdvyf/zjrdcCx0+4CERPdGEse0gIw8Ur5iutV6fYa+h6iFdoXO/l97LbyH/kK46rqJQrADOMz3CPR91j23PLL+7/3bfx47Cfw8BGICAIRmxesAtrmU9mr29H8BifJKaUaKgA98WwDtgXL8BbdedfA8XAlizHhEvQBre4C+wwVNglR6PvfWvZWAQQQwha79zzp9gfqEwEMcg2Z8p7jfh/HL68JK/Xhx4zF8hIMMh7/0/iV9T4JMEdDKDjRLp1Uz3AO9T7FMqzFWM+yJSBUYVR7Cr6cpqVABwIcYCI8An/XvAEOIwEiggmt92fla/a8ELL33BBNCKjtAeAJ2Wz5kCmUQ6AIk+ia71kIWUE1G2q8ja6Rz2Ibn0OoIx3neN1BHx84nje38mGtqMlO/Igbvw7/8erYtQJ2OUYsbBMV9NDfAPJ/+YbzwdlT4WgIsx/TQiMpwPRG7NL6dwRZBwz3td433owLOiL2+V37N+GA4kMkfybzHQECi/dY/isKkf1MzDTRj+s2ILZEyy1AEnz5NgL4CBX2l9oJvKfXUgZBIJ4ufxqC6+cALAs99/oIMvOZBc4MORHKGbfps/Ox39TZEQBqFpIwbiRDEHftHPanEkYP/vxQxGG99eEcIUFG/hqT5JvXAhX/MRInD/5tvMfWeSEeP5cNhOkIyZHRjCN+JMsKYOs485gKayHmKqDvaO0t6Nrx5vOn6i3+EvN+Dw8PZiBiJ1sabSGBztHMSO1g9fkbHhT485TiPg25Lc0VKPqB3lbTlA+INGsCx+Wq2pTxlhsIIb8Ag8kk8wUhZS5gNk/6M+Cs13IAFw8G6HL3L/UNDxcoTSFVDz/wu/8l67LWW/Ys9EMA6g+E9g7n4w3jKd4V2w0x7E7ZlgciJS8Gk+JI1TDn2iGoNJEB39sZ6Q8RVz2VL/XtlsUY6T4PTxDQC1nRL8mLAm0fszUXHA4G9PsFAw8H+ei75yHlZvw3BFAYBBiGCk4QdvDI7MDzTwt+DHT5o/NN+DYRABq9ECHd+cH46REJ9zkMOCYLbfs187r+tu4m5FbfUu4BHn0taB7AD5j25OUW4TfisvgnAgAZ3xyUD0kJTP0r/ynqEeIu5Qns/R+5L60usyOl+BX2IOpw2HTW1dmsBGkkPzT2K5/9mOwf4RHyGwJk8Rj/GPdUHWcrNAVC/1HIqeqHGYcVZQVi3VXutAwXQacz5uBatsW82vNsLbYsQPSY7ewWKzjXOYsHdL64rL3qT/iwELcQuvPOHHUTTCSfFUX/evgI6Vv4eOPSBtgQ7QRKCi3t4e01+iEHxwjDBC0XqheRG54Og+9D3s3UwMiP1Ef9Qz/CWEke8gVA1ULrrzFfGT7So6dk13wSX2AsSwXIUrbs5xcmrUATDi68yrmNKcxGwiPI/1K4D7t4B+EZTxtyL+MPNwpk/drnDg3RBmn1U9M+w1ryaD32WAkK2M7gvZn9elBpNDfKYY640RAvIHaXVZXYQ7P34moSwiEv/O/Nn9scFBU2GiuGBd3dUeMQ6dnxQw+HE9gZowkN8mvzGwdqGwnp88nDz0rnxF2sa6YvEAEewS7Ylt/K75/j1dBbGE9AL1EvQQL3Uc6YxvvUb+iI7/UdJhQlI4UyzAJoCsn0NNl8xGfU6grQHP86jSmS8+/p1+yR8O3tYv25/AUPLkaAPisBEOhqwTWxr+/VArQOaBnRM1wurxcXLifttslD2Y3PMeId/pwPgwO8IUomaxIyDlDstO2v5csAiw7hA94H0AFm/dzxxQK99yn1swlgF0j/6fj6Eh32IROCEBvq6uUb4tsLvQOICi4Vx/aVDd8VBwkP5djn9eVw2u0lKSXDDw4rYhEN8qzh0NwJ0aPX3AYDCl8Zo0+0OkgffgK+0XbMv8/V4vjsO/1DHFEteDh6GzPsBtW81O0D5BgxELkbUQVuBJX/bueQ2EPRs/dXDJQfjjykMykuDAT525O2LaR3093qtw3jJTs8q1ExRnslu8otqhvJx+hlGc4RJfK99vYjjkIiEifiyL6aywEZh0EvKTjy5O8u+8EDSRMfyS6rkN4OEmBRyVS0M2cMyO8B4oO4D7p41XHwtyPjO9tCtjBsHsn9ucwVxLvEsuZSDXQQYSseNLAx/jLg6WG8f6jGvXkQciYhOZMteQ+2/1vZPsuAz0jl1Q/7JKU1Ci17FsULWOTDyPLMdugpB/wigiuUGZUbdB8eAmjigcA9t6TnNRixO088KSzCGHzwqOdg1jPIe+JS8JAARBpuKoQfghbeDTzj4e8gCCEF7QqW727ZhudSCbYXJPaf6Xbs6/rURdlJehH88hrqIuZr9D0DlszTyjj9zQ1GNqA3MhQOBSEN+QXc4VXpj9hR1ETy4Py2FNEztjGuF27r0tquAUkLigv66oLL5eC/Ei86ohMB7+vaN+EANNoqCP4X9d/nPgVKEJn73Msg14T9FhVUOQUurRi0DITyRd0E0DfZf/ce/nYT/A16GfhCsB17+nnD57Mx7eQEtyRzAVbtFRi5Iug4rAYXyWnXdfGqIWEpq/wU21ffS/MbAxsE8u3j93UdozbkPhMix/Bg4HzX0dyw2rvhhvk8CMMsczj3NIYlRQRD6wHft8+tzATaNey1DAIgyiiCHVMXrg1o/gkGT/Eq/L73te2mCn7zyfGV6qH5iQouEt8jHwhpGZ8H+vxCA2jiONl+zQDcxfSEDmw0iDhUNWcjQALE7CjP9LzbzDfXCf5+Mfgy0jmSExf83vS67bwBsuNY8yX4/vw5I2cQ7v9G55flbOxmCPwriyHAKRcT4vXj5zHYR9JP1CDuQQE2IK9EmD2kG67ycdGP2af2dPeK4aTic/+HIghEFzaz87zUaN1IAvMQMgEN+Z/vohxgK+YMxO8i0pPnowe3IOcSdfZgAaj96/ML/T//TPs0AEACQARQBHEb3BjS7ezmTN+X+k8oShXQ5KnObfn+IVU+gCTCzYbQ/vfLIkgckusSyzLQ6ilEQp8lg/8g0NPl+h3AJpD99+Zb43f0shd7Fcbxyu8PBGEH0BO9DQHqUuEN+wgJBAciHnQMaPqT9aDm5eu19PMHI/NB+jULMRUgMd8mKgPr1t3XzPgyCXYCIPki+sQNqTouKTziUslpw/ntNjo0O8ML0/gn8/0DVAaG2j2vYLZXGANOjk/aOaHv1Ob8AnsGM9/pvMPHz+rDSAtbnxRX9A3cA9yWAeECQe/I+6wSGxEsD4YGTeiA6wDxLu8+CHIcTjEtLA/4Utoc2WL3Cwsh7UjU/draGMhHpzu0DUvQZ9QXB5kX1/lk2PrSvPi1NTYqVwPT713piAQNGSMSmfgF9YL7hvi+ADrz0eaX9KYGlA0UF6EafgzL/QD0j/PR64P0zv0M/RIVQxkv9tzoHe31+dohWR9B86HotPTuA+0KTALa2kHWCBtJLL0q4A7+0MTk6A+bFt31ZuMW3+3qkzUsOq0MmPWn6WvvZPvjCdrlFetwEqkXrR0OCnXnv9LT8VAQff/6AG4N//1/Euwcce3W5ALg4+shBVoMmyHLDYISIBOH6U3xhfic+EvyAvPk+GgEPzGXIvfyKNVl21L/0iUyIBThWN1rAAcYZyqKCU7QMNTY+4sZgxvuBxD5Y/dGD0YFnPNtAVD0ZPkxAJz7jAtOEHsTke9t1fvrPgtXIvwJQ/Jx4/cByCA2EFQIR+6B8acI/g+2A2Dzffw09Nnrxe7C7JUb3TKSCfH2o/J4AM0eowJTvRmuePkcPqVGACcsxf+7/BOWOQ8j5OYQziLfmDJ2UZnzRdMlyLvbRBOhFocVZwmIFnYaqP4w+1j4p/DW2w7Tyt07A69GC0pb9bbRmesSAg8w9xkq0zDI3f8KLTIbBAgryuvCUxJAJ0EYcv4x8cH44Q7OF038Jevb7gnzVvOHDeQVggkxDqX78/QJ+lgCzgpK+Rv3b/bS/hIPYAXW+L347/9NAlT/xP56ALf9Tfgo8q33SAarFUIWXPRM6KT5agWYHDEP+d6J2M38fx6kHmAHC93g3OsR9R7rEG747uL88VgS3yPb/0zmmei885QQZBD0DdQP0f6s9AviUOk6DSoVBgfv8fvuhQhwLt4mt+D0sdbbrhmrR8ovzs4/ttDvOC6TOZIJ1sbSx80UojidHd/uUc+a6lwP9x1DBOblx/NeAB0NMQsrEAwQCf+87c3LTerdKa0rnQVa3gTSAAPgRFY0M93nryzaPSI/TqwrVswDwAcJ5TI0J/XtVK+XvE0euUhKJc33G9Vf3Dz/IhB9Bb0Fyw/JFa4MXvoO52Llz/Hd+sEDOAa3HqYjzgI9+s/0/uva/U38xO9D83z+FxXyE0cM9vO44AHx2fipBd0QKhe2GskVrwhh35zDFM9t6hEmjDjNGmkEqvLHAe4VPQUczAK8g/Q0JZhBdSdi3ZfSk/urIgAZ7+5Y1LvekypYRToXYe7MzdvTbuuX9akTWReWFOoao/QY+QcXehUf97TGF8Xq59Q6ulq997DAtNOcAtxHFTV+1lKwNvB0MGtDkxedwbe2rfFBKtIwVgfQ4ob3SQuNFuAW0+4/70rzN+vP8If7pAya/XAMpgiS9qoR8wes/cL8D/aR+rECTwQi8JHrcPre/7INmBQ3EaUPJgOZ8Nn0t/kbBDsFF/g8+w3xnP0N/GT/Fgs6AkURtAWLBo4GOgRLEIHs3d2X29rwZR1rGOMFqPb8+ggKqg5Z/Vre3uA0EhgyJh4z/UPGn9GhC3kYcg/v8o3tEgMHMF4rd/Vw3nreLvnUEg8Nku3o4doF1x6EHskMZN6J3D/xTfjCG7Aeyxe1FQXqbOCc6gfw4P8GBYLyGu4RG5syFx0g+pLVgNP5D28pxAOW8GLg9ffoL8UqXO9qxMHOdPnKMPcrShEIAGL8CRJK//XrFtBZ0Un6hgq/Hu4cbRPZBbvwrOa18bAKvwXIBsH22PItDqsbcwBA0azPzeC9KatQxCOoBFXoMPDDAMv/9+QUyKryZhSfIxspnwfr83n6gf22+sH8o/qY+qP19PtHAuwBHhLUBJHhguGtBIUcxyLdFMz0mOt79/H6g+/l48bsrflSIIc2KBgxFK3+7uhC31zddvnUAnUMCAmz+7MG9BuvGtj2j+Fh5Az6HCFzGz3zt9977X/9ew3AC1z1FvisC0UQRgiZEiIL/wBC83LXVd458QwK+xQr/df3oBiHLkEmHwLqviO+7wDUIU0exvzg5wj21RmiJsT2c90s6DX59yNPK930T+hs88P0eQW19zfxO/yzCUUR4g8MD7ICff9m7t7mde9v9MwDsAeAEO0Hfg8+Fvr5HPc/6BPq9/5iBI0JNgt4Cx7/RPQS8Az3egDEC74SeA1BDHv/BvpR8GnvxPFd9pkA//VgDzkR8wgBFE3yFOyCCFURdfnu69vjSuLvH0sqkQS89dXq6/GACJATG/st8scHZRTBD6QCx+7+6a/xn/O4/bEFghn5Hmb7OPJSAJoAUhcoDnDXycwL80ggIyOkFRT4n9+r+gIEc/fY9pv/0Ai6FO8TSwXu/97yf+va2B/m8B64Lfsaqfqw4XLfcCK2NaTjR8xoybf1iUWhPAD8DNOo7XMGehQbCm/dGODIDZkriBWEAMHjWN00+3wEYQ21DSUSRQl28bXxlQfAFPwDCvP0wC3J3x6/MWYzmBHz70XyfwdNDVraiNeV5dkDATQ6MWr9geBN7YDtFv75BrMIPxB+Ef8OQPtV8P3uRO2l4YfoPwPfFCo5sC7cCOH85O5D8cflvuMz3y3xuR9iKlgfHgiS9SrqI+/G83L5kwZ2Ef0SkwzKAL/12fQL5AnkZOhh+v0sty8qFVz8XfAr96P8wfeg1WDbZQcNImg6XiLf5LTeTe7d7yQCnPdc9AQTiSAAIVkEH/Op6Erp6vix91j/Jg5WFE4IawBV83X9FhDS+3bnlObBAessTy4AAL/aEtdh96gdSRXj44rPfvsAL9c5JhoI1AHClgGSIOAQq/F40QXqwSHeLmYQUvIR4rLroQtQDi//N/vNAGEJHAFN/RcAVwb293nipueQ9xksxjbgCIPpLeXF/isTYQU+1mjItf3jMBo94Byz3gXQmAErE0cHDfFC1hP1ViACMdgPBuc14d7leQNgBwj7TAZyCisTohq5Cq709+hF3vPihfVrCdkiXyILF6gHwvb27F/mZOh/59v37A7eGqshYg+KAdn8Bu7G65vsz/aoBjsPFRDuCzYOgAIo9OfuidmW4+0P5h5DJ3MYo/Lx8SDxd/Co6dziPfeMCTstoC66CYr4Tu2g8yf12+7n5Bjrzw4JIgIqHRHw8nPwxed08Or2dPNZDF8W4xd2FvT3kOUX4w/rwP1gDBsahRxwFIIFa/GD68LsWPSm8KLyOwn7F6MqoR0v/l7r/Nvi6IPy6viYADsGHRt8H8sSf/x54rvY6e9uCXoO5hQ5EpALZvpH7mnmpeLP9H0A/Bf+JYogdw8Y/g31GN2A4LLofehSBlgf+x+1HCEM5vdB8v/rBO7r78T10Qt7GxIf7AgV6jnkIe1R/hsIngZYCPIRwxgyCpn1odeK10Tw9/XWEZ0g+RtmHbgL9fOO6aPxKPNG96TvVexwBxMcFCa7C8/sXOpv/pwUXgLz647gNvjQHa4e2f2m3LneCfM6IEAiJQPg/G8AlRO4Ebr8ydeDzfntxQBFFgQe/RJYDVgSMAuC84zuhN5i56z/fgUvEqQPzAP8/+b3avd1/9j4xgGpB5YDuguPA076hPfC9g/3yfSdBCYDH//1B3gM+xGiDbH8btsM4B/8cgnNHvkSYveM/6YTNRg/8cnSCcgc2k0u30MvEMfxNe1DBCElCB7n2VC5weTwDdYrzCYR8xbabP5gGYQJTgHt6aPiNQ0JIYkVKf4C71zuJuFE6OkHBAugFS8XIgAjB5MYzBh682jYU9BT2nIUeScDCY/6Zf9VCDEaGRk83g3Ks+39CpEkDRkK/Hn1owA/EOQDAuuf4Ojl2gGDGWUedRikBnb7p/B15gXsj/TIASANDg/wBakGgg3m8gXnyuwn7L4PbyKPDGIDuv5aAkEKnAC25D/YJ+y1C/sbhBogBwXxTwiZEGP6KfQp3i/kOwoVFDsSogmwABEBaQkLASjxFvKe9ZYGLhM1CXkGlfxz71z0tu94+WYDbgZBEE4IgAnYAUv1x/fI7073qf5DAIMIkAo0ECEKAgIL+cDuyPad/HQEPwA090oJ8g6MCNP8gOvR6uj7TQ3EDwsFGwGIAg79HAFf+8b1OwAnAvwCQgBb/xj61Ph4BKb7vAACF1EYIAIL8ovnGuftBCcRiP7J8oL6bgFLEEcQ8wDSAP39dQTe/gf5M/by7RADPgfnAZ7+EPlAAJEBMgk0CjcIkwZDApz5r/GU9HP44vrA99AAmQfFB+MO8RgKGkYC5O8a0znPCfctD3AavxNUAxb4AggyDq7zXe3y8VcAER2uI8v3H92C7DL5NhCgDPz2qPOLATsX0BFXBGnyhOzP9MT2+wAqADwJIhFNDMEFVv6f/u/0uPST7TnvlglrHIMUEfxn89Dt1P/sDkH8ivBb964N5xk/FoL2pNvC59n48hL+EUcK7AbD/5sEj/56+sr14PXB9CzztgU/FrEZmw4f8XHgnu/9A2oI8v/569b0dB3qLcEVRertzg3e0Q3HITYKp/TQ6eL5uh2AGjH6durM7lbz3g8yFWD1ivqY+fT6RwQ5+kT/aP+WBdMKxAtTEfUHvvk+6q7rEe3E+tAGnwRUCwIOqwha+Un6gv0T/hUADgFAAJf9Ewdh/jL86fT08GkToxR0DhQAQeow+P8FTQ2j/IvrEPKK+4INQQ9sBdsLKARe90X1Q+v67iz8OwYzCVsHjAjaC7ALRfhh8wn4QQAUEaQEvPAB6pLytAiZEOoJaAkzAyoA7gPh9sP9ffmB9Lz4mO3HBBEKiQglBuXymfipE+gfXAs5/hfimOAlAYQCKgHD9Aj58wTfDIIXPghg/tn5v/f79KIEuwrN/sT2KeYa+ikO1iOcHKTijtsd7fQL5CchEgftrOY/ApkNthCG+5Deu+zOCeAY0xJTBHDvBfO/+if6hwYr/vICCQkdA14HXwtrDK7sg+N657rv3hfNGOsQIBD1/zQAvfri7uDs1e+7+9YAzggkEEMPjA9LAQfx1vFz9KX9TAl5/Zv3qQtuDywIBwGl6cnkJfiGB8QReBAyEegLkPQR8gvvYvC2A8L/1v9ACRsRnhIcCGMBxOe95kjzaO+Z+5IHLxTHFEoTaAdZ+F78TvJ96dzlm+/4GT8qnBL99cjgW/M5He4YLPMH2C3kShBZM+Uj7uoV1l7oGPy6FAwKse2oAkwZYB5SEfnxNdvx2y7uye9TBmAcBholHh8FQ/S4/NsGBfm021jfj+m0EZ8oVBodB9X04f/TA1sB/Pbo6c32FAevEOcL2gkzBQzwHet+7I71/w+oHg8GxfcQ+uD7Rwgh/oPkEtyC+D4V9yFeHB4GAv6R/74Fqfa76SPsfOv1B50LxhCFFmAAegMC9bX0Hv5i+Jv/8/01+t76Awt4CrgFQwcD9bb7FvxI+wYGowVeBzD/cfxT+o35cwOC/Ifwo/vMBzsFJAxVBrH6Gvt49eL2C/jmAMAFNAf+C4kFLAnlBGv6bPAW7Yj8IgcMF2ITVvFc6vX1XwgkE+4BW/ED89n2igCFCvMBr/1u/BgH3AVkAtgE3/O09sL/twPxCfsMkwDj9tH5w/UUB9wLXf4V9vLwoANqCMMGDAiu+TX6XwQdCNoCFwC29j32HAOZBGgEsfsd+231mfbaAbz73AODCdMO5g7dA0P6oOwd9Tr9Nv9N/Af8Cv8eBeIVJAwBBHUDY/5//Kj6ofn17jT7wAeABAEENwAh+CD42wHT9p8HAhA3CEAGMu5X8mICcxPWCbjqEOGo6gUYxyaEFqX91ucQ+wIS4BH/4SvL5uwoF6g5Hyia6Q3LlPGZDvoYlAvJ31rpXxHwHZMRKPfW3CLmowl7EjEG4/n69awAbwW2AZkAugPj/QDw3vTC9jsOwicADhn6V/Ph+c0JOQt5577Ncu7wD0EsRyaD+GHlj/Z9CFQLXfm526DniQuhHikfswIr7U7tZvgw9hb9ZQhNBgkSuxD0BX//fAc+9k7hNOdw5mEF2htbHUUQ9wNyCn8ELwek4rvMbOhJAxApfyNoBET2WPO9A5ABAO3m5f7sqxXcLokX0AEq5Y/laAFBA5Lts9nN8QIUYDMlNEcLjO6b56Xz0vbQ8irvzPXFCfQWPBwlC9H8YvlZ5Mvm3QApBk0V7hzT71PnsQlbFH0KK++i0BTWyxzSQGQhfAAO23HcVRXeI4buhM7i280D7TpbOe8BKN9A5o7/0w4KAxXoNucgAuoblxt5Deb4B+wK9uf8rfo4+Lv91wRe/qL9tgvCEnkJRfvO7P7vE/5SBDoG6/+L/Sb/BwfxBIX1r/KH+E0FXBCIFaYNUvzB+8j2hemY6Rfzrf6LAuELCRRRFqwb+gn/84HtCeIQ5sjyQvnXBRMPmBjWD7kFfwPI75zvD/eZ/EEJIgeXD30KUPLU6tnow/NtBBYPShZWF/wUEQuDAOD3Yuih3LfhyuskBvggziA0GXoDHwMT/Z7zu/Be2h/p4/c8H3MxuAzf/7flXOrKAZT9/PmS+YkJXBMWGCUOxeeI20z1XgE9B6oIcfvWARIYpB+0AFzw6+Tf3VECDAim/tr7wgy1GaUQAA/x21TR4PM2BeMXiBA0Akr3kgnND4X+Ifjr65/u5/4+ChMGRgWLB5MEUf5k+yT8UfpyBFgDY/81BYQMmg/w9Z3lXuXC7A0RUB36BMb7FgSACPwVsAnh4hnZwvL7CYIPXxGX7y/mCg9RHMsRz/zT6xXndwcHHp4Buvin9K72bQ7pDmDsWd9u8e4HqCYPJq4AU+t685sCkQdz/WvnOuVCAqYWIBO5AJrxnfj7BxgNBv2979vvyPjiF/UZoAHe82nqMfqrAMf80QdsB0MJZg1HAYj4hfpT+d71cfRw/nQKQxA+CnH4CvUe+3kGcAP5+WjndOGNFNArlxls9/TjvuvfCFQhRvtR59nnEvt0JGUeHPzm3ALpAgTGFoMYC/QY5wD81gvVDxcGaO8W86D5KvhTCdsIow5sDbj++/YI9tMGA/8l9gLjleJ+EbAlTiKnA4nksOpaE9gkiPcs1vjQ+vByKOIn8/0Z5C/ySRBEJOYWR+Ox1Gn+ThvFFRMBp95v3lUAqhEHD9IDbAbdBxwQXg4u9wH0hO3C7i736fngBC4CtwhjDyEDBQDCA/QDM/pL8on5EP2B/C4CDQRGA9sDn/pa9mkDQQrgCoAC9fbY83j8QAmT/1j1ffgY/78KuBX2DCP4xfiX/a//Yf2g8Uf08fsCCz0NKwdaCGv/jAIK+sr1KvRI+oYFg/tfBC3/Jvo0/s4EBAqmBRgL5frN+H8DwfurABb7OfJz+HMHGA7VA3b9L/UR+lcQexVN/KrsUu0S9lMMxwxkAEj7QPr9/zUDKwKR/uQAzwPrCFADAv2A/WLxivFm86UCxBK2FiMPhvGl8Tf/IgfJCaPzm+Km62QUhifsEaj80t+k7F4LvAkl+6vtUftCD/MoVh1R5NXRTN/Z+H0WQRb6Atj96gygDdkD3/jW6LDrovzWBAMGdg0vC/ME7v3694z2WPgRA0r+3PgMAQIQghyIB6zxpeF+6YkKUQonBSoFjvwIB3sVRAQS6mHjIvNXA6IQiA6V94n/cQYNAAQFuvwV9jn8bf849x/3UgULC0wL7Qw9BW35mvw5+q/3f/gJ+tEJVQ1KAs33qPFQ9wsL0QzLAq7+2/moAVkEDwHL+Ef7gALU+rL9//fi71D3nhPdILIShAZc60bw9/s5/MP7a+5r+gQCAht7GFb3QvWI73QCuRrMErrq/ttW++QPyiG3DRfdr95g/AMJHRIHDMvtOfiAHaggmgG/5Z7WMN+uCPEU9QoSBBMFFAz3BqYDCPT070P5SfyMBQMHfRK3C9r4WfVe6I726wf9B2n89/g1DCUX0hpdALXe6dRN7CALpQ2UC3QB2QTgEpMQnP3Y5Efmp+5DB/oQYgulDGwAlAXb+i/4U/ok9g8Ck/vrA7kK1g4yDiz3Ve4t7If4rAndCsb/VgGxCOMIOAlO+XXnxeYk/nYJiQo3DQYBwwVrCcoCl/Qd8ib3NPInBZYJWQKwAzQFrQNa+7/8GAAP/9b9kgH7/Br9kQny/qn27/ly/xILNBH0CPHwBfLGB0cLlAZf/sjhnuUEBwYSzAsJ/k75wvu8FR0ZKPo+69rgkPCSDEwOLgM9/ZL/VAMTDJgGwQHR/n71jvl7/SsC+goaCbfzCvBi9Hv+MBEnDbD/GfRhBFgUywot+qrYdNtzBYAYfBYjCVny4PaRFEsTC/pq5bbjgPjwEdsYSAR685L2jAV6C/QEoPhr74D4tghkDtYHAAbbAT/xMPCa+BH/2gtgD5kABvu6CskKNQDI+i/gbdr8A08WBBSPCr77DvjXBzoS3PZm5jXnC/gxGcQgAQaG8Uz1vf0rDUEMW+x+4er8pxiIGs4MEfJD5hcCPwt9+VPqdOQl+cYwBUH5Bi7dgdCO5PwI6xJ7CZL6zwanEfEI9/z760bvR/S3/wUHBAOeGMcWFe/73D3tUwFYI3gg3tsIy0QL8DjMNQQNacGZtyYLwS3cEFPskMug4/E1SkgfCNrivdAt7HYbZBQO/8Hua/sYBP8CPgS6+R4Aa/599Cj6BA8SJKMcj+/q03jnv/wgGF8SQeME43cLQyS1KGQM8ts/4uQJwBnpB2vpbNdt4VsdXy0HBVn4Cey4+NoPNA1y+L3nbP2jC/IRcQk26l7kD/4LEtQQJwmU9270aQkCDkQCbvou9t788fbb8QMCmwqvD/0Lqfrt91H+kwO3/nHyi+0R+9cX7BuoBrvsn+vJ/NENfxEH82TlZvthDxkXzgfM8K3sQPzBDlANmQLS94j09QBKBDD6tPAP8fIB/RVrHn4HXu1J9ZYBhA0rDXDqL97U9J4Okx5kDVzo0+SnCZ8dThyyAhzTD9xbFA4nRgs660HWpeWpDCETiA0GCdsDmgi1EYMJWO0B7I7uQvQcB4AJrQlWCp//SPK89tUD7BMoFq7vVuET+kwL7hB2BNXq2ObyAiYRLg16ANP24PaoEUkiUwIk79fhx+bw/6cGSgeLCOkKNAr6A44AzAJt/uH2b/Zx8GL9kBnWFy73XuAY6of9sxo2H476DOoZAskRrxNaB2/U89EA+g8OYBSGB9D2m/awIgUt0gF17C7XRd/M+pkFtxD3DFsMeQlP/UH8qvTF8gQFOApICmcLoPyr+E3xlfGQ947zlwdgCtQBHQuZC4YHhgHh+5z49vR472zvP/gqBokSWBE5DD4FsgIzAaL7LfZ89UX67/ns/d8DGv8gAbAGFAZdAIkApQUQAHv9lviR9UQB4wtiA7jycOdK7wsUcCQgDgrz9+h29KMPqBkr/KnrzO4YAgIRDv+P8z7vpgARGugftAu/5xPl6vgkBdEJUQLu//oGUv9D+HP85QM/BjT8MOnl7QYNxxuyFHEADu5Z9rcGcgpp+pTnT+kVAy0r6SBd80TdQ+EgAYge/Q9I9hj4v/4DBjYHqP9u9Wz31v7e+8cHJQJz/P0G/gE7BMX+fvoH+2L6zvwb/L4F7QW6B54FEfzL+aH1ePZ4/fsHNw/FCtz9Tf3l+ZP9aAKF9wcDWAPm/HgDIf7oASYAggDjAdL8SwJFAWn8Cv/nA6j+QP6K/nj2m/zVA/4AawBZBFwIbgkvAlry0uTG7XASQh4sCT30vugP+d8Y5RhW75rh2fCJAYIeVBeU8C7kOfniA7kIvAw3/pb7fAEQBN0C6AWCCeP6/eNd4cz+YRutI0ILleFZ4E4PVCFfC9DuIs6048En7zK7BdPm4tpA8ogj/yS29MfhQPaRCZMahQ/I7QbnQfMPAl0GqQWKBFsA1wmsCcUAT/nA+MP6vfQ5+Zj+MwbGDjAI7/Z+90kHVAW7BBT+RPJ6+iUDIwW7AfD5n/et+ToClAaXAE/9iQFkEcMSxQFg9+fuFvOW/x4AZf7g+Dn4CQNYDbUMB/+W+swBVwSNAscALPbp9tb+1vnn+27/FgKbCr0IMQOeBfz/MP5+A1P57fJ39+P8Rwb9AS32F/mzCiUY3wg0/GH6XPicA+cE3/049fHxJPkEAOsJ1gfTAnIAK/65BDH9qfZ28zryGgLiA2cNGRFOBUsAiPOy+ov/t/lbApEG/gZE+nr16/dy/1wQZQWG8iv1qgAmGFYaEfjw5m7kH/mRD6cGgvuA9lAGGRgvGI0J8ep35bb3QPt4+uT+Mv6uAG4KpgBbBxkY+g0GAQzkAd2B/iEV/RiIBSLuCfKn/zEBdQFu/f73pgfBGG4Y5PtH6VLrtepQ+yr+pARKE/wLrgEC+bACdhJODkzzweEx5fv5PBZPEVwItwAy+lP8kf9Z/ibxfvkwBOANvhSPAdL5GPoN9SH1KwFJCZ8NNQkt+FP5Kv6ICcj8UfJ18inw3xIeF18MFwCe84X6xQAPB5T0afHt9U8AzBPIDS0G4Pn5/Z8ATAFV/n/0R/6s/b4HMAaa/JT4f/yUAwD36QOuBTUIHAtu//P/LPc2+pn3/PuC/pz0AgSIBg4FPQTVAz0Ag/6RA/r8Pf4u/GMAwwMZALT6hP79/S32+wKH/4MK4w3x/+UCavpB+kv5gfzHAAj9jPxF9ib5pgUDFAMPsgLn9xPzggQjCsYCMvBG5Xb7MA3tFJ4Jpebm5KgOSR0OD1b+k+k19VgJSAvWAf3z3fJK+PkJZA7e/rv9bP+0BocKJgSj/VD3xfb98wL5VAI4D0ITXvep7F37hv/9BugEOf0gBoAGE/5N+xb7o/gk+aIA8QUzCTAFfgGpAmr7y/vQ/Rv/j/70+Cf8VvuiBIcKjgQaBAUEpQDZ8hXrivaWCwwXLgio8d3xwAWrEMcHQfO95n3vgBIiJMkKFfiG6xf1bAufBfH0sui/9coInR1/FvX6uvXo9kv/lPyV++D4NvrtBqYGUA4FB/zzVPqgA/kArQOaAEr4mwIACd8EsvjJ7s/23P27AToEwgNTBDsLwgcHCX0Hf/AL9Nr0HvFR/UgJLRRCDK390fFh/lgUQBGK/RPivt89A+IZMAtV96/igfSxFU0ZlAww78DyOgKREowQ1e5R6Vjsv/0YDu0H7AEHAkUHJgXxBN79Zf1C/xz10ewi9WwHbxZnEZ/spum7ABcVwx6U/97m+eYoBrMh+Ajo7ZnbgelIIyI1RAWv33TYUvf7MMAnyepnzQrlYgjGIpccCvDR6CMB5BCbDroAx+/F6kAD+wUHA7AJYf9SAIPyKu1qCzQf9Rxy/ODNCNQdHoQ/4BO24fW3xtJ9MNdD4wgP3JvXwvw2NNIsfuN5xoDn4QtXLLEiKemQ4Mj7JwcaDcYCMgQdA0D1UfHl9XwLiRj7DJ3nbtz4/z4VBBboAnvjAuWKEHkjkQzP9UTgu+r3GxMhJwEX8Jnnofa9B6cDpgCKAAMDl//f/XMCpQucCv31PvHC8tX5egl4CkP+9vUgBVANLw3BBiLvoO1+ATUNoQlV/1nxyfTC/+7/NwCE/QYEVANIArQGUQViBFn/FPlH8OXzdAMGC8gBRvvO/M4AJRYFF6P7Ce/i79TzqAGYCYn6MvZmBP8JuApeCBT5ffB+/QsAggKkBtsFpQN4+b/42PrgBE8Lw/2761/u2gmWGowSJADz7MvmDQUlF/ACZfYo7lT4phQTGuL9JufS7kn+2Q9+DFb3cu8W/UgKjAsJDWD/5/hy+U/1FwCdAuQEpgXf+V32RP4QCCwLIAi08/PtIwRKE1gPl/rP6Z3u3wWsEQgEpvBh8oYFqBxbHvn1id0s6mwBnh8hGsDsxN0L8bYNCRwZB5joB+gbCfIffxfh/u3iCeWZCqMTtvxZ6o/ll/6zI+smrwQB8DPrKPdSDWkDS/TC7+X5Wwa8B4kMGwnLBtn6j+7487396hF+DuPz1OzRAqAW2xVZ/W/N6tdkFs41fyjz+TbIZdYaGgArFwTJ35DRSfPiJwgpSAqe+YXxAfgy/ZTziPH4+4kJkARYBngMKhIGFDLqZNNI6XoG1Cn+IAzqH9aW9cYbWyPiB4bejdmGArQezxlXA6nuM/E/A1QDbfr5+5MA2AT3/hb9RggeDo4GH/lj6fHshQ3eEtIClPef7QD9YhEKFrr2jOUZ8iT/Xhx/FVYDEvrU9o38S/TB9uP0HvrWDFkM2gr6B1H7cfZ6/hoAZP+s+c32HwLgBHMLbwSL+Q37+Pw4B74CgffE9w4HnhOjEUsCduY94Qb1AA0NDycHdARd/tkBAAXy/xj5AvZ69434yf/1CKwNSwmjBNL6k/hmBLz9mfEf7mb0gwc8IT0hePzd5yvuAPwiCiAKMvbm793+cwiCDU0FnPap93ABLgu8CYn+IPTP9j0FzAoBA2j2w/CW9OIBRgkWDXcR9QZy/sD5H/Wh9cP28Pqv/1gCkgbmCIYFs/5R+pn4tQjLENYCWu254Fn4sw+KGAsHsOqc7s4IXx02Da72UebT7coTDxae/kniI99aAUggpyPSAXvu5PT8AroLKAQv9T/wi/0+AgIEtAPUBAQH4AB9/CP81P9XAGMCRfz1+B78NAHLCM/7DfKn+SAGZRTvD+r+9/Tz+N8IZwyF9hHnzu2q/doOkhRBBVP6+AOfCYYNMQMm5ovgqfiZDTYR2Qq993byuwesD4L8hfGQ8YP29BHAGOMLbAQo8uPtv/Mc+PD3dfwQBdQJehO5EI0Kd/5Q8L7rYuwz9hoI1RDw+5b7zQoBERMVwgCD3GPY/v8gFdMfSxMr6gzrbwZgENT4OOY23JzpHC06Ol8RT/Yw6B3zGQhvA7TjpuIL/UwUoiXuGTn9VPR5+A/0a/Ud+XL7GQRZCnkIsgYpCpACEPgT6XjkJgD6ExQZmQzM+eP3pQCBBX31EOsy7pgEBxqoFEIJh/qd9Ff65PtX9sb5sAEQBO0JIgldCDYKgAMg8Vjowu76+JgR/xROAWv6XP1fBAoEHAA59Vr0NQQLDXkKSP759Z303PyoAEIDhgMY/rAEXf/PAIkKiAQ5/yL2xOjF7Y4KtA3aC6sOUQCjARj+TP0F88ntB/3Q/ugO+w9Z/4n7Nvp5AAUFDf879rP6o/1g/A0CUwZQDBkHlv9/+uz40Po4/mkEnwLXB7kFMP2U/Mn5/fKo85QE6QpvCUv9F/QeApcZOhgv8rzmQehc8LYO4g6m9zv3nw5VFPsRCAXw3kfaEgCYHZAVPQE87xbrQQpXFkb9N/VZ+Lb0z/rPAhcObxIcErQFeeqh7QT3Jfmy9yz7ggegCO0ZVxbC+ULu5e4S/3IO+g5f8jvjawBMDAsK/wTu8brxnQYZCzoDWAWCBSAAIgTrA4j0x+7Q7KL3cxKpFYcGvfUu+EcHwQ6GCBvyve7V9tMD+Q9CARb18/Gr++gMpg0v/0fuovl0GBQedQeg6hrfT/SqD6IOd/vy8rj5Qge4EeAJ4vPo8C7/Agc5Dt8FAvBD8I4ITAyL/ebzWelr9hASYBKLBYQFcAJZ/hwFOf9I80L36fqZ/UgHCgZo9+rzTgQqDEwMEAY2+Cr4DwKkBqwA3f2N/Lz3m/R6/ID/EfwNCIAIzgh4DST/7fXR+s3+2P4fAGD8C/xy/k37RvvB/ykOHwnWA4gEgPwLAXL5a/W9/AEAvAIHAWn9cvnL/lEDOgnACUQDEgEy9An5GgcKAFb9pP8Y/Yj8jgCkAEwC/wAzAjwBff/rA9L5t/gA/8MCcAmPBan63vdz/p7+KP6h/F3/DgSlACAEEAYH/d3+tAPl/R/7uvRr9Sz8+QCnDesFOfvP/SgBUAQuBh0EMPoz+7QBUwhrACrx9+o58ZYQTBj6B4H6XPdHAegPmxCf7zXiZ/Af/qANHA1TAZX3xQJoDCwHuf/A9pf5j/mG+tP8xwWaD5EFPvLb6LkAWRZVGFIEXeRk58IMSCE9BzjvSd6X6PEcHihFCAruAug0+e8TrRI271jlufgFBogQcA9eAo0BtP9t9czyyvu+EMILCfPS6T34fhEBIUgQzt+e2tMBLR/rID7++9LY1mYXjjOxDb/r+NFm5hMryDOZ/CHgXuPa+VIf+hgI7WfevfWRDeUYERIe9Wfo5vwRC/MF0wOZ+LfxD/9VARcD5AToA3ADZPTZ9NgElQn4CTL/Re1S79cN1BbsAhL39err8XkQ1xj5/IPqlfRf+/sWlxuw8YzlO/YMCQMThA4X7/7mFgR7DL0F4f7o+f73LQbUB+n+cgJJ/m0A4vvv+iwBXAHK/3f7b/eI+VsJ9gpDBoX5Au0j+8ANHhSI/+Lv9vQ0/GAHGAmy++b0+AGmACwAIAcHCbILzf6q+E/2Cvdl/MD6Rvo5+i8GsAwrEQ4KevEb8bD/0wq/CVb+Y+eZ56sHxhOQBSL9EP7M+icIGgrs+of9lQC5/zgBOfwo8KD0AwE7B6YMKwgsAgv9gwDcBNj0CfaWAtz5UPh0+jT+gA1lEpcGpPnL+B77AgA8An36FPzd/of8NvrZAfoGTQXeB+IBRwCw/Uj5evqC+wP6Bv15CIUGKgIk/3v59AXkEa0PVfhZ7EDu1vMpBOMArQK/CF0Evv4r/cIC1wVRBzP7NPO+9z/9MwVFAiL5y/WEBNsPWRC4CebrhubVCXYcNQ338kzWm+BNGM8kywWh7mflkvoMIyUkXvne4RDoIf/QF+MQWuld2Bb65xl/ICgTd/Au7VYDwQVtATX7cvne+YL18vQLA6oQ1hA3CIPwbO8UByANYQck9xvpX/MhECYcP/945HrfJfZwIAUl7gFi7zT4vgUTDwYC6evW6GXzWv/tB1wKbg2tDUwCqAC/AN/4HvnQ9FbuOfY1CboX7BP5BJ7moeRyCiAZyQrl+c7m8+yPE58YhP2B7+Xt+fUxCj0P8P6f+7MEPQkEDI8DnukU5cT1iP9eBxMPXg8JCe0DW/wc9rf6rgMb/rnwC/Px+6IF5wyGCZIAk/8oA7AA6fwE9wz1O/z/D3cP7vdE9bnuFPXGDbgN7wO7A8UHLgQVA0b9aO/d7gP47/2eAnkHsACEAZUM9AfhAWIBRvhz82fzMvCqBYQTYA1xCbbrle0EBsYLfgn9+Rnz1PilD4kSOvyu60vpdPxkEzQXEvjv5vj+NRGmGfgNvuVh3av3twYdD/4Gofr6APYGIAwZAdnz3PH2860D2Ad0BOMC9QKTAef4VfjjAmYOhQLv8kHrLvL4HAMk8fu+4TngEP0pI4Ih6PKx3Qb0EA/cJHQTjN6G0ov4sBScFyUGOe4n70MMnhhjAhr3OvbN9jr8dPzwBlkOpwvLAGvnVuthCIsSCwiv+rvuafWEG+4ZFPme7F/lp/cnFKgQLPUs66n8NAzVEVIJCvcX8+77af9RA1gH1QczB3H0h+5F+Xb/+AjuB0L4d/aaDsEV/Q1O/1niMOa7B4EXeAbA7hDjZ/StHZgjHQAL5j7rwAEzGy0ZX/K74TP06wdBExkHGunm5kEGHhe0FfoGi+0q8oUHHwiC/s75O/Yh94n/ywNfA3UL5gd2/K35mPplArsI6QMm+MPz2flUAY8FPgEz9rf61AgcESERuPkj8PD3B/kIAeACaPyg/DkC2/1s/9YLyQtnB3v7LfJI9+oCGgmJADL57/OA+84H7gV5/OXyl/eRECEaHgja95zs0vEXBi8K//gV9KL8xf8LB1IG9ANIBfkApgA9/AX6vADH/WH6C/+MAK8BcAc8AtfxlPPnA1IJbRCeC0zvH+zBA98KOQMR/ajw2/QWDHMO6AOK+e31fv4FDWYNPPkM7F/yxwM+FV8ST/ZP6Jn6tw4QETcDH+lI6qEAagx1EKQCqPYz/JIC4gQxANH8i/6R/6j/pwDeAGX+vQAB+D7xqfw9ESsaCQhY9MToTPmNFEgS6/EN4HvsvATQJPQZZ/dE8Kj3LwM7Bbn9he7E8hwKPw+HCqYCnPtL9hD9DP7k94ECiAfDBVP+0fymAOUGrwTh8kHn+PK2GCIgCgvc9Z3gu/GPDj4QFfjq7In4rAWkHkUV0/RU7qf2HwEVBs//bexf8gALjhExDksFJ/hr+GH5r/d1AYkAcQglCIL5qvzE/GP+p/8s/dX/qgOzB6UEfgCe/MH3qvic+0b+dfx9AN8HpQxkDGgEO/WB8P/69P92A8L/+vub/yULXg1gAHT6/u/P8Q0H1woDATn9xv3+AKwLDwn89mjzdPQM+o4E5wfnC80LI/6s9V/yUfamCFMFV/ky+bECDhB6Ed8IPuve5Er/vQQKCY0FDPVb+xsIkQ2tBib6zfQ+9nj9LAFSAeEEgAbKASD63/dzAQ8HnANg+MXuIvroFSYcmgIX8ubsn/M9CTwMK/qu8WT3cwSIDykMmP/x92z8yAGfAtYByvgR+gf/Ffnd/oIHIg8ZBdXoaei2ARUYLyD+CvvkUuf/ArgRxAPp6rTlM/PSGW4lywft8HPpxfvAFnoRLO/544T3hgWiFDsQXPxw9834qPZ99dQCQRDHD5L/F/lb/mACagim/Vvq1epLAdYS0xPQBNfoZu4yEJcd1An96+3c7e1DIYonbPxj5+HiZfWBFggWa/Yc6h78KRFfHNAOl+on3s/8NBICEBz/D+YC7pAJfhaYDPj8P/iI958AEwaDAnMBKv3j+/75xPsSAeMA/P7wAl8DOQO0CS4HKfad62jzT/+4EigUnPi37e34aQjdEbAFre4W6oD/uw7/DWYG4PM18pgJQhPGADPyT+YO7+cRCRrqBTz0v/K6+9gMRgx49/j2mv4JAsgI5QRu+B73Z/7VAGUBC/6H/Dz/KAjnEIcD2vnm9YD0rvnD+/0ADgTnCKkG3gBQ/+MCBwS1+4H8t/fc++IFkwKm/l37Df1n/mEH6Qj3+Q32ywLCDikLhgRW7Z/l//teBRkHpwG4AUEFuQW7BCAC9v6H+0T8uPF29HIEHwqxDNIGU/iL9DMFugo//GzzePJh++kWSSFt+zPpkPDy99YH6gd5+yT1cACRCX8JZwXHAKb9b/ep+Q35y/wgBZgGPgT4Ab0A6wEtART4he7C7h8HYheyEToKFfoq9qP6ef1Y/c74Kv5PAlr/yP5WB9EFGQBiAJ742PqJA6EIqQGm97v4hvwIDYcRo/N75lnxvP1KGI0XUABT+nv7+QPvAfH7sPrD9zf6ov8NA1wDTQVIAfX5E/3VAFsFRQmJAXbyUfEOBYsPEAcj+mzlKOtPELEWXwix/lX3Lv62DZMIn/iH+KT1z/h/BIcFIwFQAD8EdwV7Ae7+SPe69I7+wgFZAykHLAiNBfX3EPQ8+08AYwXE/xn8/wDiBYsE9f3D/Eb78PtJAq8BK/yr/8cA3wCDDIcL+flm8gv2pPr1AXgF0gHjBaIG5f8d+9L5f/6jAN0CzADV/WkBDftQ/JgBdwAfA+z+hP3dAZsAufx8AecEYQNyA/r7Q/rj/f/+ZPyZ/F0BVgBWA68C4AKmBdQBtAEa/gX///iH80f8vgXiCmYCO/Yv9IgEYQ6SCEv/FfUo+db/5gaZA/P66PqS+bcDpAZUA53/6PyRBMsENwEs9pT4hP6d/M4BCANiB5IEivud9fv6kgjbCP0Ez/vY9x79Y/+n/3QAgAHs/kT/lgKPB9QDrfvD/AD9kv45++n8egA0/fMBSwC8AdwKKgUq+tP4d/00BCoE0/v1+4//PAAx/tz8igIzBV3/4gE6A4P/7wCH/XP7aABGADb6Y/tAAoAFrQOx/zQCWQNKAYX7YfeGAAj/Q/5MBOoGRAb297fvPfVwBtQSRgxK/2P4pfrR/Fn9F/7q///8wfyiA2kDoQGE/ksAGQrVC4n+3/Eq8Cz3lQElA60MABCiBND7quus8oYHKwwpBwT+LPs/+0v6Pv4tAWv/bAKNAe7/jAT6AMn5WADgCYoDg/169WXx9/usAPYJlQ7HDmcIie8K7Tb5iwCUBI3/yfjk/aMIRwe+BKcCPf2j+tMBRAbo/C/2ifSv/EcIcgvk/DDytQCpCA4MAgr4/IT6lfqI+rz5CPo8+j354QE3C+IKfgOdA9MDjQKUA6P35/Mf+O/5m/yU+yUGGg8ACaMCz/xk/DEAd/9b/Gb/C/6P/AH/pf22/l//GQE4AzsGKAbB/Q39iQDwBMsAV/mu99f4O/5g+3IFHA9JDUQJI/wI9n7yPfog+6X7twY6A1UF4wGgAbwEtf4RAJH9GwDG+jn0S/zXBf8Lswix/zn5WflW+iT9t/6FCCUOdQGQ/NH2DvstAMH82wAG/lQDvQQ9BFIE4Pte++n7jgGbATv7QfbF+u8N7hEmCBj81vF492T6nvg6ApEHggaDBJn6hvyIB9gHCgCm8zPzBf61CL8LsgHW91f24gBLD2YI2fDx6Qn9oRG4GhIMdef25ED/HgckCQIDD/dT/BQIdgZRAFsAR/mj+rcC7wCT/YL92wRVBigFcATL/Ev7UPsd9rvyzvzmEEEUygFJ91r4B/qSCWgHYvb/+C3+vAKoBsgC4vge+e0AwwUkBjX/6vmt92IITQwO/V780fTp9h4AWQI4BOcF9QZMAS7+ZPv0/QcAG/y4/S/9h/+VAlsEbAaPA9L/Dv8z/Xf+WfsW9QsBsAPUBQQNsPlj9un/Nv5OAlMFSQHr/S0AIQFE+zb6Av3T+hoBGgluBd4CMwYMBMEAaAEs9UvyB/sk/vYD3QNBBdYE+QIyA+j8Vfjx+0b/Jv96A7cAqv64/XYAfQOQ/uL9vvyj/woEFAh6BD7/mAAG+Nz5jfr8+sMCOgFUBccDmQVRA+j8EPwi/Nn/Wftf/okBwgM8BsgEFf2s9/D9Hfz4/I4AfARtBGAG2wgg/EH7+/n7+aX8bP5eAg0A/godB9n26/S2/oYI5gmRBr3wqvBqCvMQMAN695ntDu5SDJkTVgGg+pL5hwClDrwPQ/d966T0Gf5bBR4IDQTR/TcDPwDc+4f/yQJcBDP7mfju/oYGZQoNBrb2MPKc/tIDVAbNAdf2w/X0BwUNxAEd/Rn0jfYdBQ4IDASjAqsBCgEi/fz4z/xt/3/97PyJ/6UEogtzDxwA5fXs9XT4egRNBp/1GO73AcMKBhQvEQbxe+uU/JoJjgjdAZ75xPXtBAYL+AOQ+y7yH/YQAWQHxwg/AjoCNgTH/jABCPvJ91T59/Uq+yACqBVzGJgAZ/Xv8Mn0NAKzBrz7QvidBGUKCQ+cCmn1Nu7u9dj9kwSKAXr7tv3FCTsRCQU7/FX5vfPB8Rb54ga2CTUNpQVo9m740QGaBOP6cPt3/Wj/ww+HDr//LvpV8ULyYwHiAIL7RvyNBJgPtAtuCBUBT/WH8qHwk/S4AFcVoBKU/Lb4HvvcAYoGFQLz8wP0TgVgC+4NxgTV8BbvTv26BV8Exv2y+Jj/rA6GDgYArvpU9YL0FvmP+28M7hI/CTkATPWY93ABewNh+4zyZvoPBRUNDBE4ALD06PnjAjgIBv6A7abuiwSFEn8QwQYR9zP2Kvjh9iMArAfwDSwKkPtr9ncAJQbO/hf17eou9FUPyB09DqT3JO6O9xQWBBbI7uDZB+XxBG8nIyHh997qpvg6BTAM7QKj8V/uTwPeC6IJ9Qis+Zf4U/nV+Nf7UP3SCYIJhgM+AOUGjguA/VPtAtul6twUBSHxEsUAmPLM+I0N9QlF76PobfXdA1IbGBdg9Hrry/heB2MLW//V7pryxwugE6oM/AEU9J30u/WK+BEBSQTwC7sIMQRQBJ7+Mf0N9kT1M/QY96sNJxQFDS4ALvae+sYFqAif8Zvo4vNjBtwWjhSpBh75ZvY79an7CABcAaUDNAgRDn4D5/g07QPtOvucBBoLLQfzCb8JvASX/wH52fkW8uD1oPw1/wkBiABeDbAQBw/6/rLlt+lZAAwQmwz3AcL12/igBYUDUfqy9vf5PQAOEvsQOv6S9+/3Z/8pAQb/O/YW9ucBrAQrByYJUxKtDKfuIOQB72UDWxmuEtnznuxIAqcPxQ33/9LkfOWWC9QcvQ84/X/mX+pQEO4YXvxc7NTvUQE2FeAVDgIC9sn3OfcL97X6dwXoCAIGewBm/TQDpwZHCGv4MO/D84r92w0wDLb7HPOOBdQRBwwX/VzhIOYYCCwYbhHTA0P3HfcV/6n/N/dB9on/XQMQEnIRpf6g/Rn4nvUx/Ev9+PfL+ywIhgQ9Bh4LhgbT/7b1Q/BG83ADWAvnBvAG5gHB/aUB8/m69h/6YfwRBSoGmQvmBpX9HP4m+8T9l/ZJ9Z/9ZwLzDoYPuQJT/Ln6X/r9/Fj+iPnZ/hsH7ggpCiYCkPG79EYEsgVaBbj9UvMS+usJVgoSA/UAA/cL9eD64vtyBzQPqQfb+7j3d/nGAKkFRfn18zT6DAlzGJYO0PN/6mfzvwY9GYcJ1uyM6dX/ghOIEbkC6OsU7EMEygpQCFkBFPvO/mkD7gPD/SH9y/oX+179FgP5CXMHEwKS+IfydfucC40MLP1i8dX0JwRNGGcRlPD45E3zDgiEFP8JO/Xy8KMD9RD8CWEBme9a73gC+Qd/B07+pvdM/f8FgQiCAJL6/fvO/Bb/dgA3BtkHUwFa+fX01/vEB6wKnP319SP8YgTmCnoLHfyN8/f7PQAwBWYDSvVG9qkErg2FCfP9+PNI86gDbAmCAgT+1wC//t7/6wSw/I/9C/39+vr+fgGHA+4CcQPnA5UBxv+e/ev7gfxO/ef84ADNBoMCMfxD+k//4wElBXQEEgIyAXb/AwA0+3f8ofxx/GX/ZgDeAWoC5f+GAZIG1gGW/Az8Df0kAVMEYQEr/Hv7n/46/rsABAAS/5ADOQVdBv8C/P6g/ID6qfwh/yf8P/8yA0YBPAA6AdQBzAHFAD79Vff1+zIMWgixAb7+NfPH+XoEMgEK/FD6Mv8xB1UOVgq0+dD1TPsl/oAFSQOJ96P8ZwfWB/ICq/0W8yr2NQVpBC8F6QHg/oIBqQMMAo/5gvz8+5v6RgHtAQYDcwekB4kB4/vA/Ob8Ff2f/mP9K/7cBmELlARf9UjvJfkzBPUNkAhD+rH6vwWkCYMFwPz474r0nQE7BBwEUwCs/iwFlgqCCG/48vGR+Kb8gwSABbwDNgONAKX8b/d6+xsEQwnFAZ76dP8qA8oIHgoh/OD1KfjV+RkAxwDE/QoAbghrD5UEzvts9C3xTwIZB6wDCQI3AWT+iviW+17/8ASyAwr9Uvvg+/kIBw+KBtsBEvpw94v8Rf1W+S75Yf/dB/cRDws/9AbvaPw0BJwK5gfp+W74jv7mAFv95Pyw+yb7qgNRA80BAQSZBJQGSgkEB8T0sPCg+L/4T/63BIkDcgLgBhEE2f7t/Bj9av9gBCcKQAH0+9/1Cva9BIUELf8o+HT5JwYBDPsNrARs+vD4ivyu/pb5evkM+UIAcwk5Cs4EfPw1+8z86QCbAff+IAKAAZT9ev8nBAwD+f/1/fH0ivZfAkAF1QWHBmACKQDl/x/82PxY+rH+3AISAwYF3/1T/oH67Pg5+zn8NQnlC/gFhAIJAVoBXAXbBDHvteuI95v+WQ2ADD4AL/oRA5YKMwefAYL0rPEI//gFPwGF/Jn4g/rNBJUGKQG9/5T/mwK+B4UGLwWHAQ75Nvab84L1hv4IBgoJ5QVoBecBhAFBA1D6TvdC+Qf/zAYvBP/89vslAGQBfQRcAW37if7AAD8DwwXcAyn+vPw0/137evyh/2T+8gDaBE0CyQC1BNr/NfmB+O/+wwbtCCkDw/kS+mAAFgTMAqz9Ofkh/TwFbgZIBBb72Pgv/rP/UQSC/3D/fQBvAncFr/zM/ef8HfuF/j0ABASLB8MH7AC//eL6lvof/on9uv8dAXsDfwM3AdEABv/K/lb9J/7I++D+/AJ0Ar4GVwQG/1X7ePsT/Pv94ACUAOgAqgL/BvACdv9j/ef0TvvDA1sEKQHc/Lr+nwItDE4H/Pcm8bj2/ABEB/UK4f8a/SEE9gPDAWv8avVp9ZwAqASTBO0BDf7yAjsFygUX/i/4BvqX+iQC5gJDBBgHAwFj/bv7dfpv/g8CPQE3BLsE7QHM/WD9bQEo/yT+hPvC+YYACASfBWEE7/9X/T3/egHq/W36f/k+AUYMLAyUBMb0TfE0/vwD1wSk/uz8o/80BAMIfACH/A/7aP1RAzwDxf2+/OX/GQBaBFcBv/t9+379Z/8JAbIFmAXdB2AAHvcV+uL8rQGIASn/jv3x/9cGjwRXAcz+w/wA/v3/I/9+/zQAiQA2AxcCpP9j/Dz7YPtO+pb+mQUpDEMIAf649oz3ZwSBCMH/R/gU95//EwoQCQEB6vix+bcA4gM9A6L7kvmCAaYHagisAqv5w/j+/RgBgwJGAF39EQB1AmUBSAJhALH7Gv+pAt4A1/zQ+j/9XgNCCaUFYPlt9f7+LgauBwoG//bt9ZIHRQpWBHb8CfH981QIkQ14Ak35YvhT/50LqA2B+Qjyavh8/a0IRggC/T38ygKDBmIHRv859vD5y/2QA0EFkP9I/wj/2P7j/uL/YP5FAHACTwPvBAYDOwEi+oD6t/ss+rMBgQWeApQDZwKrATkF+//r93v3J/vtABYEFQLl/93/lQLaBS4DDPwo9oL3TANNCOcIwAEx+RT/cwBg/2f9QvmK/28GiAY2BoUCWv7w+qT4xPtY/esABwReAzEDUwAzA9YDvgAp+yb2NPr9/0UGKwZZAaD+hQFoA0z/4vor+9P/AgA7BJ4FkgKbAaP7PPVk9tgANwi+CosFRfpb+pgDMAeeAH35ovEO+CgNKBB2ATz0iPVaAtsR1A/m9ujsMfOm/z4NcgmA+jn4XgAxBKoH1QEF+Sr60AFPByAETAPt/R/56/ZN96EBFQmcC0AH6/4T/Bz/ygM7+9j1QfcH+icIXgkIBJ8Da/5c/qP+bv6uAvkDUQGU+sP14PubC2QO8v3t8rjy6/2IEpMTFfwl7kT6igprEMsFA+Qu3/r/nhUGHFkLhe9d78kDlRH6A/zzTu+p8ysNfxITBIH7QvXM+ygDFgOK/uX7F/9lAkAGHAf6BHUBwvlF84j1cv62B8UJIgDC+tD/MQZDCiYD1fXP9KX7vQF1BngFeALL/8n6yvoB/IT7W/4PAZcFoAVyCe4KtQDR9zzx+vEtA5wP4gQs+NTxSPvSEH0TdQH88gT0+AA7Cq8JcP4K9Lv4mARGBsn+GPci9FMAlQs0DQwHwP4E/bf4QPhq/soEoQrUA23xr+6wAiwPfA0iAjXv7PP5CFkQOgZK92fy1Pk9C0UO3frj7z3xbgCYEjAP9/7Q9Zb5ggCiAksD9gOPApb/Qvpj+xv/tAXDBon23PaT/gYDfgrnBAv+NvyLA5MJ4ALb+XDsqPFRBhIO8gjE/7r6Mf02CP4Gs/1B/c37O/8LA87/GgEXAKz79vt4+23/rgRwBRkG/AHo/i0BmwFWACj4G/VU+xUDZAlDBs/8qvt5BBkHvQNi/Xvzw/eGAQQEmgbPBHkAP/9d/E39V/1h/N0AbgJwBe4EMgI0A1L9V/up+5v9PAX/BW8AqvsS/BH/+wONAMD3cfjYANQFbQmhCgT/oP3O/jD9if6O+Xr53f3TBDYHfgWtAfL+Y/9a/jgBp//FAOYBWv85/mb8kv4d/PX8UQBWAKwCEwVQBpcC1QLeALH+rPw8/N/85fon/0EA1gCVAmgC5f8JAqAD1f/f/7H/o/+tAHcDjfzN9cP7pQDsBaIGPQAK+vL8PATLB+wEm/j893L/EQXZBeX+D/eS+FEFfAkXBz78nva7/VED0QbCABH9APqW/RgHRwR1/hv+y/3r/zYGLADT+/D6HfzMA8oDXgSWAwkDewAT/pX+/PvL/qD+8/wj/pABJwP2AlMCSPpO/b0CIgTvB2sAyfke+/sCYQSf/XH71vgO/UQI3Aq5Aoj8kvuB//MC6wKn/K73l/2OA0cGiwLN/M38IP6eAbUDfQHKAG7/Tv/PAn3+R/tw/SD8tf+PA2YCfQBdAg8Cxf9w/+3/BQDZ/I3+Gv8RAbIC2f6LAioBm/5OAD8A1gG2AHQDjwB//LL8pfvg+qb7fwVBBxUFkQLP/q/+pf/8/6r8Gf3S+m3/JgeGBFD+HfqD/gYCFAg5B5r5j/f6/rMG3wZiAcD6Bfix/RD//wEKAUn/PAJJBPoG6gBK+fD5Ifzd/hIFbQDR+zsBtgI0Arz/IQCs/7v91v+U/3ECWARyAIX+jP0A/En8KwGe/5T/fgOuApsDbQPJ/g367/rnAEgHpgGj+075SPtRBS8EywLh/2z8QwGOBDQDbPuC+ir9Ff+lBMIBtP4h/KoAowdbA00Ac/m1+rgAGQEtA9n/xPwB/2MDxQQy/rL73/3D/+AE1gSB/kv6SP3yAEECEwKCAMIAEwFyAaz/HQA+/gz9HQAD/8P//f9cAHYCPAPuAGz/SQAX/zEA6f1n/nICTgOUAWH9Gv4D/d796f8GAFkBegE4Bd8CJgK6AVb7JvsX/cP+X/7c/ZABqAUkBZMEEgJJ/fj+RPxc/JEAwgBOA6cBDf88/RL8GP7j/XYBtAM0AiEHxAaqAE79zPeu+AL9of/+/S79ngSkBbQJ7gcj/5T8fvps/Or6+Pyo/R79iQX+BeQCIgJm/qn9S/8m/6MA7AHYAlsAVfqm+yMAUAJ9AhoB7P0s/d0EZAMyAXYBP/yz/pn+/P8j/zf9MABEACED0QJyAYQCSP9q+Vr5kP6EBfYGyADk/Pf9bASWByQCR/kx99j95gB/AvMBTP2h/SgBAgM3A0IEnwL0/wz/OfuR/DEAPf7x/9366/ptBXUIEQi6AZf6vfu+BM0IX/5R9kP0bfrrB4AI2v5V+wn9Ef4TBg8GUwAhAgABLgCoAH0AYPdJ9u3+lQKQBsECqf3v/aAFIQbMAeQBBPyJ+lP5W/kQAHcDjQYrBSsEDgM5+m/1x/sLBKMFeQVq/U376QTZBJQADfyF94r8UQIaAuIBr/3u/WoDDwllCs33x+9k+I0BOg/pC136AfX1/TsEVATnAHz4zvl8A0gIOQcwA3z9Zvv1/On+Zf38+4r/OAAAAMsA5QgmDbsDOvxk75nxRQZ1DLUCx/s++pv9/A0zCz31CvAt+IsFkxJ/D7P3d+4j/AkH2Qb5ABn31vOEBB8JvwVHA4z8yP5y/YD+0f1H+58BnwP9A+cG4gIH/v36TfgY+jP9UwZzClwCd/8y/xH9Cf8HAyz9LP0VBG0BZAJSAPb8K/yM/Bb+j/vwARsH3wSvBaYBnv1DAfIA3fyW+Bz3Tf9oBgsGfgCX+576DQGICcQDlv30+g/8vwe6CAL/7PZO9bv7TAVnBoX9e/kmAQUJqw06BzD4jfWC+wAFHQbB/A7yh/OICUkPgAdD/fbuuflUDQ0PyADK9F70uP/vESgLVvTB7Aj2WAcvE10LVvS779kB5At/CQ4DqfRC9vwCTgNLBCb/pf03/q/8zP8b/o4EfgUa/zT8wPyOBRELOwbG91vvc/isC10QpP2S8PrwGAHLE6YQb/3D8K/5zAQzDFgG1fNd8lT+7we/CJgAWPTw9hgGUAp+BxkEPv5N/Yf/Nv0o+3/8hvxx+jr/ygM9BXAHpgOKADn/H/wj/Mv9nf1mABsDwP8DAtwCNf/4/4H85vzp/uH/fwkiCjj+5ffP9hX9ewjNA4v3BfTb/m8OFxItB+7yH++f/DQHlgZmABz4qvdgDqMVHAOa9XjrwPGRBvUO0wJg+pz9VwODCW0FeftC9nP6Lv0O/x4EnQdpBQcBiv7L+FT8kQGvACj+gPy5BBoLVgt6A1nwD+2V+5QH2Qk6AUD1xvxpDnMQSAPl88XudvSjBRoLrALL/QT+JQVTCbcFy/fS8X75IgXTDDwGsPzM+Rf+WACP/Rn/8P4Y/gIBBQM8BGEF1QNM/+b7ePv1+JX43v23BG8KWQdIA2ICWP5/+333HfleAQ0EKAPVAVf/PgBZAMH9qP8fANT/fvz3+2QBXwURB/oDOgNk/Gv11fPf994LSRMPCSr73vD99ycE/wcC/LX0zfwrBk8Tig/i+YHxlPYTAssKzgGR7kft3AZ9FZUSzgQv7RXyLQVfCTsF4PsL+Sb7Ov5SAOAAkwjRBHL9tvqS9zgEAQueBH//Bfqx+68ErAX3+CXzkvjEBDcW0RCL90nsyfdCB80N9Aeg9U3y3QC/BrAEIQPg/Z/7X/0H/PT/XQEvBOMFTwKKBfv/S/26+/X3wvrZ/BAF9AjLBX8CO/3n/MYAiwDf+o/8aADDAOsCBQKRA1QCGvyV9tD24/6bDS4PFQIe/G35qgGXBwwAuO/S6QMAyxAMF+MMk/Db7g0D1gz1BOX1JOvz9FITaRzpCGv2KuwM8sQEGAgb/tD4EQD1B94KNQl+/qr6Tvl69DP2/v+6C5sN0wPf+vH5rAEGCs0A/ewl620A3xXHHNoNbOy75pz/aAy8BRj0nelK9+kX/x9FCGr1IO1N9lYJ3gu5+eXy0/vyAwwOsApd+t3zxvi7/NX/6wFWCaEJxAHGAZL8ZP5vAQf8aPPL84AEZwufDnMIVfjK99b+tQaOAQv5VPP19oMMmBBmBlP9SPmD+kv+vQCh/Ef97APgBOgA0QNLAnn9Ov3J+2H/LADeAjIEx/0D/oH9YwCmBA0BtPhz96oFvg1IDJUDu/KN8/QAFgKj/hT9tvzXAIoGpQVFAtkAUABzAF3+LP3N+Tf6Cv90AOcE0wWkAnECA/4H+s/84gATBwMIV/2l+j78Iv7UA9UACP43/y0DAASSAEb+qP/fA5/+5f0A/Hn9WASTAaL/6vu9AJECkAJpAQb64/3WAQcHagZ8AUz8hfmeAqoDyfq49rD6BwNGDAIJi/wz+dj7SQKIAQYAEQGy/p4Cxv/0/Pf8Yfx3/yUEXgTJAT8Ct/8PAu8AFP1V/Lz98QBT/Sn+fwGuAVAD2wOcAIUBwgNt+WD4HAAoA3MIigSd+9n6c/51AcUApP3+/XX/+wQJCer/1Pk5+QT+7QTABHz+DPl5/a7/PAEtAtIF6wiP/qz5hvl2/RUJLwgz+BP1l/+RBboMaARr9H/zq/6SCskJjASd93333gbmBub+f/mz9Uj5/QPpBWgHGQkRBjr9e/Ad9hwHzw62A5X1LPFk+qUUlhX4+ZDpqOy3ASAX0BNs9obs+fw5DO0V2AYS5x3nu/91Ch4OLQcm+nP73QTZBKH7/PlH/BT/GANsA/oGLwigAIj4V+/Y80wFPQ6ACG/7q/eNAI4TVhNT9gLpVe1wACMZ0BKo8hPoA/vOCrMT+Qiu8CPuMAELDnAK4AGa9e/0UgDlA6v/vfl9/a0ALwQsCHEGjQd9AjT4Du0t8l8GtAy3Bwf8AvdCAI8N6wu9+Qr18fUq/fwKsAUK/Lb5QP/hBosIBgSj+DX3yfrn/LEAKwTMCdUGRP3S9ZD7MgbSBxMCyfS69T4D7AY6BQv/7PUB/Q8IdAlAA0P6u/dn+1UImAlO/a/4N/Z3+ycC2AJnBqMIPwSN/EX7of5ZBIkF9/hr8Hn4WwPKDP0KJvz++Or9UgUWCMb+uvWN9CoFAw4ICMwAX/Oh98IETgXr/HL1LfjwADkP+Q8FA6j+6/k5+WP92ftk/ID+zwDwAf8BMwNGAAH+DQLEAfkC7AJ7/SP/Qf6U/pb+OPkO/Rr/FwFLAxYFWgh/At0BcgG4/Gf3afYX/OUAeAeqA878vPz3AoIIhAFa/6z+4/vU/fv74f9CBWMC6/zI+PH6owNuCMAGHP/49vj9VggtCDX/0PO57jn9oRODECH6uu6f94sGeRNiDIj14/Nm/F0E9gfm/Rv1rPZaBcYL2ASJ/rj2JPnbBl0KfAGoAXb/YPoT+rL5DwLHBf8C6/wR99v/IAsBDEkCEvjc88v79QgkBvf6ivSK+4ML7xLfCHXwlerI+7MHCAx4A2b3hPqhBuUJygRN/oD0e/iqAAoBtQW7BJsAb/8d+m/5YAG0BRoE5/15+EUAigvFDC7/GPOV8+T5wAciCAr7c/fI/tUIqhCnCgj2jfDZ+YEDHwaUAef8Tfh5/xABoP2PAlgD0gDoAOADIwOcA8YA9/xR/CH8YPuQ+eAAswHaAmgHWgWqBg4B6voG+cz6BP7H/IAEDwfgAmL+OPUK+ToJSwv1AMz6VfpZAQIJOgYA+BDzX/piACgK3AZ1+8n6yQNGDnMHz/qK7FPuYANiCH0IkQUKAXQDZgGx/of6K/pE/tH8ZwBbA9ME8weiAQH7jvZT+dEHuQpYAlT3zfXtAj4NHAqS8+LqS/m6BVEQdAq/+mT4ggNpC4UE6/lq8GPylgRQDpEGwgCh/B371ACV//39VAG/Amz+0Ppa/9oFuQaGAV783fch/MgByf9zAOX90AH4B58HDQV9+SP1OvwqBTAHYwBF+Bv3LgF1BsAEzwJF/sb6qP6mA/IBuAC7/6P+5wO1Bab6nPPy9sP+7AsRDJ4A/vuR/SICygR7AUv5Z/ZG/gAFDwWkA078HPsqBKUChf0e+mD6rACBCokMhwHy/YL5X/m2/OT7aQFQAZAE4wRmAaQDcQT/Atz3JfLt9RAAYAzIC8MAgPqb/l0DXgQo/BjzNPSUBJoS2AyXAq3yHvP1A9oGZAJ0+dL2xv9kCj8KGgLP/qv4iPga+gD7TwTSBdMHQwaQ/ysCCf3O+6f5UvOs+2AF9w41DD4CTPvn+XgDrAGz+8ry4fQzB0sL3gqZAxr58PlX//wAFACA+/78awSqBo0I7v7j+QL48fbhAAgBOQL/A54IZQcPA4QG4vj19vL39/aF/wQA3gPoBAUGFwZIAXL+JPu/+iz+7wIiABQAMQIH/6f+bP8uANT9KAAdAPn/YQP9BHoHmf/V/BL7FPoi/iT7OfxX/gsFlgsBChIEg/q/9ob7BwGU/dj8APzi/skMqgwCBQ/9Z/WF+LX+CgEI/bj6AgKSB34Mcwsf+lfzg/mY/hQDzP+b+nn8/wbnCqkGiwDM9+T3+voQ/8QE8wZyCGEEzvup+oj6ofsP/3r7+/xaAtMMLRI3A2f4LPF79kwFnQQv+/D0Kf6OCXwRxwv19bTyKPrLAGgI8gG0+mr88AXaC30Cd/pf8Tzz/gGvB48F+gF+AhED1QZNBJ/5IfWQ9tH80QHkBW0EpAP1AsUBjADS+/P8u/pLAZAF6AHCA4r+af44/eP8oP5K/TIAzAA9/7X/9gc3BzcCbf7k9q761ADMApoATP6g/kYBgQaYBEv53PSd/eAE+wxACrr4xvav/+QFKQRS+lnyYPYPA/gKZgkiA/D7+vtHB1oHA/6/9yv2A/5cCVEInfhX9jj97QJGCq8Fjv/R/IP/7AB2/00CLvqw99f/NgKFAkAD1ACU/or/Yf59APsFkQbE/6nyH/afBmwOfAcG96bwdfkfCEgLxAH3+db6+QI2CqQHlPcJ8VL5IAMfEU4JRvIm8yEAKAltC3wB8vcd+gMC+AIm/0YBY/8D/7gCsP+x/Pf87Pqi/wIK6Ac7/in6tf2ZACQBmgFM+z77awLkAi4CjgHTAFQAAgLLAyr/8vnC9gH7owi6DFwA3/gL+tb9ewf1B0v8DPdv/v4FNgXgAsD8s/jj/EsBrASEA/AAowHuApkCpP0L+xj5//qLALsB2AZcBgIFrAMn+on5SP2xACv9Rvm//oQAowYZCNkBwf/D/jv/Wf7d/CT/swDwAPgAMv+v/x0AKP7o/jYAFAEeA7AEIAT5/tH8g/1z/SH9O/2s+3L9EgYSCBkFFAK//Jv8M/8K/pf+qv/3AE8Bt/0MAJQChQJDAv/9nPpm+tgB0ALQAWgCSQF8BHIDiQOo+k/2cPvh/A4G7wUg/x/+aAERAyACewGD+zf+vgDyARICLf6uAMz9tvqj/H39EQAXBMgDWQNXBEgA+v+b/2z9hf2P+/b+OgH8/5H+Pfx7ABsK4wgR/iX5sPmA/y4GPwbXAM384P2kAND8afoy+/75FAY5DyII2ACy9jb48QOPBQoBKP3N/Ib9vf49/hQAtANqAgkBtPth+1cCHgNgA6gBOwPSAQD+//73+of5wvvAAB4FvAP8/UH8lwP+CMEKTQKp887zKwDjBWcDdP8v+fb7QwLYBCsDHv17/oABwQdpBuT6x/UE+SAGCA6oBXDzWexC/AULhg17Bxj8x/gr/SwC2gK+/or9Xf9oAjQFBgHZ+kH3nPyLBgQH9P+z+pb9cABWAawEwwb+Baf93vWy9E/7JQh8CGIA8/tv/RwCJQQLA+v+gPtH/0IFTQfHAhj1CPQOAPEF+gZP/rj3p/x/BC8IbwQnAnUAgP6g+tT6Gf22+9j/bwK4BV8GHwD+/rj9U/4HAWIAwAMbBH/9yPz7+yj/wAJE/+v9iPxmAasC2AEJBRwFbwPM/Hf7Rfsy+4T/1AA2AL7/8gLgAqACPwF4+Uj5zwK0BmAFTgFu/CIAYQG1Abj8uvaS/B4AEwUXB7cCLv1O/gQFnQTcAMn5gPYX/f0DjAS5AHX/rgHPADb+1//t/HD8dAJRBn8Hm/+x+nX44fv8B4EEXvvT+v/9YAPQBb0DJ/+H/7n/QPwR/qf/sP9oA40EyQKM/1j+aPuh+pr+OP4vAgkH7wUpACP4hvuEA0QFLwSs+xP4u/7rBeIHB/9M+hr7nv/KB3YFDvt+9+H87QRuDBcHmvl8+S79RP8vAicArPnP+8AGRQn+Avv8M/dA+ckHQwpzAJ/6RfnT/S0DFgPw/Nr8IQJ2A6kHvQOd+kH7Yv9pA0gDIP5s+i/7ZgG1A48AHgF7AYgClwETAP79e/ua/iwBcQYvBsP6p/hU+5T+qAWRA/P+QQCkAsoEagIX/W33AvhyBc0K4gIo+knzNPrPDuEQ5Pxl87z19f4KDPYJtAA8/DL8vwA2AZz9a/iv+TcCHAfECBAE5/6X/Sj7pfs3/iQD3ghpA2/08/MpBPQLfQjk/mjz9fXKBQ4MyQQ9/Qv4zftuBgwHIP249i352QFGDZoK2P1P+ur6Qfxa/I/98wHGAZQBXQPfAk8CnQIuADD95/+K/x/9EgBJ/jL77/3VAe8H1wa4/l739vdJBfwI4gIY/1n8Jv5xAd0BbvtG+H76fwFZDU4J3P3f9wn+dAqyC9IAlu7L7Wv+2wnTCkEEA/2O/YQFBQU++zD23PS8/TgOxw3QAuT7Vvn4/TcBpf/g+y/8qgEDA2wEIwWZAdAB8/xi9in6pP4LBucIlAL1/yIBxwGR/z386PVr9iEC7gdTCIAGTAHn/FD+6v4q/G/7kvupAPEHjAlTApr8jvvB+0gAmQBn/d7/3wEgAaQCiQGG/27/hvzA/YMAAABPAW8DggU0BXgATfqy9nn5rf4P/osDLglnBkkFJv/O/Kb+Of3R/Gn9f//3/78AnQD+AAAC8P9C/8v+gP++AN3/aAKnBoUEBP9I+yv6s/uM/b/+FgLaAj4D9wPfAXP/tfp8+aP9fgZgCCUC9/2t+wD/uf8a/gf+lf3p/+n+GgBhBPcDXAO+AoEBw/4Y/Qn8UvzdAMUBKAHlAWEBpv3L9iT5jwQmC4EJPADY+Rb+PwfRBjL7iPZ99dP60gexBh/+Yfy7/ksFzAsaBqz4sfTy/QgGFQjKAb72Qvd+/usC5AIcAYT+2/87B0wGBAL//sD6fvx4/zT/lP/t/jz/oQBkAQkD4AIhAqn/Ff5T/kn+FQBXACAB9P+s/2wC5QInAar44/b7/mEE8QlyBqr9sP3H/0EBrf0B/Q3+dPvYAtoDHQGlAUj9a//uAoQCHP/A/KX/vAAQAhAC1v+s/in+8/zG/Ff/sgAEAmEFLAZ2A24A0Poy+6r/CAC1/639H/5bAI0DQgNx/yz9x/vPAZUFQASc/gv8DwIBAgYBRP7R+IT7+/+aATEEaQORA8YBgv7P/+z8dv5e/3//OwRZAU4BHgF8/af8hfoP/YQBjQSlA2z/BwDZAvUD8wJ7/7H8dfyu/KT+8P7t/hn/VQDdAlUBKwGo/5z/SAKUAh4EUf8Y/ioA7v1j/ej76PvM/IIAaQX6BOkCBwHFArkEAwGw/S/5+fhC/k/+hgEDAooCpARKAKAB7/8j/tX+Lf6ZAa8CgQKc/jf+x/4O+2H99wL6BUID1fwO+Tz+OQZbB4IAh/w7/0L+BQAQADL8hf4RAWsC/QTUAiT5NPgSAiQIDwhkAfH4JfquAvYDmQBm/Mj7ov5xAjAFfwGSAGX+3AANBwwDLPq99l786ACfA+cDp/9z/qYBFgIfALj/bv2R/nIBRwOrA8b/Ov3J/sEBMABS/Ij87/y5/hQCUQOtB+QH2AGM/wz8vvrC++L7Tv9fAqoEVwGj/Bz/lQBV/5MAIgHOARcDmgKHARgAZwHX/AX5TPvW+iL+AQF6BbUItQhEBT79uft8+3z9A//C/vUARAGLArYABP4K/sX8C/47AOMAIwUHB7QDxAEw/vz6wvsw+yr8owETBHcBoP/1/zsDIAP5AFv/lP6tAKn+2f1NAdkCfwJpAAH+Q/w/+qb5r/5rB74OHwsk/Cf1kfnJ/eH+WwCSASICjARVBAEBXv0N+vv64v+2AqoBfP/0/gACJwdGB8n9S/ih+wv+igFSA1oBfgAtAPT/uQAyAF/8mv0qAaEAhQP0A6v+u/53AMf+Lf8k/LP5+v6SBRUHZQNFArD+1vxK/xf9yv0OAGoArgDIAZYCnwT8AxD8yfqQ/Nr+XAL2Aab/M/6LApcH5QZP/WXxzfItAh8N5QswAyj3E/kkBp4HD/0A9z34PvyFBzcJEAILAFj/uQFjA5z/Fvcy91wAlQSzBxUG5f/4/Uz6Rfd4+g4D7AwrCVb9Vfon/3QE9gMj/vT1xffBADUEJgZIAoX9EgGdB3MHYPzy9Kj1OP18DeEM2v+S++759/sP/Wz+ZwEBAzYEQgH9AfABowERArL6wfiy+9L+QAUWBXL/r/6LAeICcgMC/wb3gPikAx8HvQXrAeH8eP+2ARgC//2C+f/7pP/8An4DAAXzAyIAWP4/+fj6mwU9BroAdv1Y+7z+8wXGBN34rvf3/HgAIwqnB77+z/7/AQsGGQQ8+1vyHPS3AEMIlwa/Ao7+E/4pAPn+LgGHA2kDfwCW/KL8FgG7As/9S/2Y+sv8pAPuAqQFJAOrAIADoQRgAhb2RPGr+WADsQwkCaT7F/pg/3ID+gPs/l38wvwPBAoFTwHRAP33BPqRA3MEAQBr/Tn+Zv/zBfoF/P+j/Wr8vvxK/sD/MQOUBXQC8vys/DoA/wFtAgv/cvrj/HAC+wRQA8T9c/v1ADIDSQMMA3z9tPvv//YCBv/A+ur6of0+B9MJQQOh/IL7pABJA0cDMPzN+C38Fv/NAckDQwP+AUMDgAF5AOb9J/w7/c7+OwRGAbL8+vxc/tkDIQTiAfn/5f8H/7/8Wv4oAS0F4wKL/VH7nPouAOgBrwJCBqcEGgKz/NL7Of7S/Fv9UwBvAngCGwD0/fcCiwWHAxoAYfgE+Qz9ev//AioFFgeDA5b9+/ua/Dj9rf60AMEFmARd/4T+X/yZABIDh/83/lD8w/8IAmsCxAHoAZsByPzU/a3+Uf9TAUkChgMPA1X/HPxO/Hr9rAFoAV0ANgEDAnUCMgHcAO//rQC6/Lf54vux/mQCTAMZBeYDpwKiAWz9Qv07/BP9KgAGAbkBTQBl/kX/+AN6BWoAe/vA+uz9xgQyBRMBOv+l/KL9kP9eAHT/rP5KAvgBbAOxA8n+6f2u/I/+DwAc/tAAvwB6AUMDGAKbBA4A7fuq+S34OABGA/sE9wTIADoBtwHpANr8vvvH+8r8ZQInA30CGgIVAGoBWQHn/Yz+Af7C/sQC4AKuAS79Rvz4/qn/mQLT/1r+TgFqArcDFQOPANT+nP6R+tb7UP8n/x4DlwOmBMIEwQBm/1X9GfwB/Kr9fgO4BK/+uvuI/dcDXwu8Bbn04/Bj/WsGvAtCB4f6z/rJAQYFwwFv+hL0jPlaCkwOhwRE+gX0pvtgCWgJDf/S93z75QIZBfIDI/9t/S/9bvzr/Zf+LgLuAzkE5QQ+AocAav1h+1b85/zp/pUA9wIJAyj/wv4lAcADuwEA/cj8L/7NBHYGZf82/ZT7Bf14/+H/BwFrAU4CIAK/AacACP9K/pr/FQFiALH/Nf6H/YgAHwJ4ABb/Of53/28BkQIHA+gAdP8yADb/Jv83/Vr7Zv9fBIcGqgSE++n3Ef6uBNwG3QDp+Jz52wOcCd4EoP0n95b5QAOXBq8Bmfta+2cA2wYXB4X/dvvg++n/JQP+AY0A5v7S/hT+Z/6xAEkDKwQB/+j8MP6z/4MCIAOc/yX9b/82AGf/pP9x/lP/3gANAm8CJQL7AoMA8Psd+2f+CQO/BCAALvqP+28EjgkcBf/+9Pi6+NQBHQV4/m38if74/xAGsgWO/SD9If75/usBdgEwAm8DEgBw+zr6wf17AosCH/7t++MAoQelCt4E8/YD9HP8UwQlBwgBjvcR+UkH7AxuBQz91fWU+VMECAZiAj8Ax/2t/rMANP0m/J78e/+cA24GfQWSAW4Amv61/O/6+vzJASkCJ/96/IcA+gV9B7wDb/rL9k/9xgICBLYEHgF2/jX/Nv9n/fX7svx7AOQGTQi7AS/+MP3u/Bb/Wf6//Mz+pwGPAQMCUwOnAu4BUv/W+3D8sv7HASoE5QIVAPz+7v60/23/aPvP+1ICewc+BrQA3fph+gwBSQN1AHX9avyH/6MFsQa1/4T8j/sj/nEEZwNi/gn7LP6lAikD8wLlAID/Sf65/dL8FQBRA24B4v90/dUAswNBA1cDkv2B/eL+8P72/0/+3P0b/gEDxQS7Ad3+0vzA/nEAWgHVARYDiAHK/nP7uvt7AewCQAGC/Kb8BwEXBhsH1P9g/eP8Uv/aAYQBxv0L+k8BswRNA/cApvrl+uX/BgTHBAkClv8gAOAAKABp/9z9pvyI/YH/MQKTAhIBbAG2AQUBDAB2/7v+y/4OAMUCRwPq/wgAbPvQ+SL9SP7YArQDsQU/BKMBGQGi/RD99flu+k8AHwW0BEIAAf6H/X0CJASKAG38A/zv/8wDewZAAyMAavwU/FX8lvxH//r/cQOnBC0E3QGjAUABLPuM+IX6qgCgB/cH1P4V+oj+SgILBJv++fbT90UDfQoyCVIEy/vX+iD/hwGm/UT5zPuKABsI6QfnAy0B3fz0/C78+PxcA6UGLQKg/Ur7AvzPBMIExfrT9+H8PQVwDSQL9vkg8uL8NQXACIwCFfFH8KQEVg98DJ8DNPYV9xQE+gZtANr5tPh//ZQFwAdzAa7+Jf3b/l4CQQDa/uD+hwCbACIA5QCGAhUEcfvM9778CQFbCa8HePx7+ND/AAXKA9AAifpt+3UA5QN2AwQA5/2R/q8CpgEp/1X8JvyVANIDVQSqAqcB1f8E/xj7v/kkAk4EwwDm/Y398QCsBYcGwP56+zn9Kv8OAwkCov0g/Zj+5ACMA4IANvoA/K0DtAdLBuv/hvrU+wYBUAFj/zv+9fzX/68BSgGPAb0A0//F/woCxwGi/on+r/+J/w8BRwFL/6QAbv8Y/r//SQGAA+UBFv8y/r//7gFdAGz/3f+sAC/+Mv5jADkAhQMnAs385vxZAJ0D0wJY/1b8x/vMAecFIwPO/l76yvuGBKQGJQDp+xr74P5pBpAFHf30+dn9iAOrBfICU/8M/Qv9Yv4mAMkA8wASAYX/SP5sAAACvwGOAVgA6/80/xv//AAWAB3+Vv6pAeUDdAEW/qz7xP1KA0IFDwLl/4L+VP3p/WL91QLIBeYAVf6B/fj9HQG3AZL/ZP+OAFoAH//G/9cBngHlAHYBEgFw/7P8S/v+/cMBMwJDAgQDXAJI/7z7C/7FAacFDgS7+Zf4VwDqBOEErwCU+6D7EwEoBPsCZ/7//F3/AQOuBSEAQfpU+owAgQdDBcb9Lfmh/H0BAASXATT+1P7x/7sDYQJbAIz/K/6hARcBJ/9z/Ib6yf7fAzQFtwA8/gf+QgCMBO8CNwCT/WD+mAGbAJX+JvuD+r8ASQVpBVIB7P3+/mQDmQSGASr9bPks/VAB6QGX/3D8//01Ae0F9QPc/wX/tf9TASkBYAAs/Yr9NP+D/9wAqwGwADUAsAHJAOX/iP/w/nP/fQE/AikAbgH3/wr+xP1h/boATAL2AQoBYAAK/83+Uf+0/5oB/gFpAPD+ZgCjAEEAbQDK/jv/Bf/U/ZD+sAFqAssC5gOaAagBTv4V++39Av9BAdwC6f8sAML+6Pxe/3ABygRTA9r/of6s/nwBsgB+/4H/R/7H/ez/0v/y/ukAOADRAm4EtQES/ln8Kf3JAXAEgf9a//f+mP1OAMEAJQHdALsAUAAaAEUBNP6e/V0BmgG5AfABbf0Q/T8BDwHd/uz+3P48/+UCBgRSAUL+u/4JAqwDkQFZ+574WP6TBL4EQAJZ/A77WACwAZUCif9D/7sBuQOWBi8Ab/pr+Dr7QgAiATkDRQKeAgoCdv4c/7ACKQMr/s77PPv1/WUEgATWAF4Ayv9a/+L/vP6g/RX+bQLhBbcFPAOs+un4S/3U/q0AdABxAroCpgCTABsAYwK/ARD/7/y/+3EA7QGXANcAoAAgAUkApQB7/7L94f46AFEEJQQT/lD7Ov1vAZMEtwO5/SL8Df/JABkDwQCV/SP/SAHmAa8Co/7G+mf/owPMBJcAPvwa/HX+EQScAkf/CP7I/UcCxQPsALT/mf8m/wsBagBG/Tr9V/4kAWoDVgJAAPD/sQBxAI8AYwD5/iX+ef/9/6n/KgFcASQA5/+z/pv+RAE4Af4B4gHw/uz/G//m/bz/tP+BANMBQgHm/+z++P7t/5wAaAElAHD+wAB5AkcCFwH1/ZT9e/7C/aP+DAFDARECLQPP/zv/VAFr/0sAQgD2/hoAbQE6AbH98Pzs/Ib/OQZNBb/96fsoAKkC/wXXAyb59fbz/McBowMiAsr/AwCwAi0D4ABx/uL7nv3xAHkBngHCAW0AQv+U/YP9VQEbBF0BBf4e/An9Ewd9Cuv9Nfbs9yr+zAmhC6396Pb4/GcDhwg7BCf4ePa8/84GEQe2AZ74i/jAAsQHyQMw/sz5GfyxBKMF1ACe/Tr80f0/AH0AwQDKA0kCcQAsAPb9Fv/a/sj+w//YACcCrwBsAWn/+/xw/5UB7AKEArv9mvtIAEQDCgM2ANP59PqAAs4EhAOMAWr+fv67Ad0Bi/4//RX8OP4JA7oChgBZ/2gAeAJ5BN0BVPxo/AH+HP9EAJj/AgD6/+/+JQCkAWgDRAXpAmD/Sv08/Yv9tP1N/0//EgFtAYEAFAGQ/uX+9AGyBGMEDgDd/L36gf3JAdsAx/2N/OP/jgK6A/YEPAORAhUAU/yz++D8rv4nAMUBBAL5AFUB6wDn/lb+g/75/rgB/wNlAV/+uv7sAQkD+f9n/Er6A/0VApsD0QPpAw4BdP46/Ov7RAAlA/wCigGE/3sAVwFJALj88Ppd/Mz+rgX7BGwArv+1AOcE5wTh/yT3QPa9/WwDcQb9AvL+P/9vAlcCxv8v/p/7wP7XAgQE+QGc/qr9QP63AKj/Nv8yAGIAGAIXA5AB/P5w/wz/L/4oAJUAowHiAVz/Jv4z//oA9QC7//D89fwxAuME3wOUADb9lP0kAOkBIQBl/tn9fP9pA0ACcf70/N39vgGlBX8ER//M/I7+egBuADMArf0h/g4BmQCQAagBHwCwAEMB/v+V/oz9Bv7zAK8DWQTs/sf78/12//kBWwHf/w8AnQB/AMP/dwDu//n/9P91AHMAM/6N/0D/CAA4A9kAHQCt/3z+Lv+R/xcBUgJaAfH/7P5W/5ACpwJK/tD9Xvwn/VEB4QC1Ad0CKAK5Ak8Cf/+p/IL7Z/3/AXACgwHA/qL9SgILA6sBa//7/Br+5P8bAZYCHAPOAbkAuPz9+wX+df5JAa0As/+FApcGNgbE/1/6q/c1/EoFRwZk/9T7vf1YAncGdAPe+or4Nf9SBXwHkwN8/Lz7AAAEApf/y/xH+5j9AASbBrgE0wGP/y39z/oq/GYAfAECAxoDQQAMAYX/C/4L/vL8Zv9DAngE9gOXADf99fyq/5oCFQF1/AX9w/9wA0IEAQJ3AGf+P/21/Ab/UgC8At8DPAKYAnP/tfyV+9P9TgHnAcABugC6AfAACQCK//P/pgCq/ob+sf5qAIkB5QBcAvIBtwCQ/R76IP3gA2EFSAJJ/4n9rf/jAKH/+/1O/oYAVgHyA7ACtf1D/Vv/QQI4AnH+ePtC/fACgwU6AxsAzv5//fn9If9a/yYCawKgAIYAEgCi/sz9sv/gAAgC5gFt/yj/XwFrAoUAJ/9x/Iz8n/+sANQAFwDkAB0CpwVpBCD+b/vT+uP+zAKxAoT+pvzn/2QC9ATxAqP+vP1w/vT/xAA4AMD+sP/ZAIUAJgCX/yYAxwAkAJkAkgEZAYQAiP77/BP/WwESAkcBwQBq/gj/2AO6A8X+TvsL+23+kgXPBMr+ZP1g/wcDwQNoAYL8uPv7/zMB7gC0ADz+qfx/ArcEnACu/u38F/49AgsECQK7AKH/8/1y/KD8FADTAZ8CGgFFALYB2gAKAPn+mP/c/7L/6P9I/wUABwA6AagBbQFVAOP86Pun/swCTAOUAuwBtwBK/yr+rv7a/j7/cP5i/9kA4gAAAaIAQQGyAcIBb/+8/er/4AAeAYAAcv72/fr+bv/6/3wA+f8OAfkDiAOTAAr+wPuG/m8D+wK3/m/7dPyz/yIEVQQD/wn9PACYAjMECQOY/Jn7nf8qAN8AMQDZ/VL/lgFeAbsBUAGBARwATPyi/a8AlwPCA3f/+vrr+9EDxQWMAFz6zfhH/mUKzQzB/aX2wvgT/5AK/wa8+Y73Wf8rBsAJ3gMP9mf1pgB9BykFSP9g+Nr5Nwf8CpMCkvzY+MD62wHSAtf+jP4MANkBtwMYA97/N/1y/jD/f//oALsA6f8MAHMA3v4QAKwC9wBj/SL8kwCTBMUELQEL+un55P8EBIsDggBx/nT/swJpAwwAHvx6+jH9pANNBZH/0PuC/dkCcwYsBBn/Vfzl/G//+f+j/s7+cv/pATkDZQKbALL8C/5tAgEDsAHV/jr9Hv7P//7/5/+1APoA9P9R/kD/6wGYAn0BJP8Q/tf+mv/0/6f/QQBxAJ0BsgIyARn9Ivtc/lwBywT6Azz/9/4cAM8An/8m/17+Lf57/9//PwDR/2oBYwDlAdEDq/4x/cX+BQGpAu8BT/6q/Gv/5P+UAAUB/v+v/zcC+gICAJD/Q/2E/bABVQIX/7P9Mv5l/0wD9QGzAIYAMP88/8b9Pf8BAhEDGQKAAOL+O/7n/3b/8v1//hwARQHmAwUDwvyn+/z/VANMBN0BY/s/+/IBqQO4AdD+tvvz/OIBEwRrAT7/8f6mABoE5QMo/TD5+vvq/+MDrAPB/fP8sAHbAowDXwHJ/Jn8RQDfArcAS/4m/M790AO7BIkB9P1X/aP/ZwOxA1v9Mvxs/mP/0gJyAsP/D/8M/2IB3wB3/6b+EP1vACMCAwFAAD//4v8jAuABef/r/rP+6P7p/+EAywC2/4EA/gBqAML/Kf7D/SoAJQJ9AfMAdP4L/lwB2gCc/4T/1P50/0cBoQJuAev/zP9h/7n/ov+f/jD/uf8HAPsABgFTAMwA7ACT/wz/6f+1ALAAcf+t/sf/3QAWAQwBAP9c/mr/0wAGAaUAiAB3/wsBdwHF/0/+J/29/skAoAEZASYBRwFKAJj/L/8Z/4j/7/8NANX/PABGAaMBHQBf/x//qf6Z/xAANwAJAAcB8wJfAmYAH/2C/Nn+DwArAWUAvP+/AIAAQQEKAWoA2QCy//39rf6A/4X/fgDPAIMB9gAIAAEAHP+G//n+qf9IAnACEQDR/X79LP+MAUwB2P/R/kwALgFLAakCNwE7/2/9T/2m/gj/5wARASYCyQItAaEAeP4C/pr+NP5p/ygBoAFFAU4AnQAqAQUAwP5I/uv+Sf+l/ywA/wC0Aj4CkACN/vv9Yv+2/0wAwv97/2cAmAE2Anj/3vy1/YEAOgT2A9f+gf2m/xkCHANe/9D56/lHAWkEDwT3AWj8k/1qBMoF5P/R+rP58vwDBb8FMwAp/db8Ov/6AsMC/Pz++z8BaQT6Bc8DVvur+S7/ygBAAbn+7vvd/jsEMQaSAj//SPw6/RYDtgME/wv9IP4mAAYEfQL8+xX7y/33/1kCfQL+ASUDxQJPAS//4P1//OX7S/5K/0QBMAOjAhsCc/8H/q7/VQF3AdkA3P7s/iUCFwK9/jT8JPzg/d7/PwCaAlIERAPCAosAM/71/WP+gf2+/cP/YP9zAawCUAFZAez/gv8XANf/Yf4E/5gAdQHkAU0B/AD9/mH9LPxL/WEA/QK/A6UATv+tAJYBIQFn/8z8q/wDAYwDUQNAAE78Jv0fASEDMP/g/Nz88v9mBtcGwgEV/Qr9WP4UAFwAafwK/LX/zwPuBdoCWv++/Z/+IgBYAD4Am/89AAYAMP+dAN0ACv8C/xX+dv68AWoCMQK6AYkAOQBuALj/XP2N+179uwC/AxsEgQFD/4n+i//o/oP+ggBrAIAARQGMAEYAKQGJAOz9h/1w/jn/TgFLAqkAbgDRAXEBKwGn/tb6Tvz+AC0ECAM9ATn/mv4IADEAev4X/Xf/yADEAiME2gCA/kr/HgBhABwAYPwP/LsALANHA38BhAD8/tf+tv+0/hz/EQAkATcC2AL8AKD+MP07/Wf/HgB1AOMASALBArEBGgHq/zj/2P21/VX+zv+FAE0AEgMzAnQA5f5S/NH9RAKeBIABcv8h/7D+QwAN/538yPxK/4cC0gW/BKv/Cv47AD0B7QBA/hz6DPyJACYDKQOCACQAlwB7AZoBKQDZ/xf+zf4KAMz+Qv/o/ir/qQCAAa8BQAIaAqD/DP+9/sr+mQBs/5T+kP9YACYBuQCtAA8AIADlAPf/0P+TAJf/Pf/2/0oABQBq/+T/4P+7/10AAwExAY8Alv+s/Vz+SAJ0AiMB3P8U/rv/nQG7AC/+Gf7N/sn/MAPdAnP/Fv6a/woCqgJlAer8tfte/4UBrAJZAAb+rv5dAHkBsQBiALz/mv9sAq0C+f+T/kL9VP5UALoAQv8u/lgA7AERA+ACeABlAP3+T/5f/kD+qQAhANv+Uf/z/0QCGwOuATn+xP1HAXsCNgKJ/+j6K/yMAWkEuAGd/dD7Pv60BZ4Gmf+y+737af8LBZMDIP0V+83+VgLPA/0Cefw//H8AZQFnAp4A3/21/uIB8gE6AdAAQv69/nT/Qf7R/gQA1wDiAEEBGgECAWkBmQC0/lL+uP4PAGYBBQDt/yv/gP9fAC8AZwG3AIAABgB3AAwBIgFiAbT9Qvyv/Sb/cAFpAvYAE/8OAdoC3gFtAEr8u/qlAOgEEAMoAJL8TvwrAdoDCQCH/dL9BP9WAlIDDAKuAP3/0v/l/qT+Vf5W/q3/UwCjACQBpwI+Ayf/Cv2v/TwAggVtBGf8Fflf/jwDrgTbAQr5E/nHAmkHaQWkAP35g/qGBGAH4gDe+qT4Pv1cBwUJI/7X+AL7XwACByAFIP4w/MX/hwI1A1kApftN+6f/qAJSAvQAx/1C/jsCUwJQAEr+6f7ZAB4BPAGTAHYA//+T/h39h/3SADICaQFGAMD/DQE/Ak4CsP7q+yL9x/88BIsDtP2W+0j/XwPWA5UAVfv1+18B7wSnA9sAE/6Z/eT/9f9m/w3+Vf79AF8DggP4//r+Lf5W/hL/Yf54AvgDegGM/tX9g/9DAxUEEvxu+uv8ff8SBPgDsgB9/5wB4AJOAdn+tvmU+aIBSgWuA60ABv0l/twAdAHp//3/QwEfALD/qf6hAAwCaQDf/xj+o/6H/rb/BgFIAYECxACqAPoAzP6M/Tn+1P8HAf0BLgEeAN7/0f8d/ob/ngKDAdP9XvuA/lYCUwW6BOf92vxr/2MBrQEa/4z87/sZAgAFNwLi/2b77vwnA5IEVwFO/lH+LwAYAgUCL/0++479mv8rAvACUgGLAB4ChQKyAPv+9/zf/Nr/gwCBAAMBZgB4ABIAqv+P/zoA8gCzAM4B7wA+/13/Tv6w/nb/+v+X//L/cQFEAawBcAFb/9X+VP/j/ywAVv8t/z4AXQItAxUAUv5E/Xb95v9zAJ4BvgE7AUMB0P9d/9j/7P85/gr+BP90AL8CMQPSAEH+af5z/+AAtQBl/rb+8QFsA5QCiQBL/GX7QP+zAIcAfADPABIBcQLyAtb/Zv4g/kL+zv9fAJEAFwFUAXwAnv/K/6X/zf/8/q3+lP/rAfMD0AJI/9n8Bv49/+D/7//F/Wb+bgLjBBUEmgGM/aj8CP9rAL//u/1T/sT/tQOjBP//lf6W/d3+ggA6AWsBngAiARj///1n/gEARwF4/xD/WP8PAgoELgM0/t/6V/7pATgFzwFA+SH4JQEhCMUG6gCk9vr3EgWnCRoDQ/sd+MD7Agd/CfH+7Pgn+q4AoQhtB4T7vvaF/eEDHggeBDP6Zfnp/1UEdwOv//T95v1L/xAB6/+2/+3/PAAYAX4AjABYAUwAyv/+/jP/mQBfAa4AjP3t+6P+mgNSBcwA2/13/pAAMgIMAaz+ovwZ/q8AGQBTAFYB1wADAQoB3/95/3r/zf/A//r/+P9XAIcC3ACg/ND8YgABA7sCxQAG/en8KgGdAmABRQAz/8r/2v+l/5T/T/+b/xoARwHcAEkAGQDI/x8A8/5iAPEChwHh/oL9c/3x/+oCcgK9/k39pf8CAW4BtwEAAKT/MABzACMAh/5Z/un+ygHTAsz/L//6/kL/nADCAGkBQAEQAfD/Mf1Y/sgAGwF6ADD/Z/+y//f/nAF6AOj/XACWAOQBZwDj/WP8ff81A9ECkwEm/fH8JwB8AMEAIQDlADsB7wACAV7/yf7//in/qQAAAdb+2v7q/z8B9wEiAQMBrQAKAH39Cv1y/7UCvAPR/xH+1v1m/0UBagDi////MwF0AdQBzQCm/Rv+/v9mAcEAbP6g/Ib+KgOpA3YBAwDM/gP/wf/D/t3/jAGhAMMAsP+Y/gr/WP/sAHIBpAGvABH/w/9p/xj/AACgAA4CjgFV/iv9Sv9MACcBxAH7/60ARQAV/yAAZwAiAYoAR/8Q/2X/lACL/83/AwCu/3QADQHIAIT/xP6I/80CcgOM/x/9jPxV/oMCjgIF/xz/YQD5AP8B5ABH/+r+j/+ZALUAif/h/WT/DQEeApQBcP/S/nn/e/8h/1UBkQLZAcsAvfxy/JQAcwG0AFUAf/+g/6IBPwIxAGn/j/6H/ksAagCs/tP9uv+MAjYEFgMp//b96v37/Wv/HwCZAZYBBABm/5b/rQD6ANwANwCo/yoAywCR/47/DP+Q/TkAoAGHACb/bf7c//oCngTKAFX+zf1j/hkAvf+f/9n+7f8EAVQBqwECAdYAe//i/5T/+f5+/+//Vf+j/rIA0wDWAbkBXf3J/HcB/APZAgkB6vum+wAB6QIpAXf+wf3U/p4DlATcAL/+1/2A/+kBZgGI/aL8iv4rAT8DZAKfAVEAn/8k/5f+t/42AGIBEP9S/sH/RgE6Am0BfP5O/RABVwLrAhgBzvwf/cv/XgGp/1D+sv0z/3cEQwWdAer+z/2w/oEARwCd/n/+P/9sAFABXgH0AJgA5P90/83/5P/OAHcAC//l/zkANgCiALz/9f1y/vsAtwEkAoEB+v5//zMAgP/v/6L/0v9fAI4ACgAEAKUAHgC1/7T+8/7vAI4BzgA1AKL/QP8/AbEBIP9y/nf+Yv+1ADIBogC+/2sAgQAPAEcAVwBkAFkAJP/Y/gAAUgFBAaD+zf07/1MBbgMNArj9sfyiADkDbQLg/yX8avxQAf8DrgHh/hn9XP6uAv0Cxv8o/tT91f/6ApMCD/+I/iD/gv/VADkAj/8AAIcASAB9ALYA5v/2/yT/Ef8mAB0BqwHDAEkAkv8i/9j/iP9U/zr/4f95AawBvgBgAG3/hf8OAIf/UACbAGEAU/8P/k3/7QDQAUMBFABQ/y8AdQG9AKf/3/7R/g4AjgHEAFv+mv2y/4EBrgIBAqD+1/4ZAf4AWABH/+n9vP0KAKAAUgDPAT0BswAXAZgAU/+v/iL/3/4v/ywAGQGPATMBRv9o/u//BQKRAqr/3v1W/kEASQLCAK794fy//+EBgwOKAsj+uv5MAIwBhADG/bv8sv3AAIwClgHJAMcASwFjAQIANv85/7j+Af+s/jj/6QCVAYcBxAAhAAAAHgEIAQL/f/7e/isAjAEBAXz/cf45/2MA/gCxAE0A7wCMABUAWACn/07/l/9M/6j+8P99ACAB/AFlABoAdwCNAJb/xf5Q/pH+AwEoAtMBigAcAMb/9/5Z//P+J/+u/1UA4QFxAUQBcQBa/6b/Gv+4/lv//f/2/1MAAAGZALwBUwHj/pj+9P48AGEAVQBiAK3/sgC1AKH/qP/Q/tz+fwElAuUA7P8P/8r/LQGKAb/+4/1z/9H/TgHcAHMAoQBMAPX/Wv8mALL/r/8NAKT/TADMANYAMgAa/4v+IAByAR8BQwCb/c/9NQLdA00BJP8Z/f391wEnAu7/3/6R/of//wCNAcv/ef/2AIkAHwHeAAL/sv5X/4f/r/+qAKIBYQG1/3H+aP+tACECTwGN/in+5/9hATIBEgD9/Un+ugC2AR8B/f9U/2H/XgFWAVP/yP6t/vX/8AApAWUABgA6AMX//v8W/4b/MwDB/3QAbwBpAEUBbwHh/9b+Jv92/xAATwAj/9j+HAEOAmUBfACj/nn+ngBXAb4AFgBw/gb/WQCdACwA+v4zAA0B5gHJAf7/uP8q/3D/JP/J/gkAVQAlAH//QQADASgCDQL1/xv/m/6I/4IAr/9n/gr+aQAbAgACTwGg/rn+xgFVAqYA1/5S/YX+fQD7AGMA//4DAMQAvwGkAcj+wP4WAEUBngF5ACP+5fy5/0cBEwF9AIb/bf/4AGsCwAAC/9z+Hv8ZAdYBQP/w/Tv/AwCeAecBRP/V/aD/TAGNAZABXP9//iIARwG5ABr/9v3O/joBkwG9ALb/M/8rAKEA2wDy/zT/q/+JAJsBwACI/7D+bv63/2kAn/9NAJ8BUQHvAFUAIACNAMT/rP0o/XT/LQHlAlIC6f94/xX/1v+N/xf/0P78/p8C9gPqAR//Gv3W/eIA+ADm/kD/gP/IAGUB6gDBAaoBAgBm/TT9t/7KAXkCzgCp/73+lgBOAdoAcf13+6X/KgOcBdIC8vse+yEBfASSAgT/W/qv/NoBOgMiAgsAlf9V/2sBXwE0/v39NP7V/5ACgwLjAOz/mP/h/uv93v4SAb0BDAB//iEAewLIAwICH/0G/NT9uP8yARIBPAASAJwBDAKZABb/D/1//YwBPQNpAbr/wP61/mr/1/8hABMA2QCOAAEA/wBTAY8Aqv9I/zH/BP/O/gL/rADjAbEBJgHEAFYAbP/4/q/+7P6+/24AmAGnAZn/ev7x/mAAGQPiAev99/2h/2QBKQJOAPv9KP5gAEMBfwFIAFL+Hf/XAboCOgAe/t38qf7FAi0CWABw///+2P80AAkAIAB1AJoAiADe/5f/N/8O/9QAUAHrAFEAWP+b/8D/g/80AEYBMQFiAKn+cv6dAO4ATAGEAP/+CwDF/0b/rv/Y/18A8AAsAcEAg/+R/tL/bwCCAbcAwP5n/2v/QQD0AJUAfwCmACoAxf5i/5H/FgDHAMYAFgH5/7j/nP+Y/wAAof/t/28AcQCXAHcA0P/h/+v/7v8QAL7//v+//9z/BgE0AZIAzP8Q/0L/X//B/64AYACQAL0A7ACMAOf/Zv/W/rv/DACDACoAGgBKAPz/xgBBAK8AgQDM/iL/EACXAB0B0gDH/3L/Mv9c/+3/DQBhAEYA8ABKAaEA7P/P/jn/pwCwAGT/Vf9E/zwAgwEmARMBiwA1/9H+uv4R/0gAyQAXATUBrQAPAFj/cf8L/97+/v8JAUQC0AFV/1X+s/+9AJcAmv+i/dj+HwLxAsgBuP9o/Z/9FAAHAZwAIgAkAD4BKAJxAbf+pP2L/lr/mQDdAHwA4wBMAYsA9v8RABEAiv8T/g3+if9jAZ4DzQHT/jP+Hf9LAWIBs/8J/rn+HQI6A+oATf6F/NL9WQLZAvr/cP6I/hIBqgPrAlL+IvwX/vH/9gG4AR0Alf+GACcB7f+3/2n+cf7FAHYBKwF8AJD/jP9lAHsA8f+A/2//gv8J/9X/eQEuAh0BaP/W/hn/XgDHAM7/c/+q/6b/rADSAFP/eP+HAD4BcQJ/AaX9nf1+ADYCwgHJ/7b91f3bAOsBEwGjAJb/uv/rAIIBQP8C/vP+cf8vAhECdf8j/kf/2gB1AOMAxAD1/4n/A/9r/zAAfgHMAFf/aP/S/1sAdQBlAIX/av+gABoBEQESACT+G/5eAbkC0ABw/xz+Av/SACEBVgBx/3r/u/9pAO8A8gAwAN7/kgBxAD0AQ/77/dz/uACkARMBlwCoAH3/h/+C/9f/swBQADsAlgDc/zz/bv/m/9IArgDG/zH/sQBSAZsAiQCV/2L/1/4T/63/IAD/ALYAQAG5AVYAMv8S/rf+egDhAKAASABgAJAAhAD//2z/Pf8l/xcA6wDSAP3/c//2AOoBuwBx/8T9cP7OAHABhQCe/43/QgDaAOwAp/9I/rT/IQEzAvYBjP6H/Qn/tABOAX8AFf/q/qgAAwEUAbkArP/X/9T/HQDV/xD/Nv+m/9MAGQGhAN4ANwCD//f+UP/4AK4BtQDf/mH+ov9hAWUBgv/H/hj/hgDTAWYBlP96/sD/egG7AYIAV/70/V8AcwHVAPX/Mv/n/8IApwBYAH8AnACO//j+Wf8GAOMAcQCr/w//sf/YAXACTwCa/hj+/P5OAoUCDf+H/bz+EAENA7EBDf5D/RUA3QE0Aj8BBv6y/ZkAqQG4ABAAh/66/gAB0QGGAHf/W/9f/6gA3wD4/yoA0/8KAFQAOgAGAKH/vP92/6P/0ABtAVcBlP+//lz/CAAxAb4AYP9d/0cAcQHeANf/ev54/pEA4AGbAcH/cf4l/+EBpALT/0n+vP0B/zoBjAGGAM7/PQA3AFYAaAAT/+3+5v/5AIwB8QAz/63+FgBdAAYAp//R/ygAIABeAA0BCQHFAAYA8v4m/2D/Lf+W/6oA3QFYAW4A6v9Y/8z/o/9K/2UAzwAdAAAAVwBlAAIA1P8AAP//GwCU/3L/LQAlAVkBMAAJAKv/EP/p/lT/pAAPAdAAUAAMAHIAKABx/7v/UgCv/zoAWwAHAFAARQBmAMsAuACy//D9bf4PAM4AowFiAeYA8AC9/zj/u/7D/k3/7P+cAcMBvgDT/7j/hwC2ADkAzP6+/vr/zAAJAacAMgDk/8P/y/+d/+7+N/9MACIC3QK0AMj+f/5V/0QAQgBx/2L/NgAEAXIBpgAAAIL/rf+cADUAmP+g/uP+MwHjAVkBPADE/lT/OP8t/4IAYQDGAEsBtwBzAJn/5v5O/xIAlwDJAB4Agv8EANX/5/9RAIkAxAATAJ3/CAA+AO//HQBIADkAy/+d/8n/of8dAGIAlQABAUYAiP95/9r/0QANAQEAh/+T/0f/N//B/5cAGQGrAEMApQARABT/R//+/7kAHAFjAHH/ff8LAOz/9P+IAGEA/f+y/4L/UwDtAFoAwgCNAXwAkP7m/YT+EQDlAMMAxgDVAF8AmP/S/44AWAH8AKH+S/7W/6wApQB0AL3/hf85AG0AegDt/wH/jv9lAooDwgDy/TT80/0hAdEBnwCH/zMAkADIAKEA7wD4AFT/7P7e/mD/bwCGAG4AVAB0ADYAuwB4ALX+iv7i/9MBzgIAAab9NP0VAPUBiAH7/3f+Af93AOUA2ABkAAMAv//N/yMAFABTAEwACACw/6//VgBrAL//2f54/t//IAMkAyQAIv78/TgAnQJ+AZT9ZvxM/2UCnAPFAW/9I/xjAKkCIQKDAI/9Y/4ZAk0DEABV/a38Cv4uAjkDkwAe/5v/tgAWApkBYf+b/p3+D/+z/9L/8gBYAYcAyv+m//n/gQBzAEb/H/+BALABjgFXAI/9Q/0AALMBeAHk/1n+K/91AjkDwwCn/rT90f7AAOwAwv+3/4EAJwHCAWYAlf1V/aX//wBWAiQC3f8UAHUAGABI/1T+lv4J/4QA7gAhATYBrgCwAMEAXAB3/o399f4WAMQBAgKzAPX/fP+K/zD/D/+s/+v/VgEOAnoB9gDH/rn+UgB1AGT/Xf6e/uj/BQIrAtcA9v9L/9T/MAAYAF//Rv9sAHIBfAH9/4r9r/1eANsB9QFqAKP/FgCuAKQAuv8l/wf/8P+DAP//xv8M//j/aQGOAfkAGv+3/s3/WACXAH8ANACTAOj/TP81/3T/ZQCCAPUAwQADAOL/DgBYAKUAYwDe/tP+ov9+/7IAuQBNALQAtgBTAPr/rf/W/iT/3ACBAdkA9f8d/3f/vgDqAEYAzP+y//z/NgArAAUA5v8uAG0A9v++/ysA8f9pAK0A1v/A/00AOADn/qP+lv/zAEICuwH3/9f+5f91AAQAfv8v/uj+JQHeAW4BEgD7/j3/uAAIAZj/1P4j/2kAgwFWAZ4Ak/8B/9P+Dv+z/+cAkQEeAZkARgDN/87/LP+D/sb+FgAsAQgCdAGK/0v/5f+cAIkAUf98/t3+bQB4AV0BrwBBANr/iv+E/9v/VgCCAGIAef9F/3YAwwAKAFr/Bv+u/1wC3gL+/7j+Nv6D/zoCZgES/uL88P6IAXUDnQLA/hH+UABkAR0Bb/+9/TP+wADCAZ4AJgAr/33/tQAiAJgA3gBcAD4ASv8//00AwgAbALz+C/44/wgCygLQABr/7f44AOEBdQFM/kj9/f6BABICGAH8/gv/JQAEATwBSQAX/37/QgAyAGAAtP+g/yIAkv/3/4gAlwC+ABkAL/9G/34ABwFGANP/af+X/60ApACO/2X/yf9OAEsB5gBU//z+xf8cANkArwDS/xMAQwCEACcAyP+R/1r/vf/c/83/uv/5/5gAagGmAUgAdf/x/pn/UAAOAP//Bv9T/xsAjADHAFsAYwDeAHkBSAHu/7r+tP71/6IAm/+1/r/+u/+uAc4BJgGKAPP/NgBNALn/w/6I/mT/5P/yAGUAfv/G/7cAJQH1AMUAKwAKAKn/6f6W/xQAWQAAAEX/mf9mAAwBkQCw/3f/3P8OATMBkgDJ/9f+q//mAHsA8P48/h3/yQBwAogBL//d/t3/uAA0AXYAEf8U/xMAdwBJAKL/xv4g/+cAhQEIAQIAk/8zAMMAAQEkAED/7v7K/iz/t/8eAUsBrgB/AML/8P9nAE0A2P+k/wcALgBeAF8AWv/e/r7/VQDIAIEApf+s/zsA1QDxAFoAv/+J/0r/Sv+u//L/bQB9AIUAggBtAGsA3P+a/2r/cv9TALcARgAKAOz/z/9HAFIAq/+R/73/RACbAJ0ABwARAGEASwBaAK7/5/4U/yYAugBjAEkA0/+e/4AAdQBXAGgA6P8pACEAvf+m/4r/of9WAK4AZQBV/0r/HQCsACEBvQC4/6H/tP8KAN//Sf8w/5n/uQBdAeoA9v+6/+v/2gDWAAL/4P5Y//7/EQGYAEsAh/+4/wUAuv9WAFwAkgCBAEkA9P97/63/nv+Z/6r/5/+hALEAdgCz/6f/+gALAYoAzf+1/uf+QQBdAP//LwAHAE4AIAG3AO7/cf+Y/xsAZwA7AKv/nP+e/9X/AQAsAJYAqwBuAAoAMwA0ACYA/f96/6n/rf/j/04AUABJADMAcQCMAEgA1P+a/6r/1P8ZAJIAmgBlADQA/P7T/mEA8gCRAE8A6f/8/6sAowDM/2D/oP/O/4MAkwA5//v+jP+dALMBWwHL///+9/9BAD0A9P9f/6j/xv/p/0MAJAAlAFMA3gAHAX4Aaf8l/1//kQDFAL7/h/98/w4AJQAvAHoAQgB8AHIAYgACAHH/gv+BAC0BQwA2/2j+Bf+7AA4BgAAhAGMApADJAGMAZ/80/27/zv99AEQA/v4R/2cARAFVAZwAf/9z/xQA+f80AHYAggBvAKT/Zf9Z/3f/5v8eAJMA9gC8AHEAegAnAGn/fv8dAB0AzP9s/y//LQDWAOkATAANAO//g//V/xUAiQDuAKkAVADe/7H/2f6h/rT/HQBEAMwAvQDrAIMANgCbAHQAMgBo/yn+wf7j/0kAhQC0AHIASgBDAPP/NgAnAFsATQDrAN8A1/51/uH+a/+vAI4AVAC1AG0AaQBQALAAZAGBABf/ev6t/j7/qv8YAJgACQHeAOgAsQARAL//Mf9YABoBEgBW/1L+TP/4AMkANQDm/xsAdAA0ACcAcwBrABEAv/+1/7z/V/92/ygA+AAFAT8Au//B/08A+/8IAHgAoQA9AO3+Ev8oAJUAvgAIAOP/AgCu/6D/FAB/AO8AqwDl/xIAOQCJ/73/PABHADEAlf+I/83//v85AHMAuwG+Ac3/z/5//nL/2ACqAFD/P/87AHgA6ADeAEQA7P85AF0A+v9+/+D+SP/6AIQBWwCK/+j+hf/+ANEATgBFAC8ACQCV/6n/BgAYACoAIQDb//r/DQAZAH4AiACAAP//8P+1/5T/sv/1/7kA6gBvAC7/LP9TAKIArwDk/2b/r/86AHgAbACfABgANACG/y7/+v/A/0wAmAChAKIAPwD2/5j/Zf9l/7f/pwAVAS0Aiv/1/28AJQGeAG3+Nv6C/ykAfgFIAUMApAATAMD/t/9A/0H/qP+7ADIBugD4/73/3P9KAGYAj//G/8b/zv8ZAEsALgFgAQMADP/L/lP/ngCLAFAAbgAUAJMAdAADAGv///7L/5IA7gBPAJ//bP+QAD8BagDM/xX/Yf+8/7L/VwDKAL4AmwBMAAIAov+N/5D/s/9uAFIAAwD//9D/RwAAAAcAPQAnAFYAIgA4AA8A+/8DAGwA/ABN/57+yv56/1UBkgFjANH/KACxANgAIADp/rz+lf9XALAAGAAf/4L/SQEdAhQBzv+v/vz+ZQB9AF8AEwC9/wsA7P+8//T/CAAbAG8AtgCDAEoAWQAPAO7/7v9o//X/GgBA/0H////kAHQBPwHw/4n/2v+6/8L/rP/M/yYANgBQAE8AXwDj//P/KQDP////zv/y/44AnwA7AIsAgwDG/2r/p/77/lsAswAJAdIAoACTAPD/i/9Y/1X/yP8BAIwAqgBEAP7/QQChAFAAh//s/gv/WgDeAAkB0QA2AEcA6f+0/1T/Rf+A/+z/CwEeAZgALACq/+n/NwDO/7z/GwAlAGMAcAB3ACQAvv9C/9v+sf84APgA5gCgAMQAWwBjAI3/KP+7/vr+PgChAMgAbAAdALsAFAG8AJb/6f4D/9z/tADGAPj/ov////H/NgDr/7X/AAC7ACQB1QBcAIv/WP9j/37/xP/4/zAAWgCoAJIAZwAbAPX/0P+N/+z/JQBCAHIAQQDw/+r/kv96/97/RwCfAGUAOgADAF8AvQAFAKv/gP/A//P/+v/u/8X/KQCUAMYAQwCJ/2v/4v/vADMBvgBQ/xf/nP/Q/wsApv/S/z0AvADiAHQAhQAUABQAJgAVAAX/6f5j/3f/9wAtAYYAiwBEAOz/qv/l/xUAPgD2/7v/9P+AAIYA7//W/5//s/8DAD8AQACiAO4ATwBBAMz/P/86/1H/PQDDANMA3gB7AAIAUf8P/93/dACmAFEAuf89AKUAvwAXAGH/Hf+K/xsAIQBwADsAUQCbANsAgABE/+T+Tv///40AhADr/+D/MgAVABQAGgAhAAQAJgAVANz/ZgDt/wUAGwAIAO//sv8rAMv/PwCYAJ4A0gAxAH3/Hv/O/3QAlQCVADoAEQBLAEQAxf/+//z/GAA3ADQAUwDs/ysAIgDx/0kAUQAhAPH/qf9O/9L/cQC5AFIAxv+7/1kA4gCQAKf/G/9Q/zoAbwAsAOT/xP88AB0B9wC//2b/gP/M//sAggB//0L/tf80AHEAcAACABoAlgBTABgA+/+Z/6D/JABIAOX/zv/b/w8AiQC2ADwABQAEAO//8P/z/x4AMAD3/73/u/8aAC0ANQB+AHAAdQAzAM//y/9k/2X/UgCgANcAhABA/yz/cgAxAZsAxP///kX/egDzAEkA6P+9/w4AxgC3ABz/Yf5a/6MA7wGdAZP/xP7Q/44AjQAKABn/f/83AIAAdwAwAAMA7v92AJoAxv9d/1P/4/8KASgB1v9e/13/lP8nAFkArQDlAI4AQwCq/5z/av82/woAmABgAPr/kP/U/ygBkQFlAJP/Kf8Q/07/yv8kAE4AygCwAJUAlADT/1r/9v+mAHcA3P8T/wH/CwCxALUAZwB3ABUAOv9O/ywAogDRAIAAgv93/7j/nv8AADYAWACTALIApwD5/w3/O//H//MA8ABx/xD/pv+fADMBnwACAIH/wP/I/8r/0/8DAFQAhgDFAF8A2f+9/6b/FwD//93//v8eADoA7/8gAM0A0wBEALT/L/9W/6gAlgDj/7r/1/86AKsAggBt/1z/6P9eAO4AnAACANL/BQDd/6//6P/2/ysANAA+AHYAfQC8ACQA7P7L/v3/8QDeAGUAFf8k/wwBrQEpAAb/Tf4O/6wBywEOACH/Qv8FAJ0BgAHc/vz9cf+6AMMBLgHX/kv+QQB+ARsBAADK/qv+kwBCAU4Arf9V/z//jgAeAeT/TP+x/0QADAH2ALj/If+p/yIAUQAUABUADgAVAB0ACwAgAEsAJgDy/yAA9/+a/6T/7f8+AHYAowBJAAsA//9v/2L/7P9AACkAEgByAFQAZABGALX/4//M/4v/qv/6/2wAjACWAKkAIwDC/0L/8P72/70AoAAxAP3/GQBUAHkAl/8w/0D/6P8jAVwBNgBw/4//SAARAXEAmv44/on/+wCBAecAlP9T/08AyABMANL/6P74/ncAzADDAIgA6P/+/8T/sf/H/+j/YwAdABoAQwChANgAqf+4/t3+ef/6AHoBJQB6/9f/oQBbAb0Axf76/TP/gQBEAfsAuv+j/4AA4QBeAI3/1v4B/yYApAB5AFIA3P8gADMA6v8jABQA8v/D/6z/vv+eAPgAAACb/1f/pP/DAK4A7P95/97/YwDYALIAQP/f/q7/RgCzAGgAyv/N/2UAeAAyABoA9P+z/2n/Z//x/5gA+ABqAKb/fP/+/3MAVwCc/0n/r//UAGMBegB2/wv/gv+hAIkAuv90/9//ZACdAK4APgAoALv/X/+E/8r/lwDCACAAzf/9/4EAjwAqAPL+ev7p/y8BxQHdAAX/zP4oAP8AcACX/wb/K/92AOgAggA1AO//3f/+/xEANwA2AAAA5v8tAAUAVgBqAGf/yv4V/zsABQIrAvj/lP4H/w8AEAG9ANr+gf69/9sAFwGSAJX/bf9jACUBoACb/77+Pf+vABEBZADK/1n/pv8HABAAowC/AHUA5P8p/4r/DAB6AEEA3//9/wEAPgBgAPn/cP+N/1AAigBzAGn/7/4VANMAAwGLAGv/X/8rAC4AGgDr/5P/vP81AJsAVgD6//z/LwDEAIUAPv/a/p7/NAD+AM8ARP84/wwArAC/AGYALP8K/7QAYgHjAK//b/76/twAawG3/7/+7/4NAC4CGgK5/6b+G//c/+cAegDy/t/+BAAKASsBewA7/0n/RgCCABsA4P+Y/7P/PwAvADgAawAfALv/Xf+Q/3YAFAF5AML/Wv+W/3QAwgD1/2D/fP8HAOoAsgDP/1n/3P+VALcAewBZ/zv/DgAuAJcARQAIAO7/0v/u/8P/JQA6ACAALQACACcARQA9AAIAwv/z//P/JABkAOr/2P8zAE4AXwAhAPX/n//d/yoA3v89AC0A7P8ZAA4AEAB4AIsAoP96/5L/mv9NAI8ATwBMADsAJgBPANj/b/+C/+z/PQCEAG8Auv8iAGgASwBRALz/sf/M/8P/2f9AAHwAbACTAFQA8/+4/7T/wf/Q/xcAEwA1AEkAVgA3APn/9P8aAP3//P/z//b/FgD9/xoAnABnAK//Uv+I/xQA/QD5ABUAzf/U/0oAOwDZ/xL/6f4ZAOEAGQGeAHr/pv+LAMUAMgB7/yn/n/86AIAAQAAxAP3/0v/o/7b/LwBuACAAOgA3AD8AowCoAHf/8f5F/8P/GAHxAIX/Nf86AD8BgwHHAMD+cP7B/4QAdADu/zn/eP8NAWgBggCn/+3+Tv+xAM8AJADg/9f/QAC6ADsAov9E/2T/AwBAAHEAlwBkADYAGgD6//r/CADu/7H/s//u/ykAYgA7AMP/2v9RAIgAZgADAIL/h/91AKUAXAD9/2r/vf/5/wEAof99/zMAjgBFARAB6P/G/4v/y/8CAK7/lv+o/0IArwCHAC4A1v/w/zAASQDz/6n/9P81AG8AmQD2/47/nv+4/+b/FgA0ABAAlgDTALMAWgC2/3T/jf/D/87/r/8eAEQAZgCtAE0ANwAaANL//f/9/wYAAgAhAFkAUgAOAIX/Vv93/9j/OQChABkB4wA/ANn/o//V/+7/uP+E/8H/8v8MAEEAfQB9AJcAgwBLAN//c/9A/3D/ZwC4AFIABADE/9T/3//q/xEAZQCPAFwAOwAuAEcAOgDY/+H/2/+3//z/GwBGAJ4AkwCmAJEARgCK/xr/6v9yAKIAYAB//3D/TQCPADoAIgCy/9P/WwBOAEEA9v/k/wkAbAA5AGH/If+V/1AA8gDXACgA7//8/7z/zP/H/z8AaQAcAB4A//8dAAUA5f/0/wwAHwDq/zkAYAA9AGkAJADw/+r/wf+Q/6v/GQAmAGcAswB+AOz/Q/8d/1gASQHQANn/gP+S/zMApADI/03/kP8QAN4AGAFUAOD/3f8aAGUA9P8e/9T+4f+XAKkApABHAF0ACQDD/+T/+/8PAAIA+P/J/xsAUQAVAB8A5//3//P/EwBBADYADQAzAIgAbgAKAG3/h/+5/9f/FgBoAL0AqgBlAPr/tP/I/8r/u/+r/yIAbwB+AKcAKAAIAJD/hP/4/+v/5P8XALYADwHXAC4AMf8+/0P/g/8pAHwAxgD2AEQA9f8NAPn/s/+G/6//1P9KAIkAZABRAPP/7/9kAHQAev8R/4n/VACEAWsBvf8s/1r/zP8vAPj/2/8HAHEApwCUADcAkP95/xEASgAkANr/wv8KAIsAkABBAB8A0/+i/5D/gv9oAMgAiQA/AAIACADR/7r/qP/L//7/FABEAFoAfgCAAF8ANAAHAKT/U/96/+D/LgB1AF0AZABtAPf/pf/E/ycAhAA/AA4A0v/4/ygAAwD6//P/AADw/yYAKwAwAEcAZwBwAHEA1/9a/1X/0/9wAIEAQgAqADQATQAOAPL/KQATAP7/5v/b/9z/DAAuAF4AewARAL//g//A/1wAfgBBABsAMgAXAP3/7P8DAD0AIAACAPX/5f+n/8L/gwC7AK4AUACJ/4z/DwBBAPP/4P/2/wQAEgDk/yIAOAArADsAKAAcAOD/sP8FAEQAcQAdALb/gf+z/+D/OgB0AMAAsADp/4b/1P/v/ysAFwDs/+P/1v8GABQASABZAGAARQAvAPX/mv+N/+D/gQCmABIAxP+t/8n/FAApAC0ALwAsABYAPQAUABUADwDo//L/4v/6/9r/5v9LAEIAWABeAA8A+P+k/8r/BwAsADMAKwAwABgA6//f/+T/BwBDADEA8v/n/ycAhgBNABMAwf+u/w0ALAAaAN7/6v8dAH0AgQDt/9P/1v///0MAIQAUAPH/CAAaAA0ADwA8ACwAxf++//D/NACLAHMA8/+6/xAAZgBQAB0APP9L/zkAugBsAAAAVv+R/7oA6QBIAOb/fP/I/0YAZAD4/53/2v9dAMwAsQDo/2b/2f8sAFQAIADF//3/CwAtAA4ABgBLACQAyv/Y/xEALQBJAEQA+//u/7X/n//5/yMAOgA6AG8AfAAiAK3/ef+0/0YAUQAaAAAAGQAYAOv/8/+CAJYA/f+O/3r/wv9iAF0AOgBEABoA1P/A/+n/KgBgAEkAKQA/AAkAq/+l/zcAaQBYAA0A8v/j/6//tv8rAOEA2AA0AFn/Ov8OAFEAGwAjACgADAD0/8X/DwBDAGgAJQAcACMAw/+R/9b/NACDAGUADADr/wgA0/+r/1UA0ACPALj/Rf+f/ygAkwBjAAsAKwACAPX/6f/q/wsACAAiAGMAUwDl/5T///+QAJYAHACK/6T/1P/u/xsAOQBhAFcAAgDA/9v/VgBNABcA8v/x//L/CgAkAAIA9f/t/xwAWgAlAK//xP9PAOkAwwD7/wP/F/8kAJYATQD4/+D/DACyAKEALADt/6r/4/82ABoAr/+S//7/cwDLAIAAkP9l/+z/UABGAEAAHwAPAOb/3f/T/+T/BgADANr/9/8oAFEAWQBeAEEAEwDF/7f/x//x/wkAOgCcAJgA8f9s/3T/2f9uAJUAGgAHACgATAAqAA4A/f/5/9r/wP/l/9D/FwBWAKYAuQBDANj/WP+F/xMAAAARAEoAOwAaAPP/rv///ygADgAgADIAHQATABUALgBNAB4Av/9W/4D/FgBQAHwAqwCfAGgA3P+v/5v/mP/c/yIAbAB/AAIA5v8AAC4AUgAOAKf/qf8hAEEAYwB1AC4AHADJ/7T/w/+e/+b/DwCqALIAVwD3/7T/z//9//H/2//W/w0ATwBcAGQAGAD4/87/zf8BAOv/6v86AJkAzgBwAOv/d/9x//H/+f8FAAkAJwBUAIQAUgDj/8n/0P/r/zgAFQD4/xcAMwAwAAMA8//V/+T/AwDv/0AAcgCFAFoA6v+y/8f/8v/z/9f/4P8GAJIA2ABQALf/df+k/0IAfAAnAND/+/9DADcAVwDm/7D/9f8AADEAIQD2/+j/SwCSAEsA+/+R/5z//v9KADkADAA3ABEAEAAeAOj/7f9fUE1YshMAADw/eHBhY2tldCBiZWdpbj0i77u/IiBpZD0iVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkIj8+Cjx4OnhtcG1ldGEgeG1sbnM6eD0iYWRvYmU6bnM6bWV0YS8iIHg6eG1wdGs9IkFkb2JlIFhNUCBDb3JlIDUuNi1jMTQzIDc5LjE2MTIxMCwgMjAxNy8wOC8xMS0xMDoyODozNiAgICAgICAgIj4KICAgPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4KICAgICAgPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIKICAgICAgICAgICAgeG1sbnM6eG1wRE09Imh0dHA6Ly9ucy5hZG9iZS5jb20veG1wLzEuMC9EeW5hbWljTWVkaWEvIgogICAgICAgICAgICB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iCiAgICAgICAgICAgIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIgogICAgICAgICAgICB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIgogICAgICAgICAgICB4bWxuczpkYz0iaHR0cDovL3B1cmwub3JnL2RjL2VsZW1lbnRzLzEuMS8iPgogICAgICAgICA8eG1wRE06VHJhY2tzPgogICAgICAgICAgICA8cmRmOkJhZz4KICAgICAgICAgICAgICAgPHJkZjpsaSByZGY6cGFyc2VUeXBlPSJSZXNvdXJjZSI+CiAgICAgICAgICAgICAgICAgIDx4bXBETTp0cmFja05hbWU+Q3VlUG9pbnQgTWFya2VyczwveG1wRE06dHJhY2tOYW1lPgogICAgICAgICAgICAgICAgICA8eG1wRE06dHJhY2tUeXBlPkN1ZTwveG1wRE06dHJhY2tUeXBlPgogICAgICAgICAgICAgICAgICA8eG1wRE06ZnJhbWVSYXRlPmY0NDEwMDwveG1wRE06ZnJhbWVSYXRlPgogICAgICAgICAgICAgICA8L3JkZjpsaT4KICAgICAgICAgICAgICAgPHJkZjpsaSByZGY6cGFyc2VUeXBlPSJSZXNvdXJjZSI+CiAgICAgICAgICAgICAgICAgIDx4bXBETTp0cmFja05hbWU+Q0QgVHJhY2sgTWFya2VyczwveG1wRE06dHJhY2tOYW1lPgogICAgICAgICAgICAgICAgICA8eG1wRE06dHJhY2tUeXBlPlRyYWNrPC94bXBETTp0cmFja1R5cGU+CiAgICAgICAgICAgICAgICAgIDx4bXBETTpmcmFtZVJhdGU+ZjQ0MTAwPC94bXBETTpmcmFtZVJhdGU+CiAgICAgICAgICAgICAgIDwvcmRmOmxpPgogICAgICAgICAgICAgICA8cmRmOmxpIHJkZjpwYXJzZVR5cGU9IlJlc291cmNlIj4KICAgICAgICAgICAgICAgICAgPHhtcERNOnRyYWNrTmFtZT5TdWJjbGlwIE1hcmtlcnM8L3htcERNOnRyYWNrTmFtZT4KICAgICAgICAgICAgICAgICAgPHhtcERNOnRyYWNrVHlwZT5Jbk91dDwveG1wRE06dHJhY2tUeXBlPgogICAgICAgICAgICAgICAgICA8eG1wRE06ZnJhbWVSYXRlPmY0NDEwMDwveG1wRE06ZnJhbWVSYXRlPgogICAgICAgICAgICAgICA8L3JkZjpsaT4KICAgICAgICAgICAgPC9yZGY6QmFnPgogICAgICAgICA8L3htcERNOlRyYWNrcz4KICAgICAgICAgPHhtcDpNZXRhZGF0YURhdGU+MjAyMy0wNC0yMlQyMjoxNDowMiswODowMDwveG1wOk1ldGFkYXRhRGF0ZT4KICAgICAgICAgPHhtcDpNb2RpZnlEYXRlPjIwMjMtMDQtMjJUMjI6MTQ6MDIrMDg6MDA8L3htcDpNb2RpZnlEYXRlPgogICAgICAgICA8eG1wTU06SW5zdGFuY2VJRD54bXAuaWlkOjQwNjFjNmQ2LWY5MGEtNjQ0OS1iNjBjLTQ1ODk4NmM2ZmNhZjwveG1wTU06SW5zdGFuY2VJRD4KICAgICAgICAgPHhtcE1NOkRvY3VtZW50SUQ+eG1wLmRpZDo3ZDE1OGFhMy02NTQ1LTNhNDUtYTM5Ny05OWQ3NjdjMzc4ZWU8L3htcE1NOkRvY3VtZW50SUQ+CiAgICAgICAgIDx4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ+eG1wLmRpZDo3ZDE1OGFhMy02NTQ1LTNhNDUtYTM5Ny05OWQ3NjdjMzc4ZWU8L3htcE1NOk9yaWdpbmFsRG9jdW1lbnRJRD4KICAgICAgICAgPHhtcE1NOkhpc3Rvcnk+CiAgICAgICAgICAgIDxyZGY6U2VxPgogICAgICAgICAgICAgICA8cmRmOmxpIHJkZjpwYXJzZVR5cGU9IlJlc291cmNlIj4KICAgICAgICAgICAgICAgICAgPHN0RXZ0OmFjdGlvbj5zYXZlZDwvc3RFdnQ6YWN0aW9uPgogICAgICAgICAgICAgICAgICA8c3RFdnQ6aW5zdGFuY2VJRD54bXAuaWlkOjdkMTU4YWEzLTY1NDUtM2E0NS1hMzk3LTk5ZDc2N2MzNzhlZTwvc3RFdnQ6aW5zdGFuY2VJRD4KICAgICAgICAgICAgICAgICAgPHN0RXZ0OndoZW4+MjAyMy0wNC0yMlQyMjoxNDowMiswODowMDwvc3RFdnQ6d2hlbj4KICAgICAgICAgICAgICAgICAgPHN0RXZ0OnNvZnR3YXJlQWdlbnQ+QWRvYmUgQXVkaXRpb24gQ0MgMjAxOC4wIChXaW5kb3dzKTwvc3RFdnQ6c29mdHdhcmVBZ2VudD4KICAgICAgICAgICAgICAgICAgPHN0RXZ0OmNoYW5nZWQ+L21ldGFkYXRhPC9zdEV2dDpjaGFuZ2VkPgogICAgICAgICAgICAgICA8L3JkZjpsaT4KICAgICAgICAgICAgICAgPHJkZjpsaSByZGY6cGFyc2VUeXBlPSJSZXNvdXJjZSI+CiAgICAgICAgICAgICAgICAgIDxzdEV2dDphY3Rpb24+c2F2ZWQ8L3N0RXZ0OmFjdGlvbj4KICAgICAgICAgICAgICAgICAgPHN0RXZ0Omluc3RhbmNlSUQ+eG1wLmlpZDo0MDYxYzZkNi1mOTBhLTY0NDktYjYwYy00NTg5ODZjNmZjYWY8L3N0RXZ0Omluc3RhbmNlSUQ+CiAgICAgICAgICAgICAgICAgIDxzdEV2dDp3aGVuPjIwMjMtMDQtMjJUMjI6MTQ6MDIrMDg6MDA8L3N0RXZ0OndoZW4+CiAgICAgICAgICAgICAgICAgIDxzdEV2dDpzb2Z0d2FyZUFnZW50PkFkb2JlIEF1ZGl0aW9uIENDIDIwMTguMCAoV2luZG93cyk8L3N0RXZ0OnNvZnR3YXJlQWdlbnQ+CiAgICAgICAgICAgICAgICAgIDxzdEV2dDpjaGFuZ2VkPi88L3N0RXZ0OmNoYW5nZWQ+CiAgICAgICAgICAgICAgIDwvcmRmOmxpPgogICAgICAgICAgICA8L3JkZjpTZXE+CiAgICAgICAgIDwveG1wTU06SGlzdG9yeT4KICAgICAgICAgPGRjOmZvcm1hdD5hdWRpby94LXdhdjwvZGM6Zm9ybWF0PgogICAgICA8L3JkZjpEZXNjcmlwdGlvbj4KICAgPC9yZGY6UkRGPgo8L3g6eG1wbWV0YT4KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgIAo8P3hwYWNrZXQgZW5kPSJ3Ij8+';
+    const PLAYER_EFFECT_STATE = { hint: null, heart: null };
+
+    /** Load the three embedded note textures once; `onLoaded` bumps a repaint. */
+    function ensurePlayerSprites(onLoaded) {
+      if (typeof window === 'undefined' || typeof window.Image !== 'function') return;
+      for (const kind of ['tap', 'drag', 'taplik']) {
+        if (PLAYER_SPRITE_STATE[kind]) continue;
+        const image = new window.Image();
+        PLAYER_SPRITE_STATE[kind] = { image, ready: false };
+        image.onload = () => {
+          PLAYER_SPRITE_STATE[kind].ready = true;
+          PLAYER_SPRITE_STATE.v += 1;
+          if (typeof onLoaded === 'function') onLoaded();
+        };
+        image.onerror = () => {
+          PLAYER_SPRITE_STATE[kind].ready = false;
+        };
+        image.src = PLAYER_SPRITES[kind];
+      }
+    }
+
+    /** Load the hit-response textures once; `onLoaded` bumps a repaint. */
+    function ensurePlayerEffects(onLoaded) {
+      if (typeof window === 'undefined' || typeof window.Image !== 'function') return;
+      for (const kind of ['hint', 'heart']) {
+        if (PLAYER_EFFECT_STATE[kind]) continue;
+        const image = new window.Image();
+        PLAYER_EFFECT_STATE[kind] = { image, ready: false };
+        image.onload = () => {
+          PLAYER_EFFECT_STATE[kind].ready = true;
+          if (typeof onLoaded === 'function') onLoaded();
+        };
+        image.onerror = () => {
+          PLAYER_EFFECT_STATE[kind].ready = false;
+        };
+        image.src = PLAYER_EFFECT_SPRITES[kind];
+      }
+    }
+
+    // ---- Engine defaults -------------------------------------------------
+    // These mirror the `[auto defaultValue ...]` declarations of the Unity
+    // Dremu form, NOT the CATALOG authoring defaults (LANE_COLOR / NOTE_COLOR
+    // are only used when a *new* element is created in the editor).
+    const GORGE = 'GorgeFramework.';
+    const WHITE_COLOR = Object.freeze({ a: 1, r: 1, g: 1, b: 1 });
+
+    function playerValueFloat(baseValue) {
+      return { t: 'obj', type: GORGE + 'VariableFloat', fields: { baseValue } };
+    }
+    function playerLinearCurve(k, b) {
+      return { t: 'obj', type: GORGE + 'LinearFunctionCurve', fields: { k, b } };
+    }
+    function playerConstantCurve(value) {
+      return { t: 'obj', type: GORGE + 'ConstantFunctionCurve', fields: { value } };
+    }
+
+    const PLAYER_NOTE_DEFAULTS = {
+      laneName: '',
+      hitTime: 0,
+      leadTime: 1.5,
+      lagTime: 1.5,
+      position: playerValueFloat(0),
+      distance: playerLinearCurve(-8, 0),
+      color: null,
+      hintReference: false,
+      positionZ: -2,
+    };
+    const PLAYER_HOLD_DEFAULTS = Object.assign({}, PLAYER_NOTE_DEFAULTS, {
+      holdTime: 1,
+      endDistance: playerLinearCurve(-8, 0),
+      holdLine: playerConstantCurve(0),
+      truncation: true,
+      holdLength: 1,
+      pointCount: 100,
+      targetProjectionFix: true,
+    });
+    const PLAYER_LANE_DEFAULTS = {
+      name: '',
+      generateTime: 0,
+      keepTime: 10,
+      laneLines: [],
+      animation: playerLinearCurve(1, 0),
+      drawStartX: playerValueFloat(-10),
+      drawEndX: playerValueFloat(10),
+      pointCount: 100,
+      evaluateDelta: 0.01,
+      color: null,
+      positionZ: -1,
+    };
+    const PLAYER_MAIN_LANE_DEFAULTS = Object.assign({}, PLAYER_LANE_DEFAULTS, {
+      positionX: playerValueFloat(0),
+      positionY: playerValueFloat(0),
+      rotationZ: playerValueFloat(0),
+    });
+    const PLAYER_GUIDE_LANE_DEFAULTS = Object.assign({}, PLAYER_LANE_DEFAULTS, {
+      mainLaneName: '',
+      position: playerValueFloat(0),
+      targetProjectionFix: true,
+    });
+    const PLAYER_STORYBOARD_DEFAULTS = {
+      assetName: '',
+      startMoment: 0,
+      keepTime: 1,
+      positionMode: 'ScreenX',
+      positionX: playerValueFloat(0),
+      positionY: playerValueFloat(0),
+      rotationZ: playerValueFloat(0),
+      scaleX: playerValueFloat(1),
+      scaleY: playerValueFloat(1),
+      positionZ: playerValueFloat(1),
+      alpha: playerValueFloat(1),
+      useChartTime: false,
+    };
+
+    // ---- Value / curve helpers -------------------------------------------
+    function playerNumber(value, fallback) {
+      const number = valueAsNumber(value);
+      return Number.isFinite(number) ? number : fallback;
+    }
+    function playerBool(value, fallback) {
+      return typeof value === 'boolean' ? value : fallback;
+    }
+    function playerString(value, fallback) {
+      return typeof value === 'string' ? value : fallback;
+    }
+    function playerEnumName(value, fallback) {
+      if (typeof value === 'string' && value.length > 0) return stripNamespace(value);
+      if (isTypedValue(value) && value.t === 'ref' && typeof value.path === 'string') return stripNamespace(value.path);
+      return fallback;
+    }
+    /** Clamp a user-supplied point count into a safe drawing range. */
+    function playerPointCount(value, fallback) {
+      const count = Math.round(playerNumber(value, fallback));
+      return Number.isFinite(count) ? clamp(count, 2, PLAYER.maxPointCount) : 2;
+    }
+    /** Evaluate a FunctionCurve-ish typed value at x (0 on unknown data). */
+    function playerCurveValue(value, x) {
+      if (value === null || value === undefined) return 0;
+      if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+      const sampled = sampleCurve(value, x);
+      return Number.isFinite(sampled) ? sampled : 0;
+    }
+    /** `VariableFloat.EvaluateAdd` (base + curve), also handles plain curves. */
+    function evalAdd(value, x) {
+      if (value === null || value === undefined) return 0;
+      const sampled = sampleCurve(value, x);
+      return Number.isFinite(sampled) ? sampled : 0;
+    }
+    /**
+     * `VariableFloat.EvaluateDoubleLerp(t, min, max)` as observed in the
+     * shipped charts (storyboard alpha fades: baseValue 1 + curve -1..0 => 0..1).
+     */
+    function evalDoubleLerp(value, x, min, max) {
+      if (!isTypedValue(value) || value.t !== 'obj') {
+        const sampled = sampleCurve(value, x);
+        return Number.isFinite(sampled) ? sampled : min;
+      }
+      const fields = value.fields || {};
+      const base = playerNumber(fields.baseValue, 0);
+      if (fields.variationCurve === null || fields.variationCurve === undefined) return base;
+      const curve = sampleCurve(fields.variationCurve, x);
+      return base + min + (max - min) * (Number.isFinite(curve) ? curve : 0);
+    }
+    /** `{ a, r, g, b }` from a ColorArgb-ish typed value (defaults are 1). */
+    function playerColorFromValue(value) {
+      if (!isTypedValue(value) || value.t !== 'obj') return WHITE_COLOR;
+      const fields = value.fields || {};
+      const channel = (name) => {
+        const raw = valueAsNumber(fields[name]);
+        if (!Number.isFinite(raw)) return 1;
+        return clamp(raw > 1 ? raw / 255 : raw, 0, 1);
+      };
+      return { a: channel('a'), r: channel('r'), g: channel('g'), b: channel('b') };
+    }
+    /** Sample a `LerpColorCurve` at x (null/other => white, like Unity). */
+    function colorCurveAt(value, x) {
+      if (!isTypedValue(value) || value.t !== 'obj') return WHITE_COLOR;
+      if (stripNamespace(value.type) !== 'LerpColorCurve') return WHITE_COLOR;
+      const fields = value.fields || {};
+      const list = fields.colorPoints;
+      const items = isTypedValue(list) && list.t === 'arr' && Array.isArray(list.items) ? list.items : [];
+      const count = items.length;
+      if (count === 0) return WHITE_COLOR;
+      const progressCurve = fields.progressCurve;
+      if (progressCurve === null || progressCurve === undefined) return playerColorFromValue(items[0]);
+      const raw = sampleCurve(progressCurve, x);
+      const progress = Number.isFinite(raw) ? raw : 0;
+      const first = clamp(Math.floor(progress), 0, count - 1);
+      const second = clamp(Math.ceil(progress), 0, count - 1);
+      const a = playerColorFromValue(items[first]);
+      if (first === second) return a;
+      const b = playerColorFromValue(items[second]);
+      const mix = progress - first;
+      return {
+        a: a.a + (b.a - a.a) * mix,
+        r: a.r + (b.r - a.r) * mix,
+        g: a.g + (b.g - a.g) * mix,
+        b: a.b + (b.b - a.b) * mix,
+      };
+    }
+    function playerCssColor(color, alpha) {
+      const c = color || WHITE_COLOR;
+      const a = clamp(alpha === undefined ? c.a : alpha, 0, 1);
+      return 'rgba(' + Math.round(c.r * 255) + ',' + Math.round(c.g * 255) + ',' + Math.round(c.b * 255) + ',' + a + ')';
+    }
+
+    // ---- Model normalization ---------------------------------------------
+    /** Absolute start time from a wire element (fields keep period-local time). */
+    function playerElementStart(element, fieldFallback, fallback) {
+      if (element && Number.isFinite(element.start)) return element.start;
+      return playerNumber(fieldFallback, fallback);
+    }
+    function playerElementDuration(element, fieldFallback, fallback) {
+      if (element && Number.isFinite(element.duration)) return element.duration;
+      return playerNumber(fieldFallback, fallback);
+    }
+    function playerArrayItems(value) {
+      if (isTypedValue(value) && value.t === 'arr' && Array.isArray(value.items)) return value.items;
+      if (Array.isArray(value)) return value;
+      return [];
+    }
+
+    function normalizePlaybackLane(element, type) {
+      const fields = element.fields || {};
+      const kind = type === 'DremuGuideLane' ? 'guide' : 'main';
+      const defaults = kind === 'guide' ? PLAYER_GUIDE_LANE_DEFAULTS : PLAYER_MAIN_LANE_DEFAULTS;
+      const start = playerElementStart(element, fields.generateTime, defaults.generateTime);
+      const keepRaw = playerElementDuration(element, fields.keepTime, defaults.keepTime);
+      const delta = playerNumber(fields.evaluateDelta, defaults.evaluateDelta);
+      const lane = {
+        id: element.id,
+        type: element.type,
+        kind,
+        name: playerString(fields.name, defaults.name),
+        start,
+        keep: Math.max(0.0001, Number.isFinite(keepRaw) ? keepRaw : defaults.keepTime),
+        laneLines: playerArrayItems(fields.laneLines),
+        animation: fields.animation === undefined ? defaults.animation : fields.animation,
+        drawStartX: fields.drawStartX === undefined ? defaults.drawStartX : fields.drawStartX,
+        drawEndX: fields.drawEndX === undefined ? defaults.drawEndX : fields.drawEndX,
+        pointCount: playerPointCount(fields.pointCount, defaults.pointCount),
+        evaluateDelta: delta > 0 && Number.isFinite(delta) ? delta : 0.01,
+        color: fields.color === undefined ? null : fields.color,
+        positionZ: playerNumber(fields.positionZ, defaults.positionZ),
+        mainLaneName: playerString(fields.mainLaneName, kind === 'guide' ? defaults.mainLaneName : ''),
+        position: fields.position === undefined ? (defaults.position || playerValueFloat(0)) : fields.position,
+        targetProjectionFix: playerBool(fields.targetProjectionFix, kind === 'guide' ? defaults.targetProjectionFix : true),
+        positionX: kind === 'main' ? (fields.positionX === undefined ? defaults.positionX : fields.positionX) : null,
+        positionY: kind === 'main' ? (fields.positionY === undefined ? defaults.positionY : fields.positionY) : null,
+        rotationZ: kind === 'main' ? (fields.rotationZ === undefined ? defaults.rotationZ : fields.rotationZ) : null,
+        mainLane: null,
+        usable: kind === 'main',
+      };
+      return lane;
+    }
+
+    function normalizePlaybackNote(element, type) {
+      const fields = element.fields || {};
+      const hold = type === 'DremuHold';
+      const noteKind = hold ? 'hold' : /DremuDrag$/.test(type) ? 'drag' : /DremuTaplik$/.test(type) ? 'taplik' : 'tap';
+      const defaults = hold ? PLAYER_HOLD_DEFAULTS : PLAYER_NOTE_DEFAULTS;
+      const start = playerElementStart(element, fields.hitTime, defaults.hitTime);
+      const holdTime = hold ? Math.max(0.0001, playerElementDuration(element, fields.holdTime, defaults.holdTime)) : 0;
+      const holdLength = playerNumber(fields.holdLength, PLAYER_HOLD_DEFAULTS.holdLength);
+      return {
+        id: element.id,
+        type: element.type,
+        kind: noteKind,
+        laneName: playerString(fields.laneName, defaults.laneName),
+        start,
+        holdTime,
+        leadTime: Math.max(0, playerNumber(fields.leadTime, defaults.leadTime)),
+        lagTime: Math.max(0, playerNumber(fields.lagTime, defaults.lagTime)),
+        position: fields.position === undefined ? defaults.position : fields.position,
+        distance: fields.distance === undefined ? defaults.distance : fields.distance,
+        color: fields.color === undefined ? null : fields.color,
+        positionZ: playerNumber(fields.positionZ, defaults.positionZ),
+        endDistance: fields.endDistance === undefined ? PLAYER_HOLD_DEFAULTS.endDistance : fields.endDistance,
+        holdLine: fields.holdLine === undefined ? PLAYER_HOLD_DEFAULTS.holdLine : fields.holdLine,
+        truncation: playerBool(fields.truncation, PLAYER_HOLD_DEFAULTS.truncation),
+        holdLength: Math.abs(holdLength) > 1e-6 ? holdLength : 1,
+        pointCount: playerPointCount(fields.pointCount, PLAYER_HOLD_DEFAULTS.pointCount),
+        targetProjectionFix: playerBool(fields.targetProjectionFix, PLAYER_HOLD_DEFAULTS.targetProjectionFix),
+        hintReference: playerBool(fields.hintReference, false),
+        respondHintColor1: fields.respondHintColor1 === undefined ? null : fields.respondHintColor1,
+        respondHintColor2: fields.respondHintColor2 === undefined ? null : fields.respondHintColor2,
+        lane: null,
+      };
+    }
+
+    /** `assetName : "image:Background1"` -> installed project file path. */
+    function resolvePlaybackImageFiles(project) {
+      const map = new Map();
+      const files = project && project.assets && Array.isArray(project.assets.images) ? project.assets.images : [];
+      const dir = project && typeof project.dir === 'string' ? project.dir.replace(/[/\\]+$/, '') : '';
+      for (const raw of files) {
+        const name = String(raw);
+        const dot = name.lastIndexOf('.');
+        const stem = dot > 0 ? name.slice(0, dot) : name;
+        const absolute = dir ? dir + '/' + name : name;
+        map.set(stem.toLowerCase(), absolute);
+        map.set(name.toLowerCase(), absolute);
+      }
+      return map;
+    }
+    function resolvePlaybackImagePath(filesMap, assetName) {
+      let name = String(assetName || '');
+      if (!name) return null;
+      const colon = name.indexOf(':');
+      if (colon !== -1) name = name.slice(colon + 1);
+      const key = name.toLowerCase();
+      if (filesMap.has(key)) return filesMap.get(key);
+      for (const ext of ['.png', '.jpg', '.jpeg', '.webp', '.gif']) {
+        if (filesMap.has(key + ext)) return filesMap.get(key + ext);
+      }
+      return null;
+    }
+
+    function normalizePlaybackImage(element, filesMap) {
+      const fields = element.fields || {};
+      const defaults = PLAYER_STORYBOARD_DEFAULTS;
+      const start = playerElementStart(element, fields.startMoment, defaults.startMoment);
+      const keep = Math.max(0.0001, playerElementDuration(element, fields.keepTime, defaults.keepTime));
+      const assetName = playerString(fields.assetName, defaults.assetName);
+      return {
+        id: element.id,
+        assetName,
+        file: resolvePlaybackImagePath(filesMap, assetName),
+        start,
+        keep,
+        mode: playerEnumName(fields.positionMode, defaults.positionMode),
+        positionX: fields.positionX === undefined ? defaults.positionX : fields.positionX,
+        positionY: fields.positionY === undefined ? defaults.positionY : fields.positionY,
+        rotationZ: fields.rotationZ === undefined ? defaults.rotationZ : fields.rotationZ,
+        scaleX: fields.scaleX === undefined ? defaults.scaleX : fields.scaleX,
+        scaleY: fields.scaleY === undefined ? defaults.scaleY : fields.scaleY,
+        positionZ: fields.positionZ === undefined ? defaults.positionZ : fields.positionZ,
+        alpha: fields.alpha === undefined ? defaults.alpha : fields.alpha,
+        useChartTime: playerBool(fields.useChartTime, defaults.useChartTime),
+      };
+    }
+
+    // ---- Lane binding ----------------------------------------------------
+    const PLAYBACK_EPSILON = 1e-6;
+    function playbackLaneAlive(lane, at) {
+      return at >= lane.start - PLAYBACK_EPSILON && at <= lane.start + lane.keep + PLAYBACK_EPSILON;
+    }
+    /**
+     * Unity resolves lanes by name at the element's spawn time
+     * (Environment.FindAliveLane: main lanes first, then guide lanes). When
+     * several instances are alive we pick the most recently generated one;
+     * charts normally keep names unique over time.
+     */
+    function findPlaybackLane(list, at, wantKind) {
+      if (!Array.isArray(list) || list.length === 0) return null;
+      let best = null;
+      for (const lane of list) {
+        if (wantKind && lane.kind !== wantKind) continue;
+        if (!lane.usable) continue;
+        if (!playbackLaneAlive(lane, at)) continue;
+        if (!best || lane.start > best.start) best = lane;
+      }
+      return best;
+    }
+
+    /**
+     * Build the immutable playback model from the wire project.
+     * Every timing decision uses `element.start`/`element.duration` (absolute);
+     * the raw fields only provide curve data and non-time values.
+     */
+    function buildPlaybackModel(project) {
+      const stats = { mainLanes: 0, guideLanes: 0, notes: 0, boundNotes: 0, unresolvedNotes: 0, images: 0, skipped: 0 };
+      const lanes = [];
+      const notes = [];
+      const images = [];
+      const byName = new Map();
+      if (!project || !Array.isArray(project.staffs)) return { lanes, notes, images, byName, stats };
+      const imageFiles = resolvePlaybackImageFiles(project);
+      for (const staff of project.staffs) {
+        if (!staff || staff.kind === 'audio') continue;
+        const form = typeof staff.form === 'string' ? staff.form : '';
+        const periods = Array.isArray(staff.periods) ? staff.periods : [];
+        for (const period of periods) {
+          const elements = period && Array.isArray(period.elements) ? period.elements : [];
+          for (const element of elements) {
+            if (!element || typeof element.type !== 'string') { stats.skipped += 1; continue; }
+            const type = shortType(element.type);
+            if (type === 'DremuMainLane' || type === 'DremuGuideLane') {
+              const lane = normalizePlaybackLane(element, type);
+              lanes.push(lane);
+              if (lane.kind === 'main') stats.mainLanes += 1;
+              else stats.guideLanes += 1;
+              if (lane.name) {
+                if (!byName.has(lane.name)) byName.set(lane.name, []);
+                byName.get(lane.name).push(lane);
+              }
+            } else if (type === 'DremuTap' || type === 'DremuDrag' || type === 'DremuTaplik' || type === 'DremuHold') {
+              notes.push(normalizePlaybackNote(element, type));
+              stats.notes += 1;
+            } else if (type === 'Image' && (form === 'DeentyStoryboard' || element.type === 'DeentyStoryboard.Image')) {
+              images.push(normalizePlaybackImage(element, imageFiles));
+              stats.images += 1;
+            } else {
+              stats.skipped += 1;
+            }
+          }
+        }
+      }
+      for (const lane of lanes) {
+        if (lane.kind !== 'guide') continue;
+        lane.mainLane = lane.mainLaneName ? findPlaybackLane(byName.get(lane.mainLaneName), lane.start, 'main') : null;
+        lane.usable = !!lane.mainLane;
+      }
+      for (const note of notes) {
+        const spawn = note.start - note.leadTime;
+        const lane = findPlaybackLane(byName.get(note.laneName), spawn, 'main') || findPlaybackLane(byName.get(note.laneName), spawn, null);
+        if (lane) {
+          note.lane = lane;
+          stats.boundNotes += 1;
+        } else {
+          stats.unresolvedNotes += 1;
+        }
+      }
+      return { lanes, notes, images, byName, stats };
+    }
+
+    // ---- Frame geometry (all coordinates are 16:10 content space) -------
+    const PLAYBACK_RAD = Math.PI / 180;
+    // DremuRespondHint / DremuRespondHintHeartTransformer constants.
+    const PLAYER_RESPONSE = { keepTime: 0.8, size: 2.5, expandSpeed: 5, alphaChangeSpeed: 0.2 };
+    const PLAYER_RESPONSE_CURVE = {
+      t: 'obj',
+      type: 'GorgeFramework.CubicHermiteSpline',
+      fields: {
+        startPoint: { t: 'obj', type: 'GorgeFramework.Vector2', fields: { x: 0, y: 0 } },
+        startTangent: 0,
+        startWeight: 0,
+        endPoint: { t: 'obj', type: 'GorgeFramework.Vector2', fields: { x: 1, y: 1 } },
+        endTangent: 0.1,
+        endWeight: 0.8,
+      },
+    };
+    function playbackHash(value) {
+      const textValue = String(value);
+      let hash = 2166136261;
+      for (let index = 0; index < textValue.length; index += 1) {
+        hash ^= textValue.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return hash >>> 0;
+    }
+    function playbackRandom(seed) {
+      let state = seed >>> 0;
+      return function random() {
+        state = (state + 0x6d2b79f5) >>> 0;
+        let value = state;
+        value = Math.imul(value ^ (value >>> 15), value | 1);
+        value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+        return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    /** Visible windows + the autoplay visual rule (no chart signals involved). */
+    function playbackNoteHeadVisible(note, time) {
+      const spawn = note.start - note.leadTime;
+      if (time < spawn - PLAYBACK_EPSILON) return false;
+      if (PLAYER.hideHeadAtHit) return time <= note.start + PLAYBACK_EPSILON;
+      return time <= note.start + (note.kind === 'hold' ? note.holdTime : 0) + note.lagTime;
+    }
+    function playbackHoldBodyVisible(note, time) {
+      if (note.kind !== 'hold') return false;
+      if (time < note.start - note.leadTime - PLAYBACK_EPSILON) return false;
+      return time < note.start + note.holdTime;
+    }
+
+    /**
+     * Collect one rendered frame at chart time `time`.
+     * Returns pure data (no canvas, no signals): lane polylines, hold ribbons,
+     * note sprites and storyboard image rects, all in 16:10 content space.
+     * `options.aspect` defaults to 16:10; `options.imageSize(entry)` must return
+     * the natural pixel size `{ w, h }` of a storyboard image (else it is
+     * skipped until its texture has loaded).
+     */
+    function collectFrame(model, time, options) {
+      const opts = options || {};
+      const aspect = Number.isFinite(opts.aspect) && opts.aspect > 0 ? opts.aspect : PLAYER.aspect;
+      const imageSize = typeof opts.imageSize === 'function' ? opts.imageSize : null;
+      const t = Number.isFinite(time) ? time : 0;
+      const frame = { images: [], lanes: [], holds: [], notes: [], effects: [] };
+      if (!model) return frame;
+      const curveStates = new Map();
+      const poses = new Map();
+      function laneProgressAt(lane, at) {
+        if (at === t) {
+          let state = curveStates.get(lane);
+          if (!state) {
+            state = { progress: evalAdd(lane.animation, at - lane.start) };
+            curveStates.set(lane, state);
+          }
+          return state.progress;
+        }
+        return evalAdd(lane.animation, at - lane.start);
+      }
+      function laneLineValueAt(lane, x, at) {
+        const lines = lane.laneLines;
+        const count = lines.length;
+        if (count === 0) return 0;
+        const progress = laneProgressAt(lane, at);
+        const first = clamp(Math.floor(progress), 0, count - 1);
+        const second = clamp(Math.ceil(progress), 0, count - 1);
+        const y1 = playerCurveValue(lines[first], x);
+        if (first === second) return y1;
+        const y2 = playerCurveValue(lines[second], x);
+        return y1 + (y2 - y1) * (progress - first);
+      }
+      function laneNormalAtTime(lane, x, at) {
+        const delta = lane.evaluateDelta > 0 ? lane.evaluateDelta : 0.01;
+        const y0 = laneLineValueAt(lane, x - delta, at);
+        const y1 = laneLineValueAt(lane, x + delta, at);
+        const tx = 2 * delta;
+        const ty = y1 - y0;
+        const length = Math.sqrt(tx * tx + ty * ty) || 1;
+        const nx = -ty / length;
+        const ny = tx / length;
+        return { x: nx, y: ny, angle: Math.atan2(ny, nx) / PLAYBACK_RAD };
+      }
+      function mainPointAt(lane, x, distance, at) {
+        const y = laneLineValueAt(lane, x, at);
+        const normal = laneNormalAtTime(lane, x, at);
+        return { x: x + normal.x * distance, y: y + normal.y * distance };
+      }
+      function guidePointAt(guide, x, distance, at) {
+        const main = guide.mainLane;
+        if (!main) return { x: 0, y: 0 };
+        const offset = evalAdd(guide.position, at - guide.start);
+        const shape = laneLineValueAt(guide, distance, at);
+        return mainPointAt(main, x + offset + shape, distance, at);
+      }
+      function frameLaneOf(lane) {
+        return lane.kind === 'guide' ? lane.mainLane : lane;
+      }
+      function poseAtTime(lane, at) {
+        const target = frameLaneOf(lane);
+        if (!target) return { x: 0, y: 0, rot: 0, cos: 1, sin: 0 };
+        if (at === t) {
+          const cachedPose = poses.get(target);
+          if (cachedPose) return cachedPose;
+        }
+        const age = at - target.start;
+        const rot = evalAdd(target.rotationZ, age);
+        const pose = {
+          x: evalAdd(target.positionX, age),
+          y: evalAdd(target.positionY, age),
+          rot,
+          cos: Math.cos(rot * PLAYBACK_RAD),
+          sin: Math.sin(rot * PLAYBACK_RAD),
+        };
+        if (at === t) poses.set(target, pose);
+        return pose;
+      }
+      function applyPose(pose, point) {
+        return {
+          x: pose.x + point.x * pose.cos - point.y * pose.sin,
+          y: pose.y + point.x * pose.sin + point.y * pose.cos,
+        };
+      }
+      function lanePointAt(lane, x, distance, at) {
+        return lane.kind === 'guide' ? guidePointAt(lane, x, distance, at) : mainPointAt(lane, x, distance, at);
+      }
+      function laneLineValue(lane, x) { return laneLineValueAt(lane, x, t); }
+      function laneNormalAt(lane, x) { return laneNormalAtTime(lane, x, t); }
+      function mainPoint(lane, x, distance) { return mainPointAt(lane, x, distance, t); }
+      function guidePoint(guide, x, distance) { return guidePointAt(guide, x, distance, t); }
+      function poseAt(lane) { return poseAtTime(lane, t); }
+      function lanePoint(lane, x, distance) { return lanePointAt(lane, x, distance, t); }
+      // Hit-response spawn state is fixed at the note's hit time and cached on
+      // the note: local spawn point + colour pair + the 16 heart particles.
+      function noteEffectData(note) {
+        if (note.effect) return note.effect;
+        const lane = note.lane;
+        let local = { x: 0, y: 0 };
+        if (lane && lane.usable) {
+          if (note.kind === 'hold') {
+            const mainX = evalAdd(note.position, 0);
+            let fix = 1;
+            const normalLane = lane.kind === 'guide' ? lane.mainLane : lane;
+            if (note.targetProjectionFix && normalLane) {
+              fix = Math.sin(laneNormalAtTime(normalLane, mainX, note.start).angle * PLAYBACK_RAD);
+            }
+            local = lanePointAt(lane, mainX + evalAdd(note.holdLine, 0) * fix, 0, note.start);
+          } else {
+            local = lanePointAt(lane, evalAdd(note.position, 0), evalAdd(note.distance, 0), note.start);
+          }
+        }
+        const random = playbackRandom(playbackHash(note.id));
+        const hearts = [];
+        for (let index = 0; index < 16; index += 1) {
+          const angle = random() * Math.PI * 2;
+          hearts.push({
+            dx: Math.cos(angle),
+            dy: Math.sin(angle),
+            distance: 1.2 + random() * 1.3,
+            finalSize: random() * 0.2,
+            keepTime: 0.3 + random() * 0.5,
+          });
+        }
+        note.effect = {
+          local,
+          color1: playerColorFromValue(note.respondHintColor1),
+          color2: playerColorFromValue(note.respondHintColor2),
+          hearts,
+          fixedWorld: !note.hintReference,
+        };
+        return note.effect;
+      }
+      function noteWorld(note, lane) {
+        const elapsed = t - note.start;
+        const lateral = evalAdd(note.position, elapsed);
+        const distance = evalAdd(note.distance, elapsed);
+        const pose = poseAt(lane);
+        let local;
+        let localRot;
+        if (lane.kind === 'guide') {
+          local = guidePoint(lane, lateral, distance);
+          const delta = lane.evaluateDelta > 0 ? lane.evaluateDelta : 0.01;
+          const p1 = guidePoint(lane, 0, distance - delta);
+          const p2 = guidePoint(lane, 0, distance + delta);
+          localRot = Math.atan2(p2.y - p1.y, p2.x - p1.x) / PLAYBACK_RAD - 90;
+        } else {
+          local = mainPoint(lane, lateral, distance);
+          localRot = laneNormalAt(lane, lateral).angle - 90;
+        }
+        const world = applyPose(pose, local);
+        if (!Number.isFinite(world.x) || !Number.isFinite(world.y)) return null;
+        return { x: world.x, y: world.y, rot: pose.rot + localRot };
+      }
+      function holdPolyline(note, lane) {
+        const elapsed = t - note.start;
+        const waiting = elapsed < 0;
+        const startDistance = waiting ? evalAdd(note.distance, elapsed) : 0;
+        const endDistance = evalAdd(note.endDistance, elapsed - note.holdTime);
+        const count = note.pointCount;
+        const stepDistance = (endDistance - startDistance) / (count - 1);
+        const startTime = waiting ? 0 : Math.max(0, elapsed);
+        const stepTime = note.truncation
+          ? (((endDistance - startDistance) / note.holdLength) * note.holdTime) / (count - 1)
+          : (note.holdTime - startTime) / (count - 1);
+        const mainX = evalAdd(note.position, elapsed);
+        const pose = poseAt(lane);
+        const normalLane = lane.kind === 'guide' ? lane.mainLane : lane;
+        let fix = 1;
+        if (note.targetProjectionFix && normalLane) {
+          fix = Math.sin(laneNormalAt(normalLane, mainX).angle * PLAYBACK_RAD);
+        }
+        const points = [];
+        for (let index = 0; index < count; index += 1) {
+          const x = mainX + evalAdd(note.holdLine, startTime + index * stepTime) * fix;
+          const distance = startDistance + index * stepDistance;
+          const local = lanePoint(lane, x, distance);
+          const world = applyPose(pose, local);
+          if (Number.isFinite(world.x) && Number.isFinite(world.y)) points.push([world.x, world.y]);
+        }
+        return points;
+      }
+      function storyboardRect(image) {
+        if (!image.file) return null;
+        const size = imageSize(image);
+        if (!size || !(size.w > 0) || !(size.h > 0)) return null;
+        const elapsed = t - image.start;
+        const progress = image.useChartTime ? elapsed : image.keep > 0 ? elapsed / image.keep : 0;
+        const alpha = clamp(evalDoubleLerp(image.alpha, progress, 0, 1), 0, 1);
+        const rot = evalAdd(image.rotationZ, progress);
+        const z = evalDoubleLerp(image.positionZ, progress, 0, 1);
+        const imageAspect = size.w / size.h;
+        let x = 0;
+        let y = 0;
+        let w = 0;
+        let h = 0;
+        if (image.mode === 'GamePlayPanel') {
+          x = evalAdd(image.positionX, progress);
+          y = evalAdd(image.positionY, progress);
+          w = evalAdd(image.scaleX, progress);
+          h = evalAdd(image.scaleY, progress);
+        } else {
+          const baseW = PLAYER.cameraHeight * aspect;
+          const baseH = PLAYER.cameraHeight;
+          x = (evalAdd(image.positionX, progress) * baseW) / 2;
+          y = (evalAdd(image.positionY, progress) * baseH) / 2;
+          const scaleX = evalAdd(image.scaleX, progress);
+          const scaleY = evalAdd(image.scaleY, progress);
+          if (image.mode === 'ScreenXY') {
+            w = scaleX * baseW;
+            h = scaleY * baseH;
+          } else if (image.mode === 'ScreenX') {
+            w = scaleX * baseW;
+            h = w / imageAspect;
+          } else if (image.mode === 'ScreenY') {
+            h = scaleY * baseH;
+            w = h * imageAspect;
+          } else if (image.mode === 'ScreenContain' || image.mode === 'ScreenCover') {
+            const baseWider = baseW * size.h > baseH * size.w;
+            if (image.mode === 'ScreenContain') {
+              if (baseWider) {
+                h = baseH;
+                w = h * imageAspect;
+              } else {
+                w = baseW;
+                h = w / imageAspect;
+              }
+            } else if (baseWider) {
+              w = baseW;
+              h = w / imageAspect;
+            } else {
+              h = baseH;
+              w = h * imageAspect;
+            }
+          } else {
+            w = scaleX * baseW;
+            h = scaleY * baseH;
+          }
+        }
+        if (!(w > 0) || !(h > 0)) return null;
+        return { assetName: image.assetName, file: image.file, x, y, w, h, rot, alpha, z };
+      }
+
+      // ---- Lanes ---------------------------------------------------------
+      for (const lane of model.lanes) {
+        if (!lane.usable) continue;
+        if (!playbackLaneAlive(lane, t)) continue;
+        const age = t - lane.start;
+        const pose = poseAt(lane);
+        const startX = evalAdd(lane.drawStartX, age);
+        const endX = evalAdd(lane.drawEndX, age);
+        const count = lane.pointCount;
+        if (!Number.isFinite(startX) || !Number.isFinite(endX) || count < 2) continue;
+        const step = (endX - startX) / (count - 1);
+        let fix = 1;
+        let guideNode = null;
+        if (lane.kind === 'guide' && lane.mainLane) {
+          const offset = evalAdd(lane.position, age);
+          if (lane.targetProjectionFix) {
+            fix = Math.sin(laneNormalAt(lane.mainLane, offset).angle * PLAYBACK_RAD);
+          }
+          // The guide line is drawn in the guide node's local space: that node
+          // sits on the main lane at x = position(t) and is rotated by the main
+          // lane normal, so its polyline is a perpendicular stroke through that
+          // point (DremuGuideLaneLineTransformer + DremuGuideLanePositionTransformer).
+          const guideRotation = (laneNormalAt(lane.mainLane, offset).angle - 90) * PLAYBACK_RAD;
+          guideNode = {
+            x: offset,
+            y: laneLineValue(lane.mainLane, offset),
+            cos: Math.cos(guideRotation),
+            sin: Math.sin(guideRotation),
+          };
+        }
+        const points = [];
+        for (let index = 0; index < count; index += 1) {
+          const x = startX + step * index;
+          let local = lane.kind === 'guide'
+            ? mainPoint(lane.mainLane, laneLineValue(lane, x) * fix, x)
+            : mainPoint(lane, x, 0);
+          if (guideNode) {
+            local = {
+              x: guideNode.x + local.x * guideNode.cos - local.y * guideNode.sin,
+              y: guideNode.y + local.x * guideNode.sin + local.y * guideNode.cos,
+            };
+          }
+          const world = applyPose(pose, local);
+          if (Number.isFinite(world.x) && Number.isFinite(world.y)) points.push([world.x, world.y]);
+        }
+        if (points.length < 2) continue;
+        frame.lanes.push({ id: lane.id, kind: lane.kind, name: lane.name, points, color: colorCurveAt(lane.color, age), z: lane.positionZ });
+      }
+
+      // ---- Notes + hold bodies ------------------------------------------
+      for (const note of model.notes) {
+        const lane = note.lane;
+        if (!lane || !lane.usable) continue;
+        const elapsed = t - note.start;
+        const color = colorCurveAt(note.color, elapsed);
+        if (playbackNoteHeadVisible(note, t)) {
+          const world = noteWorld(note, lane);
+          if (world) frame.notes.push({ id: note.id, type: note.kind, laneId: lane.id, x: world.x, y: world.y, rot: world.rot, color, z: note.positionZ });
+        }
+        if (playbackHoldBodyVisible(note, t)) {
+          const points = holdPolyline(note, lane);
+          if (points.length >= 2) frame.holds.push({ id: note.id, points, color, z: note.positionZ });
+        }
+      }
+
+      // ---- Hit response (DremuRespondHint + 16 heart particles) ---------
+      // Autoplay responds at hitTime, so the whole effect is a pure function
+      // of `t - hitTime`; nothing here depends on input signals.
+      for (const note of model.notes) {
+        const lane = note.lane;
+        if (!lane || !lane.usable) continue;
+        const age = t - note.start;
+        if (age < -PLAYBACK_EPSILON || age >= PLAYER_RESPONSE.keepTime) continue;
+        const effect = noteEffectData(note);
+        const pose = effect.fixedWorld ? poseAtTime(lane, note.start) : poseAtTime(lane, t);
+        const ringWorld = applyPose(pose, effect.local);
+        if (!Number.isFinite(ringWorld.x) || !Number.isFinite(ringWorld.y)) continue;
+        const curveTime = age / PLAYER_RESPONSE.keepTime;
+        const process = sampleCurve(PLAYER_RESPONSE_CURVE, curveTime);
+        const size = Math.atan(process * PLAYER_RESPONSE.keepTime * PLAYER_RESPONSE.expandSpeed) * 2 * PLAYER_RESPONSE.size / Math.PI;
+        const alpha = Math.atan(((1 - process) * PLAYER_RESPONSE.keepTime) / PLAYER_RESPONSE.alphaChangeSpeed) * 2 / Math.PI;
+        frame.effects.push({ id: note.id, kind: 'ring', x: ringWorld.x, y: ringWorld.y, size, alpha, rot: 45, color: effect.color1, z: -1.5 });
+        for (const heart of effect.hearts) {
+          const heartTime = age / heart.keepTime;
+          if (!(heartTime < 1)) continue;
+          const progress = sampleCurve(PLAYER_RESPONSE_CURVE, heartTime);
+          const local = {
+            x: effect.local.x + heart.dx * heart.distance * progress,
+            y: effect.local.y + heart.dy * heart.distance * progress,
+          };
+          const world = applyPose(pose, local);
+          const width = 0.3 + (heart.finalSize - 0.3) * heartTime;
+          const height = 0.225 + (heart.finalSize * 0.75 - 0.225) * heartTime;
+          if (!(width > 0) || !(height > 0)) continue;
+          frame.effects.push({
+            id: note.id,
+            kind: 'heart',
+            x: world.x,
+            y: world.y,
+            w: width,
+            h: height,
+            color: heartTime > 0.93 ? effect.color2 : effect.color1,
+            z: -1,
+          });
+        }
+      }
+
+      // ---- Storyboard images --------------------------------------------
+      if (imageSize) {
+        for (const image of model.images) {
+          if (t < image.start - PLAYBACK_EPSILON || t > image.start + image.keep + PLAYBACK_EPSILON) continue;
+          const rect = storyboardRect(image);
+          if (rect) frame.images.push(rect);
+        }
+      }
+      return frame;
+    }
+
+    // ---- Canvas painter ---------------------------------------------------
+    /**
+     * Map 16:10 content coordinates onto the canvas. The canvas is treated as
+     * the Unity camera view: 10 world units tall, width = 10 * aspect. The
+     * Dremu content box is 16:10 and is contained inside that view with
+     * s = aspect >= 1.6 ? 1 : aspect / 1.6 (SelfAdaptiveStandardBase).
+     */
+    function playerViewport(width, height) {
+      const safeWidth = Math.max(1, width || 1);
+      const safeHeight = Math.max(1, height || 1);
+      const aspect = safeWidth / safeHeight;
+      const contentScale = aspect >= PLAYER.aspect ? 1 : aspect / PLAYER.aspect;
+      const pixelsPerUnit = safeHeight / PLAYER.cameraHeight;
+      const scale = contentScale * pixelsPerUnit;
+      return {
+        width: safeWidth,
+        height: safeHeight,
+        aspect,
+        contentScale,
+        pixelsPerUnit,
+        unit: scale,
+        toX: (x) => safeWidth / 2 + x * scale,
+        toY: (y) => safeHeight / 2 - y * scale,
+      };
+    }
+
+    /** Tinted note sprite cache; null while the embedded texture is loading. */
+    const PLAYER_TINT_CACHE = new Map();
+    const PLAYER_IMAGE_TINT_CACHE = new Map();
+    function playerTintedSprite(kind, color) {
+      // DremuHold reuses the Tap texture for its head (DremuHold.g), so the
+      // 'hold' frame entry must not fall through to the solid fallback.
+      const spriteKind = kind === 'hold' ? 'tap' : kind;
+      const state = PLAYER_SPRITE_STATE[spriteKind];
+      if (!state || !state.ready || !state.image) return null;
+      if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
+      const red = Math.round(clamp(color.r, 0, 1) * 255);
+      const green = Math.round(clamp(color.g, 0, 1) * 255);
+      const blue = Math.round(clamp(color.b, 0, 1) * 255);
+      const key = kind + ':' + red + ':' + green + ':' + blue;
+      const cached = PLAYER_TINT_CACHE.get(key);
+      if (cached) return cached;
+      const canvas = document.createElement('canvas');
+      canvas.width = 200;
+      canvas.height = 40;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.clearRect(0, 0, 200, 40);
+      ctx.drawImage(state.image, 0, 0, 200, 40);
+      ctx.globalCompositeOperation = 'source-in';
+      ctx.fillStyle = 'rgb(' + red + ',' + green + ',' + blue + ')';
+      ctx.fillRect(0, 0, 200, 40);
+      ctx.globalCompositeOperation = 'source-over';
+      if (PLAYER_TINT_CACHE.size > 256) PLAYER_TINT_CACHE.clear();
+      PLAYER_TINT_CACHE.set(key, canvas);
+      return canvas;
+    }
+
+    /** Tint an arbitrary effect texture (same vertex-colour semantics). */
+    function playerTintImage(image, color, key) {
+      if (!image) return null;
+      const red = Math.round(clamp(color.r, 0, 1) * 255);
+      const green = Math.round(clamp(color.g, 0, 1) * 255);
+      const blue = Math.round(clamp(color.b, 0, 1) * 255);
+      const cacheKey = key + ':' + red + ':' + green + ':' + blue;
+      const cached = PLAYER_IMAGE_TINT_CACHE.get(cacheKey);
+      if (cached) return cached;
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(image, 0, 0);
+      ctx.globalCompositeOperation = 'source-in';
+      ctx.fillStyle = 'rgb(' + red + ',' + green + ',' + blue + ')';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.globalCompositeOperation = 'source-over';
+      if (PLAYER_IMAGE_TINT_CACHE.size > 64) PLAYER_IMAGE_TINT_CACHE.clear();
+      PLAYER_IMAGE_TINT_CACHE.set(cacheKey, canvas);
+      return canvas;
+    }
+
+    /**
+     * Gorge NineSliceSprite math, ported from the Godot adaptor's
+     * draw_gorge_nine_slice (addons/nine_slice_sprite_2d_godot2d).
+     * baseSize keeps the corners at the base scale; everything else stretches.
+     */
+    function playerDrawNineSlice(ctx, image, width, height, baseWidth, baseHeight, left, top, right, bottom) {
+      const sourceWidth = image.width;
+      const sourceHeight = image.height;
+      if (!(width > 0) || !(height > 0) || !(sourceWidth > 0) || !(sourceHeight > 0)) return;
+      const expand = (target, base, a, b) => target <= base
+        ? [target * a, target * b]
+        : [base * a, target - base * b];
+      const [targetLeft, targetRight] = expand(width, baseWidth, left / sourceWidth, right / sourceWidth);
+      const [targetTop, targetBottom] = expand(height, baseHeight, top / sourceHeight, bottom / sourceHeight);
+      const sourceX = [[0, left], [left, right - left + 1], [right + 1, sourceWidth - right - 1]];
+      const sourceY = [[0, top], [top, bottom - top + 1], [bottom + 1, sourceHeight - bottom - 1]];
+      const targetX = [[0, targetLeft], [targetLeft, targetRight - targetLeft + 1], [targetRight + 1, width - targetRight - 1]];
+      const targetY = [[0, targetTop], [targetTop, targetBottom - targetTop + 1], [targetBottom + 1, height - targetBottom - 1]];
+      for (let y = 0; y < 3; y += 1) {
+        for (let x = 0; x < 3; x += 1) {
+          const sx = sourceX[x];
+          const sy = sourceY[y];
+          const dx = targetX[x];
+          const dy = targetY[y];
+          if (!(sx[1] > 0) || !(sy[1] > 0) || !(dx[1] > 0) || !(dy[1] > 0)) continue;
+          ctx.drawImage(image, sx[0], sy[0], sx[1], sy[1], dx[0], dy[0], dx[1], dy[1]);
+        }
+      }
+    }
+
+    /** DremuRespondHint: nine-sliced ring rotated 45 degrees (screen diamond). */
+    function playerDrawResponseRing(ctx, view, effect) {
+      const size = effect.size * view.unit;
+      if (!(size > 0)) return;
+      const color = effect.color || WHITE_COLOR;
+      const alpha = clamp(effect.alpha, 0, 1) * clamp(color.a, 0, 1);
+      if (alpha <= 0.002) return;
+      const state = PLAYER_EFFECT_STATE.hint;
+      if (!state || !state.ready) return;
+      const tinted = playerTintImage(state.image, color, 'hint');
+      if (!tinted) return;
+      const base = 0.2 * view.unit;
+      ctx.save();
+      ctx.translate(view.toX(effect.x), view.toY(effect.y));
+      ctx.rotate(-(effect.rot || 0) * PLAYBACK_RAD);
+      ctx.globalAlpha = alpha;
+      playerDrawNineSlice(ctx, tinted, size, size, base, base, 169, 169, 169, 169);
+      ctx.restore();
+    }
+
+    /** DremuRespondHintHeartTransformer particle. */
+    function playerDrawResponseHeart(ctx, view, effect) {
+      const state = PLAYER_EFFECT_STATE.heart;
+      if (!state || !state.ready) return;
+      const color = effect.color || WHITE_COLOR;
+      const alpha = clamp(color.a, 0, 1);
+      if (alpha <= 0.002) return;
+      const width = effect.w * view.unit;
+      const height = effect.h * view.unit;
+      if (!(width > 0) || !(height > 0)) return;
+      const tinted = playerTintImage(state.image, color, 'heart');
+      if (!tinted) return;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(tinted, view.toX(effect.x) - width / 2, view.toY(effect.y) - height / 2, width, height);
+      ctx.restore();
+    }
+
+    function playerStrokePolyline(ctx, view, points, color, lineWidth) {
+      if (!points || points.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(view.toX(points[0][0]), view.toY(points[0][1]));
+      for (let index = 1; index < points.length; index += 1) {
+        ctx.lineTo(view.toX(points[index][0]), view.toY(points[index][1]));
+      }
+      ctx.strokeStyle = playerCssColor(color);
+      ctx.lineWidth = Math.max(0.6, lineWidth);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'miter';
+      ctx.miterLimit = 4;
+      ctx.stroke();
+    }
+
+    /**
+     * Paint one frame. Draw order (far -> near) mirrors the Unity node z as
+     * closely as a flat 2D canvas can: storyboard images, hold ribbons, lane
+     * lines, note heads.
+     */
+    function paintPlaybackFrame(ctx, view, frame, images, options) {
+      const opts = options || {};
+      if (!frame) return;
+      const unit = view.unit;
+      ctx.save();
+      ctx.fillStyle = PLAYER.clearColor;
+      ctx.fillRect(0, 0, view.width, view.height);
+      const items = [];
+      const storyboard = opts.storyboard !== false;
+      for (const item of frame.images) {
+        if (!storyboard) continue;
+        const entry = images ? images.get(item.file) : null;
+        const image = entry && entry.ready ? entry.image : null;
+        if (!image) continue;
+        const width = item.w * unit;
+        const height = item.h * unit;
+        if (!(width > 0) || !(height > 0)) continue;
+        items.push({
+          z: Number.isFinite(item.z) ? item.z : 0,
+          priority: 0,
+          draw: () => {
+            ctx.save();
+            ctx.globalAlpha = clamp(item.alpha, 0, 1);
+            ctx.translate(view.toX(item.x), view.toY(item.y));
+            ctx.rotate(-item.rot * PLAYBACK_RAD);
+            ctx.drawImage(image, -width / 2, -height / 2, width, height);
+            ctx.restore();
+          },
+        });
+      }
+      const lineWidth = PLAYER.laneWidth * unit;
+      for (const lane of frame.lanes) {
+        items.push({
+          z: Number.isFinite(lane.z) ? lane.z : 0,
+          priority: 1,
+          draw: () => playerStrokePolyline(ctx, view, lane.points, lane.color, lineWidth),
+        });
+      }
+      for (const effect of frame.effects) {
+        items.push({
+          z: Number.isFinite(effect.z) ? effect.z : 0,
+          priority: effect.kind === 'heart' ? 2 : 3,
+          draw: effect.kind === 'heart'
+            ? () => playerDrawResponseHeart(ctx, view, effect)
+            : () => playerDrawResponseRing(ctx, view, effect),
+        });
+      }
+      for (const hold of frame.holds) {
+        items.push({
+          z: Number.isFinite(hold.z) ? hold.z : 0,
+          priority: 4,
+          draw: () => playerStrokePolyline(ctx, view, hold.points, hold.color, lineWidth),
+        });
+      }
+      const noteWidth = PLAYER.noteWidth * unit;
+      const noteHeight = PLAYER.noteHeight * unit;
+      for (const note of frame.notes) {
+        items.push({
+          z: Number.isFinite(note.z) ? note.z : 0,
+          priority: 5,
+          draw: () => {
+            const alpha = clamp(note.color.a, 0, 1);
+            if (alpha <= 0.002) return;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.translate(view.toX(note.x), view.toY(note.y));
+            ctx.rotate(-note.rot * PLAYBACK_RAD);
+            const sprite = playerTintedSprite(note.type, note.color);
+            if (sprite) {
+              ctx.drawImage(sprite, -noteWidth / 2, -noteHeight / 2, noteWidth, noteHeight);
+            } else {
+              ctx.fillStyle = playerCssColor(note.color, 1);
+              ctx.fillRect(-noteWidth / 2, -noteHeight / 2, noteWidth, noteHeight);
+            }
+            ctx.restore();
+          },
+        });
+      }
+      // Unity sorts by z descending (larger z = further); equal z keeps the
+      // sprite order: images, lanes, hearts, ring, hold ribbons, note heads.
+      items.sort((a, b) => (b.z - a.z) || (a.priority - b.priority));
+      for (const item of items) item.draw();
+      ctx.restore();
+    }
+    // ---- Asset loading ----------------------------------------------------
+    /**
+     * Load the embedded note textures and the storyboard images referenced by
+     * the model. `version` bumps whenever a texture finishes loading so the
+     * canvas repaints (images are skipped until their size is known).
+     */
+    function usePlaybackAssets(model) {
+      const [version, setVersion] = useState(0);
+      const imagesRef = useRef(null);
+      if (imagesRef.current === null) imagesRef.current = new Map();
+      const bump = useCallback(() => setVersion((value) => value + 1), []);
+      useEffect(() => {
+        ensurePlayerSprites(bump);
+        ensurePlayerEffects(bump);
+        const images = imagesRef.current;
+        let changed = false;
+        const list = model && Array.isArray(model.images) ? model.images : [];
+        for (const image of list) {
+          if (!image || !image.file || images.has(image.file)) continue;
+          const entry = { image: null, ready: false };
+          images.set(image.file, entry);
+          changed = true;
+          if (typeof window === 'undefined' || typeof window.Image !== 'function') continue;
+          const element = new window.Image();
+          entry.image = element;
+          element.onload = () => {
+            entry.ready = true;
+            bump();
+          };
+          element.onerror = () => {
+            entry.ready = false;
+          };
+          element.src = assetUrl(image.file);
+        }
+        if (changed) setVersion((value) => value + 1);
+      }, [model, bump]);
+      return { images: imagesRef.current, version };
+    }
+
+    // ---- Playback overlay component ---------------------------------------
+    /**
+     * Embedded playback layer over the timeline pane: canvas + minimal
+     * transport (play/pause, restart, seek, rate, mute, background toggle).
+     * Rendering is driven by the shared transport clock; there is no signal
+     * simulation here, only the pure-playback frame collector.
+     */
+    function PlaybackLayer(props) {
+      const { project, model, transport, tr, onClose } = props;
+      const wrapRef = useRef(null);
+      const canvasRef = useRef(null);
+      const [size, setSize] = useState({ w: 0, h: 0 });
+      const [showStoryboard, setShowStoryboard] = useState(true);
+      const sizeRef = useRef(size);
+      const modelRef = useRef(model);
+      const transportRef = useRef(transport);
+      const storyboardRef = useRef(showStoryboard);
+      sizeRef.current = size;
+      modelRef.current = model;
+      transportRef.current = transport;
+      storyboardRef.current = showStoryboard;
+      const assets = usePlaybackAssets(model);
+      const assetsRef = useRef(assets);
+      assetsRef.current = assets;
+
+      // ---- Autoplay hit sound (RespondA -> RespondEffect.wav) ------------
+      const hitPoolRef = useRef(null);
+      const lastHitTimeRef = useRef(null);
+      useEffect(() => {
+        if (hitPoolRef.current) return undefined;
+        if (typeof Audio !== 'function') return undefined;
+        const pool = [];
+        for (let index = 0; index < 12; index += 1) {
+          const audio = new Audio(PLAYER_RESPONSE_SOUND);
+          audio.preload = 'auto';
+          audio.volume = 0.45;
+          pool.push(audio);
+        }
+        hitPoolRef.current = pool;
+        return () => {
+          for (const audio of pool) {
+            try { audio.pause(); } catch (error) { /* ignore */ }
+          }
+          hitPoolRef.current = null;
+        };
+      }, []);
+      useEffect(() => {
+        const now = transport.time;
+        const previous = lastHitTimeRef.current;
+        lastHitTimeRef.current = now;
+        if (!model || !transport.playing || transport.muted || previous === null) return;
+        const delta = now - previous;
+        // Ignore scrubbing: a hit sound only accompanies continuous playback.
+        if (!(delta > 0) || delta > 0.35) return;
+        const pool = hitPoolRef.current;
+        if (!pool || pool.length === 0) return;
+        let plays = 0;
+        for (const note of model.notes) {
+          if (!(note.start > previous - PLAYBACK_EPSILON && note.start <= now + PLAYBACK_EPSILON)) continue;
+          if (!note.lane || !note.lane.usable) continue;
+          const audio = pool.find((item) => item.paused || item.ended);
+          if (!audio) break;
+          try {
+            audio.currentTime = 0;
+            const promise = audio.play();
+            if (promise && typeof promise.catch === 'function') promise.catch(() => undefined);
+          } catch (error) { /* ignore */ }
+          plays += 1;
+          if (plays >= 4) break;
+        }
+      }, [transport.time, transport.playing, transport.muted, model]);
+
+      // Track the stage size (ResizeObserver, falling back to window resize).
+      useEffect(() => {
+        const measure = () => {
+          const node = wrapRef.current;
+          if (!node) return;
+          let rect = null;
+          try {
+            rect = node.getBoundingClientRect();
+          } catch (error) {
+            rect = null;
+          }
+          const width = Math.round((rect && rect.width) || node.clientWidth || 0);
+          const height = Math.round((rect && rect.height) || node.clientHeight || 0);
+          setSize((previous) => (previous.w === width && previous.h === height ? previous : { w: width, h: height }));
+        };
+        measure();
+        const node = wrapRef.current;
+        if (node && typeof ResizeObserver === 'function') {
+          const observer = new ResizeObserver(measure);
+          observer.observe(node);
+          return () => observer.disconnect();
+        }
+        window.addEventListener('resize', measure);
+        return () => window.removeEventListener('resize', measure);
+      }, []);
+
+      const paint = useCallback(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const stage = sizeRef.current || {};
+        const stageWidth = stage.w || canvas.clientWidth || 600;
+        const stageHeight = stage.h || canvas.clientHeight || 400;
+        const width = Math.max(60, Math.min(stageWidth, stageHeight * (16 / 10)));
+        const height = width / (16 / 10);
+        const dpr = Math.min(
+          typeof window !== 'undefined' && Number.isFinite(window.devicePixelRatio) ? window.devicePixelRatio : 1,
+          2,
+        );
+        if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+          canvas.width = Math.round(width * dpr);
+          canvas.height = Math.round(height * dpr);
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        const currentTransport = transportRef.current;
+        const timeRef = currentTransport && currentTransport.timeRef;
+        const time = timeRef && Number.isFinite(timeRef.current)
+          ? timeRef.current
+          : (currentTransport && Number.isFinite(currentTransport.time) ? currentTransport.time : 0);
+        const currentAssets = assetsRef.current || null;
+        const images = (currentAssets && currentAssets.images) || new Map();
+        const imageSize = (entry) => {
+          const loaded = entry && entry.file ? images.get(entry.file) : null;
+          if (!loaded || !loaded.ready || !loaded.image) return null;
+          const image = loaded.image;
+          const naturalWidth = image.naturalWidth || image.width || 0;
+          const naturalHeight = image.naturalHeight || image.height || 0;
+          return naturalWidth > 0 && naturalHeight > 0 ? { w: naturalWidth, h: naturalHeight } : null;
+        };
+        const frame = collectFrame(modelRef.current, time, { aspect: width / height, imageSize });
+        paintPlaybackFrame(ctx, playerViewport(width, height), frame, images, { storyboard: storyboardRef.current });
+      }, []);
+
+      useEffect(() => {
+        paint();
+      }, [paint, model, size, transport.time, showStoryboard, assets.version]);
+
+      const duration = Math.max(1, transport.duration || (project && project.duration) || 0);
+      const time = Number.isFinite(transport.time) ? transport.time : 0;
+      const stats = (model && model.stats) || { mainLanes: 0, guideLanes: 0, notes: 0, unresolvedNotes: 0 };
+      const empty = !model || stats.mainLanes + stats.guideLanes + stats.notes === 0;
+      const title = project ? project.title || project.dir || tr('playbackTitle') : tr('playbackTitle');
+      const frameWidth = Math.max(60, Math.round(Math.min(size.w || 600, (size.h || 375) * (16 / 10))));
+      const frameHeight = Math.round(frameWidth * (10 / 16));
+      return h(
+        'div',
+        { className: 'dgc-player', role: 'dialog', 'aria-label': tr('playbackTitle') },
+        h(
+          'div',
+          { className: 'dgc-playerHead' },
+          h('div', { className: 'dgc-playerTitle' }, h('strong', null, title), h('span', null, tr('playbackHint'))),
+          h('span', { className: 'dgc-playerBadge' }, tr('playbackLanes') + ' ' + (stats.mainLanes + stats.guideLanes)),
+          h('span', { className: 'dgc-playerBadge' }, tr('playbackNotes') + ' ' + stats.notes),
+          stats.unresolvedNotes > 0
+            ? h('span', { className: 'dgc-playerBadge is-warn' }, tr('playbackUnbound') + ' ' + stats.unresolvedNotes)
+            : null,
+          h('span', { className: 'dgc-spacer' }),
+          h(Button, { variant: 'ghost', icon: 'close', title: tr('playbackClose'), onClick: onClose }, tr('playbackClose')),
+        ),
+        h(
+          'div',
+          { className: 'dgc-playerStage', ref: wrapRef },
+          h(
+            'div',
+            { className: 'dgc-playerFrame', style: { width: frameWidth, height: frameHeight } },
+            h('canvas', { className: 'dgc-playerCanvas', ref: canvasRef }),
+            empty ? h('div', { className: 'dgc-playerEmpty' }, tr('playbackEmpty')) : null,
+            !project || !project.audio
+              ? h('div', { className: 'dgc-playerNote' }, tr('playbackNoAudio'))
+              : null,
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dgc-playerBar' },
+          h(
+            Button,
+            {
+              variant: 'primary',
+              icon: transport.playing ? 'pause' : 'play',
+              onClick: () => (transport.playing ? transport.pause() : transport.play()),
+            },
+            transport.playing ? tr('pause') : tr('play'),
+          ),
+          h(Button, {
+            icon: 'rewind',
+            title: tr('playbackRestart'),
+            onClick: () => {
+              transport.seek(0);
+              if (!transport.playing) transport.play();
+            },
+          }),
+          h(
+            'div',
+            { className: 'dgc-scrub' },
+            h('input', {
+              type: 'range',
+              min: 0,
+              max: Math.round(duration * 1000),
+              step: 1,
+              value: Math.round(clamp(time, 0, duration) * 1000),
+              onChange: (event) => transport.seek(Number(event.target.value) / 1000),
+              'aria-label': tr('time'),
+            }),
+          ),
+          h('div', { className: 'dgc-clock' }, formatTime(time) + ' / ' + formatTime(duration)),
+          h(
+            'label',
+            { className: 'dgc-playerLabel' },
+            h('span', null, tr('rate')),
+            h(
+              'select',
+              {
+                className: 'dgc-select',
+                value: String(transport.rate),
+                onChange: (event) => transport.setRate(Number(event.target.value)),
+              },
+              PLAYER.rateOptions.map((value) => h('option', { key: value, value: String(value) }, value + 'x')),
+            ),
+          ),
+          h(Button, {
+            icon: transport.muted ? 'mute' : 'volume',
+            variant: 'ghost',
+            active: transport.muted,
+            title: transport.muted ? tr('unmute') : tr('mute'),
+            onClick: transport.toggleMute,
+          }),
+          h(
+            'label',
+            { className: 'dgc-playerCheck' },
+            h('input', {
+              type: 'checkbox',
+              checked: showStoryboard,
+              onChange: (event) => setShowStoryboard(!!event.target.checked),
+            }),
+            h('span', null, tr('playbackBackground')),
+          ),
+        ),
+      );
+    }
+
+    // =======================================================================
+    // Page assembly.
+    // =======================================================================
+
+    /** The full-page chart studio rendered inside the `main` panel slot. */
+    function ChartStudioPage(props) {
+      const t = typeof props.t === 'function' ? props.t : (key) => (zh[key] !== undefined ? zh[key] : en[key] !== undefined ? en[key] : key);
+      const session = useChartSession();
+      const state = session.state;
+      const project = state && state.project ? state.project : null;
+      const catalog = (state && state.catalog) || { elements: [], valueTypes: {}, palettes: {} };
+
+      const [selection, setSelection] = useState([]);
+      const [activeStaff, setActiveStaff] = useState(null);
+      const [hiddenStaffs, setHiddenStaffs] = useState(() => new Set());
+      const [tool, setTool] = useState('select');
+      const [snapDiv, setSnapDiv] = useState(4);
+      const [snapOn, setSnapOn] = useState(true);
+      const [follow, setFollow] = useState(false);
+      const [openDialog, setOpenDialog] = useState(false);
+      const [preview, setPreview] = useState(false);
+      const [notice, setNotice] = useState(null);
+      const canvasApiRef = useRef(null);
+      const setCanvasApi = useCallback((api) => {
+        canvasApiRef.current = api;
+      }, []);
+      const [library, setLibrary] = useState([]);
+      const clipboardRef = useRef([]);
+      const noticeTimerRef = useRef(0);
+
+      // The state payload carries `recent`; the full library is fetched on
+      // demand (the projects scan touches the filesystem).
+      useEffect(() => {
+        if (!openDialog || (state && Array.isArray(state.projects) && state.projects.length > 0)) return undefined;
+        let cancelled = false;
+        fetch(PROJECTS_URL, { cache: 'no-store' })
+          .then((response) => (response.ok ? response.json() : null))
+          .then((payload) => {
+            if (cancelled || !payload) return;
+            setLibrary(Array.isArray(payload.projects) ? payload.projects : []);
+          })
+          .catch(() => undefined);
+        return () => {
+          cancelled = true;
+        };
+      }, [openDialog, state]);
+
+      const audioName = project && project.audio ? project.audio.name : null;
+      const audioPath = useMemo(() => {
+        if (!project || !project.audio) return null;
+        const file = project.audio.file || project.audio.name || '';
+        if (!file) return null;
+        if (file.charAt(0) === '/') return file;
+        const dir = project.dir || '';
+        return dir ? dir.replace(/\/$/, '') + '/' + file : file;
+      }, [project]);
+
+      const audioOffset = project && project.audio && Number.isFinite(project.audio.offset) ? project.audio.offset : 0;
+      const transport = useTransport(audioPath, project ? project.duration : 0, audioOffset);
+      const { wave, status: waveStatus } = useWaveform(audioName, audioPath);
+      const tempo = (project && project.tempo) || { bpm: 120, offset: 0 };
+
+      // Playback preview: pure autoplay rendering, no chart signals.
+      const hasPlayableContent = useMemo(() => {
+        for (const staff of (project && project.staffs) || []) {
+          if (!staff || staff.kind === 'audio') continue;
+          for (const period of staff.periods || []) {
+            for (const element of period.elements || []) {
+              const type = shortType(element && element.type);
+              if (type === 'DremuMainLane' || type === 'DremuGuideLane' || type === 'DremuTap' || type === 'DremuDrag' || type === 'DremuTaplik' || type === 'DremuHold') return true;
+            }
+          }
+        }
+        return false;
+      }, [project]);
+      const playbackModel = useMemo(() => (preview && project ? buildPlaybackModel(project) : null), [preview, project]);
+      const openPreview = useCallback(() => {
+        if (!project) return;
+        const total = Math.max(1, transport.duration || project.duration || 0);
+        if (transport.time >= total - 0.05) transport.seek(0);
+        transport.play();
+        setPreview(true);
+      }, [project, transport]);
+      const closePreview = useCallback(() => {
+        transport.pause();
+        setPreview(false);
+      }, [transport]);
+      useEffect(() => {
+        if (!project && preview) setPreview(false);
+      }, [project, preview]);
+
+      const pushNotice = useCallback((next) => {
+        setNotice(next);
+        if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+        noticeTimerRef.current = window.setTimeout(() => setNotice(null), 4200);
+      }, []);
+      useEffect(() => () => {
+        if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+      }, []);
+
+      useEffect(() => {
+        if (session.notice) {
+          pushNotice(session.notice);
+          session.setNotice(null);
+        }
+      }, [session.notice, session.setNotice, pushNotice]);
+
+      // Reset per-project editor state when the project identity changes.
+      useEffect(() => {
+        setSelection([]);
+        setActiveStaff(null);
+        setHiddenStaffs(new Set());
+        clipboardRef.current = [];
+      }, [project && project.dir]);
+
+      const lanes = useMemo(() => {
+        const names = [];
+        for (const staff of (project && project.staffs) || []) {
+          for (const period of staff.periods || []) {
+            for (const element of period.elements || []) {
+              if (element.category === 'lane' && element.fields && typeof element.fields.name === 'string' && names.indexOf(element.fields.name) === -1) {
+                names.push(element.fields.name);
+              }
+            }
+          }
+        }
+        return names;
+      }, [project]);
+
+      const allElementIds = useMemo(() => {
+        const ids = [];
+        for (const staff of (project && project.staffs) || []) {
+          if (staff.kind === 'audio') continue;
+          for (const period of staff.periods || []) {
+            for (const element of period.elements || []) {
+              if (element.category === 'inner') continue;
+              ids.push(element.id);
+            }
+          }
+        }
+        return ids;
+      }, [project]);
+
+      const selectElement = useCallback(
+        (id, additive) => {
+          setSelection((current) => {
+            if (!additive) return [id];
+            return current.indexOf(id) === -1 ? current.concat([id]) : current.filter((item) => item !== id);
+          });
+        },
+        [],
+      );
+
+      /** Delete elements through one op batch (single undo step). */
+      const deleteElements = useCallback(
+        (ids) => {
+          if (!ids || ids.length === 0) return;
+          session.edit(ids.map((id) => ({ op: 'remove', elementId: id })));
+          setSelection((current) => current.filter((id) => ids.indexOf(id) === -1));
+        },
+        [session],
+      );
+
+      /** Duplicate elements one beat later (single undo step). */
+      const duplicateElements = useCallback(
+        (ids) => {
+          if (!project || !ids || ids.length === 0) return;
+          const secondsPerBeat = 60 / ((tempo && tempo.bpm) || 120);
+          const shift = secondsPerBeat;
+          const ops = [];
+          const newIds = [];
+          const usedLaneNames = new Set();
+          for (const id of ids) {
+            const found = findElement(project, id);
+            if (!found) continue;
+            const startField = resolveStartField(catalog, found.element);
+            const durationField = resolveDurationField(catalog, found.element);
+            const fields = deepClone(found.element.fields);
+            if (startField) {
+              const current = valueAsNumber(fields[startField]);
+              if (current === null) fields[startField] = round(found.period.timeOffset ? 0 : 0, 6);
+              else fields[startField] = round(current + shift, 6);
+            }
+            // A duplicated lane must not collide with the source lane name:
+            // rows are grouped by name, so two same-named lanes hide one row
+            // and the .g file would carry two lanes with one identity.
+            if (found.element.category === 'lane' && typeof fields.name === 'string') {
+              fields.name = uniqueLaneName(project, found.staff.id, usedLaneNames);
+              usedLaneNames.add(fields.name);
+            }
+            const newId = makeElementId(found.period.id);
+            newIds.push(newId);
+            ops.push({
+              op: 'add',
+              staffId: found.staff.id,
+              periodId: found.period.id,
+              element: { id: newId, type: found.element.type, fields },
+            });
+          }
+          if (ops.length > 0) {
+            session.edit(ops);
+            setSelection(newIds);
+          }
+        },
+        [catalog, project, session, snapDiv, tempo],
+      );
+
+      /** Copy the selection into the local clipboard. */
+      const copySelection = useCallback(() => {
+        if (!project) return;
+        const items = [];
+        let base = Infinity;
+        for (const id of selection) {
+          const found = findElement(project, id);
+          if (!found) continue;
+          base = Math.min(base, found.element.start || 0);
+          items.push({ type: found.element.type, start: found.element.start || 0, fields: deepClone(found.element.fields) });
+        }
+        if (items.length > 0) {
+          clipboardRef.current = items;
+          pushNotice({ kind: 'ok', text: t('copy') + ' · ' + items.length });
+        }
+      }, [project, selection, pushNotice, t]);
+
+      /** Paste the clipboard at the playhead, into the active staff when set. */
+      const pasteClipboard = useCallback(() => {
+        if (!project || clipboardRef.current.length === 0) return;
+        const items = clipboardRef.current;
+        const base = Math.min.apply(null, items.map((item) => item.start));
+        const targetTime = snapOn ? snapTime(transport.time, tempo, snapDiv, true) : transport.time;
+        const editable = (project.staffs || []).filter((item) => item.kind === 'chart' || item.kind === 'storyboard');
+        const staff = editable.find((item) => item.id === activeStaff) || editable[0];
+        if (!staff) return;
+        const periodId = pickPeriod(project, staff.id, targetTime);
+        const period = (staff.periods || []).find((item) => item.id === periodId);
+        if (!period) return;
+        const periodOffset = Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+        const ops = [];
+        const newIds = [];
+        for (const item of items) {
+          const entry = catalogEntry(catalog, item.type);
+          const timing = (entry && entry.timing) || {};
+          const fields = deepClone(item.fields);
+          const startField = typeof timing.start === 'string' && timing.start.length > 0 ? timing.start : ['hitTime', 'generateTime', 'startMoment'].find((name) => fields[name] !== undefined);
+          if (startField) fields[startField] = round(targetTime + (item.start - base) - periodOffset, 6);
+          if (entry && entry.category === 'lane' && typeof fields.name === 'string') fields.name = uniqueLaneName(project, staff.id);
+          const newId = makeElementId(periodId);
+          newIds.push(newId);
+          ops.push({ op: 'add', staffId: staff.id, periodId, element: { id: newId, type: item.type, fields } });
+        }
+        session.edit(ops);
+        setSelection(newIds);
+      }, [activeStaff, catalog, project, session, snapDiv, snapOn, tempo, transport.time]);
+
+      /** Nudge the selection in time by one grid step. */
+      const nudgeSelection = useCallback(
+        (direction) => {
+          if (!project || selection.length === 0) return;
+          const bpm = (tempo && tempo.bpm) || 120;
+          const step = (60 / bpm) / (snapDiv || 4);
+          const ops = [];
+          for (const id of selection) {
+            const found = findElement(project, id);
+            if (!found) continue;
+            const startField = resolveStartField(catalog, found.element);
+            if (!startField) continue;
+            const current = valueAsNumber(found.element.fields[startField]);
+            if (current === null) continue;
+            ops.push({ op: 'patch', elementId: id, path: [startField], value: round(current + direction * step, 6) });
+          }
+          if (ops.length > 0) session.edit(ops);
+        },
+        [catalog, project, selection, session, snapDiv, tempo],
+      );
+
+      // Keyboard shortcuts. The listener is registered once and dispatches to a
+      // handler ref, so a transport tick (which re-renders the page ~60x/s)
+      // cannot churn window listeners.
+      const keyHandlerRef = useRef(null);
+      useEffect(() => {
+        const dispatch = (event) => {
+          const handler = keyHandlerRef.current;
+          if (typeof handler === 'function') handler(event);
+        };
+        window.addEventListener('keydown', dispatch);
+        return () => window.removeEventListener('keydown', dispatch);
+      }, []);
+
+      keyHandlerRef.current = (event) => {
+        const target = event.target;
+        if (preview) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            closePreview();
+            return;
+          }
+          if (event.key === ' ') {
+            event.preventDefault();
+            if (transport.playing) transport.pause();
+            else transport.play();
+            return;
+          }
+          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+            event.preventDefault();
+            const step = event.shiftKey ? 5 : 1;
+            transport.seek(Math.max(0, transport.time + (event.key === 'ArrowRight' ? step : -step)));
+            return;
+          }
+          if (event.key === 'Home') {
+            event.preventDefault();
+            transport.seek(0);
+            return;
+          }
+          return;
+        }
+        const tag = target && target.tagName ? target.tagName.toUpperCase() : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (target && target.isContentEditable)) return;
+        const mod = event.metaKey || event.ctrlKey;
+        if (mod && event.key.toLowerCase() === 'z') {
+          event.preventDefault();
+          if (event.shiftKey) session.redo();
+          else session.undo();
+          return;
+        }
+        if (mod && event.key.toLowerCase() === 'y') {
+          event.preventDefault();
+          session.redo();
+          return;
+        }
+        if (mod && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          session.save();
+          return;
+        }
+        if (mod && event.key.toLowerCase() === 'a') {
+          event.preventDefault();
+          setSelection(allElementIds.slice(0, 4000));
+          return;
+        }
+        if (mod && event.key.toLowerCase() === 'c') {
+          event.preventDefault();
+          copySelection();
+          return;
+        }
+        if (mod && event.key.toLowerCase() === 'v') {
+          event.preventDefault();
+          pasteClipboard();
+          return;
+        }
+        if (mod && event.key.toLowerCase() === 'd') {
+          event.preventDefault();
+          duplicateElements(selection);
+          return;
+        }
+        if (event.key === ' ') {
+          event.preventDefault();
+          if (transport.playing) transport.pause();
+          else transport.play();
+          return;
+        }
+        if (event.key === 'Home') {
+          event.preventDefault();
+          transport.seek(0);
+          if (canvasApiRef.current) canvasApiRef.current.reveal(0);
+          return;
+        }
+        if (event.key === 'Delete' || event.key === 'Backspace') {
+          event.preventDefault();
+          deleteElements(selection);
+          return;
+        }
+        if (event.key === 'Escape') {
+          if (selection.length > 0) setSelection([]);
+          else setTool('select');
+          return;
+        }
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          if (selection.length > 0) nudgeSelection(event.key === 'ArrowRight' ? 1 : -1);
+          else {
+            const step = (60 / ((tempo && tempo.bpm) || 120)) / (snapDiv || 4);
+            transport.seek(Math.max(0, transport.time + (event.key === 'ArrowRight' ? step : -step)));
+          }
+          return;
+        }
+        const key = event.key.toLowerCase();
+        if (key === 'q') setTool('tap');
+        else if (key === 'w') setTool('drag');
+        else if (key === 'e') setTool('hold');
+        else if (key === 't') setTool('lane');
+        else if (key === 'v') setTool('select');
+        else if (/^[1-8]$/.test(event.key)) setSnapDiv(SNAP_DIVISIONS[Number(event.key) - 1]);
+        else if (event.key === '=' || event.key === '+') {
+          if (canvasApiRef.current) canvasApiRef.current.zoomIn();
+        } else if (event.key === '-') {
+          if (canvasApiRef.current) canvasApiRef.current.zoomOut();
+        } else if (event.key === '0') {
+          if (canvasApiRef.current) canvasApiRef.current.fit();
+        }
+      };
+
+      const dirty = !!(state && state.dirty);
+      const connection = session.connection;
+      const phase = session.phase;
+
+      const tools = [
+        { id: 'select', icon: 'select', label: t('toolSelect'), key: 'V' },
+        { id: 'tap', icon: 'tap', label: t('toolTap'), key: 'Q' },
+        { id: 'drag', icon: 'drag', label: t('toolDrag'), key: 'W' },
+        { id: 'hold', icon: 'hold', label: t('toolHold'), key: 'E' },
+        { id: 'lane', icon: 'lane', label: t('toolLane'), key: 'T' },
+      ];
+
+      return h(
+        'div',
+        { className: 'dgc-root' },
+        h(StyleSheet),
+        // Header.
+        h(
+          'div',
+          { className: 'dgc-header' },
+          h(
+            'div',
+            { className: 'dgc-title' },
+            h('strong', null, project ? project.title || t('title') : t('title')),
+            h('span', { className: 'dgc-mono' }, project ? project.dir : t('subtitle')),
+          ),
+          h('span', { className: 'dgc-badge ' + (dirty ? 'is-dirty' : 'is-clean') }, dirty ? t('unsaved') : t('clean')),
+          dirty ? h('span', { className: 'dgc-badge', title: t('dirtyDot') }, '●') : null,
+          connection === 'offline' ? h('span', { className: 'dgc-badge is-dirty dgc-offline' }, t('offline')) : null,
+          h('span', { className: 'dgc-spacer' }),
+          h(Button, { icon: 'folder', onClick: () => setOpenDialog(true) }, t('openProject')),
+          h(Button, { icon: 'preview', onClick: openPreview, disabled: !project || !hasPlayableContent, title: t('playbackOpen') }, t('playbackOpen')),
+          h(Button, { icon: 'reload', onClick: () => session.reload(), disabled: !project }, t('reload')),
+          h(Button, { icon: 'undo', onClick: () => session.undo(), disabled: !project }, t('undo')),
+          h(Button, { icon: 'redo', onClick: () => session.redo(), disabled: !project }, t('redo')),
+          h(
+            Button,
+            {
+              variant: 'primary',
+              icon: 'save',
+              disabled: !project || session.saving,
+              onClick: () => session.save(),
+            },
+            session.saving ? t('saving') : t('save'),
+          ),
+        ),
+        // Toolbar.
+        h(
+          'div',
+          { className: 'dgc-toolbar' },
+          h(
+            'div',
+            { className: 'dgc-toolgroup' },
+            tools.map((item) =>
+              h(
+                Button,
+                {
+                  key: item.id,
+                  icon: item.icon,
+                  active: tool === item.id,
+                  title: item.label + ' (' + item.key + ')',
+                  onClick: () => setTool(item.id),
+                },
+                item.label,
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'dgc-toolgroup' },
+            h('label', null, h('span', null, t('snap'))),
+            h(
+              'select',
+              {
+                className: 'dgc-select',
+                value: snapOn ? String(snapDiv) : 'off',
+                onChange: (event) => {
+                  if (event.target.value === 'off') setSnapOn(false);
+                  else {
+                    setSnapOn(true);
+                    setSnapDiv(Number(event.target.value));
+                  }
+                },
+              },
+              h('option', { value: 'off' }, t('snapOff')),
+              SNAP_DIVISIONS.map((value) => h('option', { key: value, value: String(value) }, '1/' + value)),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'dgc-toolgroup' },
+            h(Button, { variant: 'ghost', icon: 'zoomOut', title: t('zoomOut'), onClick: () => canvasApiRef.current && canvasApiRef.current.zoomOut() }),
+            h(Button, { variant: 'ghost', icon: 'zoomIn', title: t('zoomIn'), onClick: () => canvasApiRef.current && canvasApiRef.current.zoomIn() }),
+            h(Button, { variant: 'ghost', icon: 'fit', title: t('fitAll'), onClick: () => canvasApiRef.current && canvasApiRef.current.fit() }),
+          ),
+          h(
+            'div',
+            { className: 'dgc-toolgroup' },
+            h(Button, { variant: 'ghost', icon: 'duplicate', title: t('duplicate'), disabled: selection.length === 0, onClick: () => duplicateElements(selection) }),
+            h(Button, { variant: 'ghost', icon: 'trash', title: t('delete'), disabled: selection.length === 0, onClick: () => deleteElements(selection) }),
+          ),
+          h('span', { className: 'dgc-spacer' }),
+          h('label', null, h('span', null, t('tempo')), h(NumberField, {
+            value: tempo.bpm,
+            step: 1,
+            onCommit: (bpm) => session.edit([{ op: 'setMeta', tempo: { bpm } }]),
+          })),
+          h('label', null, h('span', null, t('offset')), h(NumberField, {
+            value: tempo.offset,
+            step: 0.05,
+            onCommit: (offset) => session.edit([{ op: 'setMeta', tempo: { offset } }]),
+          })),
+        ),
+        // Body.
+        h(
+          'div',
+          { className: 'dgc-body' },
+          project
+            ? h(LeftPaneMemo, {
+                project,
+                catalog,
+                t,
+                selection,
+                activeStaff,
+                setActiveStaff,
+                hiddenStaffs,
+                toggleStaff: (id) =>
+                  setHiddenStaffs((current) => {
+                    const next = new Set(current);
+                    if (next.has(id)) next.delete(id);
+                    else next.add(id);
+                    return next;
+                  }),
+                selectElement,
+                seek: (time) => {
+                  transport.seek(time);
+                  if (canvasApiRef.current) canvasApiRef.current.reveal(time);
+                },
+              })
+            : null,
+          h(
+            'div',
+            { className: 'dgc-center' },
+            h(TimelineCanvas, {
+              project: project || { staffs: [], tempo, duration: 0 },
+              catalog,
+              t,
+              selection,
+              setSelection,
+              tool,
+              setTool,
+              snapOn,
+              setSnapOn,
+              snapDiv,
+              tempo,
+              transport,
+              follow,
+              hiddenStaffs,
+              activeStaff,
+              onEdit: session.edit,
+              onNotice: pushNotice,
+              wave,
+              waveStatus,
+              audioOffset,
+              onReady: setCanvasApi,
+            }),
+            phase === 'error'
+              ? h(
+                  'div',
+                  { className: 'dgc-overlay' },
+                  h(
+                    'div',
+                    { className: 'dgc-overlayCard' },
+                    h('h3', null, t('loadFailed')),
+                    h('p', null, session.error || ''),
+                    h(
+                      'div',
+                      { className: 'dgc-rowActions' },
+                      h(Button, { variant: 'primary', icon: 'reload', onClick: () => session.refresh() }, t('retry')),
+                      h(Button, { onClick: () => setOpenDialog(true) }, t('openProject')),
+                    ),
+                  ),
+                )
+              : null,
+            phase === 'loading'
+              ? h(
+                  'div',
+                  { className: 'dgc-overlay' },
+                  h('div', { className: 'dgc-overlayCard' }, h('h3', null, t('loading')), h('p', null, t('subtitle'))),
+                )
+              : null,
+            // Embedded preview: occupy the timeline pane only, so the
+            // editor header, side panes and transport stay reachable.
+            preview && playbackModel
+              ? h(PlaybackLayer, { project, model: playbackModel, transport, tr: t, onClose: closePreview })
+              : null,
+          ),
+          project
+            ? h(InspectorPaneMemo, {
+                project,
+                catalog,
+                t,
+                selection,
+                lanes,
+                transport,
+                onEdit: session.edit,
+                onDelete: deleteElements,
+                onDuplicate: (id) => duplicateElements([id]),
+                seek: (time) => {
+                  transport.seek(time);
+                  if (canvasApiRef.current) canvasApiRef.current.reveal(time);
+                },
+              })
+            : h('aside', { className: 'dgc-inspector' }, h('div', { className: 'dgc-hint' }, t('noSelectionHint'))),
+        ),
+        // Transport.
+        h(TransportBar, { t, transport, project, follow, setFollow, selection }),
+
+        // No-project overlay.
+        !project && phase === 'empty'
+          ? h(
+              'div',
+              { className: 'dgc-overlay' },
+              h(
+                'div',
+                { className: 'dgc-overlayCard' },
+                h('h3', null, t('noProject')),
+                h('p', null, t('noProjectHint')),
+                h(
+                  'div',
+                  { className: 'dgc-rowActions' },
+                  h(Button, { variant: 'primary', icon: 'folder', onClick: () => setOpenDialog(true) }, t('openProject')),
+                  state && (state.recent || []).length > 0
+                    ? h(Button, { onClick: () => session.openProject(state.recent[0]) }, state.recent[0])
+                    : null,
+                ),
+              ),
+            )
+          : null,
+        // Notice toast.
+        notice
+          ? h(
+              'div',
+              {
+                style: {
+                  position: 'absolute',
+                  left: '50%',
+                  bottom: 74,
+                  transform: 'translateX(-50%)',
+                  zIndex: 20,
+                  padding: '7px 14px',
+                  borderRadius: 8,
+                  fontSize: 12,
+                  color: '#fff',
+                  background: notice.kind === 'error' ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)',
+                  boxShadow: '0 8px 20px rgba(0,0,0,.28)',
+                  maxWidth: '70%',
+                },
+                role: 'status',
+              },
+              notice.text,
+            )
+          : null,
+        openDialog ? h(OpenProjectDialog, { t, state: Object.assign({}, state || {}, { projects: (state && Array.isArray(state.projects) && state.projects.length > 0 ? state.projects : library) }), onOpen: session.openProject, onClose: () => setOpenDialog(false) }) : null,
+      );
+    }
+
+    // =======================================================================
+    // Sidebar panel icon.
+    // =======================================================================
+
+    /** 18px sidebar glyph: a branch lane with three notes on it. */
+    function PanelIcon(props) {
+      const size = props && props.size ? props.size : 18;
+      return h(
+        'svg',
+        { viewBox: '0 0 20 20', width: size, height: size, fill: 'none', 'aria-hidden': 'true', style: { display: 'block' } },
+        h('path', {
+          d: 'M2.2 13.6c2.8 0 3.6-7.2 6-7.2s3.2 7.2 6 7.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
+          strokeLinecap: 'round',
+        }),
+        h('circle', { cx: 5.2, cy: 10.6, r: 1.7, fill: 'currentColor' }),
+        h('circle', { cx: 10.1, cy: 7.1, r: 1.7, fill: 'currentColor' }),
+        h('path', { d: 'M14.1 11.1l1.7 1.2-1.5 1.4z', fill: 'currentColor' }),
+      );
+    }
+
+    // =======================================================================
+    // Client plugin entry.
+    // =======================================================================
+
+    /**
+     * Register the sidebar entry and the full-page studio panel. Theme token
+     * caches are invalidated when the shell switches light/dark.
+     */
+    function apply(ctx) {
+      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'gorge-chart: dictionaries');
+      const t = ctx.locale.bind(NS);
+
+      ctx.effect(() => {
+        const target = document.documentElement;
+        if (!target || typeof MutationObserver !== 'function') return undefined;
+        const observer = new MutationObserver(() => resetTokenCache());
+        observer.observe(target, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+        return () => observer.disconnect();
+      }, 'gorge-chart: theme token cache');
+
+      ctx.slots.inject('sidebar.panellist', () =>
+        ctx.slots.register(
+          {
+            name: 'sidebar.panellist',
+            id: PANEL_ID,
+            order: 3,
+            label: () => t('panel'),
+            locale: NS,
+          },
+          PanelIcon,
+        ),
+      );
+
+      ctx.slots.inject('main', () =>
+        ctx.slots.register(
+          {
+            name: 'main',
+            key: PANEL_ID,
+            locale: NS,
+          },
+          ChartStudioPage,
+        ),
+      );
+    }
+
+    const playbackTestApi = Object.freeze({
+      buildPlaybackModel,
+      collectFrame,
+      colorCurveAt,
+      evalAdd,
+    });
+    const clientPlugin = {
+      name: 'gorge-chart-studio-client',
+      inject: ['slots', 'locale'],
+      apply,
+    };
+    // Test hook for tests/client-smoke.mjs: pure playback model/frame helpers.
+    Object.defineProperty(clientPlugin, '__playback', { value: playbackTestApi, enumerable: false });
+    return clientPlugin;
+  },
+});

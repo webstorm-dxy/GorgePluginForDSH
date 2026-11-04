@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Dremu Chart Studio",
+    "description": "A full-page chart studio for Gorge / Dremu .g chart projects: timeline editing, an inspector, curve editors, playback, and undo/redo, reading and writing the .g staff files on disk; the agent can edit the same chart with the gorge_chart_get / gorge_chart_edit tools and changes appear live in the editor."
+  }
+}
