@@ -3,7 +3,7 @@
  *
  * One opened Gorge/Dremu chart project lives here and is exposed three ways:
  *   - browser:  GET /plugins/gorge-chart/state, SSE /plugins/gorge-chart/events,
- *               POST /plugins/gorge-chart/{edit,open,save,reload},
+ *               POST /plugins/gorge-chart/{edit,open,save,reload,import-audio},
  *               GET /plugins/gorge-chart/{projects,file}
  *   - model:    gorge_project_list / gorge_project_open / gorge_chart_get /
  *               gorge_chart_edit / gorge_chart_save / gorge_chart_validate /
@@ -22,6 +22,15 @@
  * the half stays loadable in a plain Node test process. Testable internals
  * (store factory, HTTP handler factories, tool factory) are exported alongside
  * `apply`; see tests/host.test.mjs.
+ *
+ * Sections (search for "NN ·"):
+ *   01 constants                 08 browser HTTP handlers
+ *   02 shared utilities          09 agent tool schemas
+ *   03 local-only HTTP helpers   10 agent tools
+ *   04 project discovery         11 dynamic prompt context
+ *   05 recovery snapshot         12 plugin configuration
+ *   06 project store             13 plugin entry point
+ *   07 project file serving
  */
 
 import fs from 'node:fs'
@@ -33,13 +42,15 @@ import {
   CATALOG,
   applyOps as modelApplyOps,
   loadProject,
+  probeAudioFile,
   projectToWire,
   saveProject,
   validateProject,
 } from './dremu-model.js'
+import { registerSkillProvider } from './skills.js'
 
 // ---------------------------------------------------------------------------
-// Constants
+// 01 · Constants
 // ---------------------------------------------------------------------------
 
 /** Directory this Host half is installed in (the linked bundle directory). */
@@ -59,6 +70,7 @@ export const ENDPOINTS = {
   file: '/plugins/gorge-chart/file',
   projects: '/plugins/gorge-chart/projects',
   reload: '/plugins/gorge-chart/reload',
+  importAudio: '/plugins/gorge-chart/import-audio',
 }
 
 /** Debounce for the recovery snapshot write (`state/project.json`). */
@@ -71,6 +83,8 @@ const PROJECT_SCAN_CACHE_MS = 4_000
 const MAX_EDIT_BODY_BYTES = 4 * 1024 * 1024
 /** `POST /open|save|reload` request body cap (tiny bodies). */
 const MAX_SMALL_BODY_BYTES = 64 * 1024
+/** `POST /import-audio` request body cap (one audio file). */
+const MAX_AUDIO_BODY_BYTES = 256 * 1024 * 1024
 /** Ops accepted in one edit request (client batches, agent batches). */
 const MAX_OPS_PER_EDIT = 1_000
 /** Accepted edit batches kept for restart recovery. */
@@ -100,7 +114,7 @@ const LOCAL_HOSTNAMES = ['127.0.0.1', 'localhost', '[::1]']
 /** Chart/storyboard file extensions considered project content. */
 const CHART_FILE_EXTS = new Set(['.g'])
 /** Audio extensions considered project assets. */
-const AUDIO_FILE_EXTS = new Set(['.wav', '.mp3', '.ogg', '.m4a', '.flac', '.aac'])
+const AUDIO_FILE_EXTS = new Set(['.wav', '.mp3', '.ogg', '.m4a', '.flac', '.aac', '.opus'])
 /** Image extensions considered project assets. */
 const IMAGE_FILE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg'])
 /** Content types served by `GET /plugins/gorge-chart/file`. */
@@ -111,6 +125,7 @@ const MIME_TYPES = {
   '.m4a': 'audio/mp4',
   '.aac': 'audio/aac',
   '.flac': 'audio/flac',
+  '.opus': 'audio/opus',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -133,7 +148,7 @@ const SKIP_SCAN_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', 'state', 
 export const inject = ['tools']
 
 // ---------------------------------------------------------------------------
-// Small shared utilities
+// 02 · Small shared utilities
 // ---------------------------------------------------------------------------
 
 /** Best-effort logger from the Cordis context; console fallback for bare use. */
@@ -201,6 +216,43 @@ function safeStat(target) {
   }
 }
 
+/**
+ * Throw a Node-style coded error unless `target` is an existing directory.
+ * Shared by project opening and project-directory resolution so both report
+ * `ENOENT` / `ENOTDIR` identically.
+ */
+function requireDirectory(target) {
+  const stats = safeStat(target)
+  if (!stats) {
+    const error = new Error(`project directory not found: ${target}`)
+    error.code = 'ENOENT'
+    throw error
+  }
+  if (!stats.isDirectory()) {
+    const error = new Error(`not a directory: ${target}`)
+    error.code = 'ENOTDIR'
+    throw error
+  }
+  return target
+}
+
+/** Rounded element duration in seconds, or null for instant elements. */
+function elementDuration(element) {
+  return element.duration === null || element.duration === undefined ? null : roundNumber(element.duration)
+}
+
+/** Staff and element totals of a loaded project (wire or model shape). */
+function countProjectElements(project) {
+  const staffs = project && Array.isArray(project.staffs) ? project.staffs : []
+  let staffCount = 0
+  let elementCount = 0
+  for (const staff of staffs) {
+    staffCount += 1
+    for (const period of staff.periods || []) elementCount += (period.elements || []).length
+  }
+  return { staffCount, elementCount }
+}
+
 /** Round a finite number to `digits` decimals; non-numbers become null. */
 function roundNumber(value, digits = 6) {
   const number = Number(value)
@@ -235,7 +287,7 @@ function jsonClone(value) {
 }
 
 // ---------------------------------------------------------------------------
-// Local-only HTTP helpers (mirrors the MIDI editor plugin's guard)
+// 03 · Local-only HTTP helpers (mirrors the MIDI editor plugin's guard)
 // ---------------------------------------------------------------------------
 
 /**
@@ -304,8 +356,43 @@ async function readJsonBody(req, maxBytes) {
   return value
 }
 
+/** Read a bounded raw request body (audio upload) into one Buffer. */
+async function readBinaryBody(req, maxBytes) {
+  const chunks = []
+  let bytes = 0
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    bytes += buffer.length
+    if (bytes > maxBytes) throw new Error('request body is too large')
+    chunks.push(buffer)
+  }
+  if (bytes === 0) throw new Error('request body is empty')
+  return Buffer.concat(chunks)
+}
+
+/** Sanitize one uploaded audio file's basename (letters/digits/dot/dash/space). */
+function sanitizeUploadName(fileName) {
+  const base = path.basename(String(fileName || ''))
+  const cleaned = base.replace(/[^\p{L}\p{N}._\- ]+/gu, '_').replace(/^\.+/, '').trim()
+  return cleaned.length > 0 ? cleaned : 'audio.wav'
+}
+
+/** Unique file name inside `dir` (adds `_1`, `_2`, ... before the extension). */
+function uniqueUploadName(dir, fileName) {
+  const sanitized = sanitizeUploadName(fileName)
+  const extension = path.extname(sanitized)
+  const stem = sanitized.slice(0, sanitized.length - extension.length) || 'audio'
+  let candidate = sanitized
+  let index = 1
+  while (fs.existsSync(path.join(dir, candidate))) {
+    candidate = `${stem}_${index}${extension}`
+    index += 1
+  }
+  return candidate
+}
+
 // ---------------------------------------------------------------------------
-// Project discovery
+// 04 · Project discovery
 // ---------------------------------------------------------------------------
 
 /**
@@ -408,22 +495,11 @@ export function resolveProjectDirectory(input, options = {}) {
     else if (safeStat(underCwd)?.isDirectory()) candidate = underCwd
     else candidate = underRoot || underCwd
   }
-  const stats = safeStat(candidate)
-  if (!stats) {
-    const error = new Error(`project directory not found: ${candidate}`)
-    error.code = 'ENOENT'
-    throw error
-  }
-  if (!stats.isDirectory()) {
-    const error = new Error(`not a directory: ${candidate}`)
-    error.code = 'ENOTDIR'
-    throw error
-  }
-  return candidate
+  return requireDirectory(candidate)
 }
 
 // ---------------------------------------------------------------------------
-// Recovery snapshot
+// 05 · Recovery snapshot
 // ---------------------------------------------------------------------------
 
 /**
@@ -474,7 +550,7 @@ function readRecoverySnapshot(statePath, logger) {
 }
 
 // ---------------------------------------------------------------------------
-// Project store
+// 06 · Project store
 // ---------------------------------------------------------------------------
 
 /**
@@ -632,6 +708,13 @@ export function createStore(options = {}) {
         lastPersistError = message
         warn(logger, `gorge-chart: cannot persist recovery snapshot to ${statePath}: ${message}`)
       }
+    }
+  }
+
+  function clearPersistTimer() {
+    if (persistTimer !== undefined) {
+      clearTimeout(persistTimer)
+      persistTimer = undefined
     }
   }
 
@@ -802,12 +885,36 @@ export function createStore(options = {}) {
     let created
     if (Array.isArray(result.created)) {
       created = result.created
-        .filter((entry) => isPlainObject(entry) && typeof entry.elementId === 'string')
-        .map((entry) => ({
-          elementId: entry.elementId,
-          staffId: typeof entry.staffId === 'string' ? entry.staffId : null,
-          periodId: typeof entry.periodId === 'string' ? entry.periodId : null,
-        }))
+        .filter((entry) => isPlainObject(entry) && (typeof entry.elementId === 'string' || typeof entry.staffId === 'string'))
+        .map((entry) => {
+          if (typeof entry.elementId === 'string') {
+            return {
+              elementId: entry.elementId,
+              staffId: typeof entry.staffId === 'string' ? entry.staffId : null,
+              periodId: typeof entry.periodId === 'string' ? entry.periodId : null,
+            }
+          }
+          // `addAudioPeriod` reports the new clip (and possibly the audio staff
+          // it auto-created) so the client can select/refresh the segment.
+          if (entry.kind === 'audioPeriod') {
+            return {
+              staffId: typeof entry.staffId === 'string' ? entry.staffId : null,
+              kind: 'audioPeriod',
+              audioPeriodId: typeof entry.audioPeriodId === 'string' ? entry.audioPeriodId : null,
+              method: typeof entry.method === 'string' ? entry.method : null,
+              file: typeof entry.file === 'string' ? entry.file : null,
+              timeOffset: Number.isFinite(entry.timeOffset) ? entry.timeOffset : null,
+              imported: entry.imported === true,
+            }
+          }
+          // `addStaff` reports its new staff; keep it distinguishable from an
+          // element descriptor so clients can select the created row.
+          return {
+            staffId: entry.staffId,
+            kind: 'staff',
+            staffKind: typeof entry.staffKind === 'string' ? entry.staffKind : null,
+          }
+        })
       if (created.length === 0) created = undefined
     } else if (changed) {
       created = deriveCreated(ops)
@@ -836,27 +943,10 @@ export function createStore(options = {}) {
   }
 
   /**
-   * Open (or reload) a project directory. Saves the previous project first when
-   * it has dirty changes and autoSave is enabled; bumps the revision so the
-   * browser knows the document changed and always resets `dirty`.
+   * Adopt a freshly loaded document: bump the revision (browsers refetch on a
+   * revision they did not produce), drop undo/recovery history, and notify.
    */
-  function open(targetDir) {
-    if (closed) throw new Error('the store is closed')
-    if (typeof targetDir !== 'string' || targetDir.trim().length === 0) throw new Error('a project directory is required')
-    const directory = path.resolve(targetDir)
-    const stats = safeStat(directory)
-    if (!stats) {
-      const error = new Error(`project directory not found: ${directory}`)
-      error.code = 'ENOENT'
-      throw error
-    }
-    if (!stats.isDirectory()) {
-      const error = new Error(`not a directory: ${directory}`)
-      error.code = 'ENOTDIR'
-      throw error
-    }
-    if (project && dirty && autoSave) saveNow()
-    const loaded = loadProject(directory)
+  function adoptProject(loaded, directory) {
     clearAutoSaveTimer()
     project = loaded
     projectDir = directory
@@ -867,10 +957,24 @@ export function createStore(options = {}) {
     pendingBatches = []
     recoveryTruncated = false
     wireCache = null
-    projectsCache = null
-    pushRecent(directory)
     schedulePersist()
     notify()
+  }
+
+  /**
+   * Open (or reload) a project directory. Saves the previous project first when
+   * it has dirty changes and autoSave is enabled; bumps the revision so the
+   * browser knows the document changed and always resets `dirty`.
+   */
+  function open(targetDir) {
+    if (closed) throw new Error('the store is closed')
+    if (typeof targetDir !== 'string' || targetDir.trim().length === 0) throw new Error('a project directory is required')
+    const directory = requireDirectory(path.resolve(targetDir))
+    if (project && dirty && autoSave) saveNow()
+    const loaded = loadProject(directory)
+    projectsCache = null
+    pushRecent(directory)
+    adoptProject(loaded, directory)
     return state()
   }
 
@@ -886,17 +990,7 @@ export function createStore(options = {}) {
       warn(logger, `gorge-chart: reload failed for ${projectDir}: ${message}`)
       return { ok: false, error: message }
     }
-    clearAutoSaveTimer()
-    project = loaded
-    projectRealDir = safeRealpath(projectDir)
-    rev += 1
-    dirty = false
-    undoCount = 0
-    pendingBatches = []
-    recoveryTruncated = false
-    wireCache = null
-    schedulePersist()
-    notify()
+    adoptProject(loaded, projectDir)
     return { ok: true, ...state() }
   }
 
@@ -943,10 +1037,7 @@ export function createStore(options = {}) {
         if (!result.ok) warn(logger, `gorge-chart: flush save failed: ${result.errors.join('; ') || result.error || 'unknown error'}`)
       }
     }
-    if (persistTimer !== undefined) {
-      clearTimeout(persistTimer)
-      persistTimer = undefined
-    }
+    clearPersistTimer()
     persistNow()
   }
 
@@ -954,18 +1045,14 @@ export function createStore(options = {}) {
   function close() {
     if (closed) return
     clearAutoSaveTimer()
-    if (persistTimer !== undefined) {
-      clearTimeout(persistTimer)
-      persistTimer = undefined
-    }
+    clearPersistTimer()
     if (project && dirty && autoSave) {
       const result = saveNow()
       if (!result.ok) warn(logger, `gorge-chart: save on shutdown failed: ${result.errors.join('; ') || result.error || 'unknown error'}`)
     }
-    if (persistTimer !== undefined) {
-      clearTimeout(persistTimer)
-      persistTimer = undefined
-    }
+    // saveNow() may schedule another snapshot; the shutdown write below is the
+    // final one, so drop that timer as well.
+    clearPersistTimer()
     persistNow()
     closed = true
     listeners.clear()
@@ -996,7 +1083,7 @@ export function createStore(options = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Project file serving (`GET /plugins/gorge-chart/file`)
+// 07 · Project file serving (`GET /plugins/gorge-chart/file`)
 // ---------------------------------------------------------------------------
 
 /** Content type for a file path, generic for unknown/extensionless files. */
@@ -1193,7 +1280,7 @@ function serveFile(req, res, file, logger) {
 }
 
 // ---------------------------------------------------------------------------
-// Browser HTTP handlers
+// 08 · Browser HTTP handlers
 // ---------------------------------------------------------------------------
 
 /** Reject non-local requests and non-matching methods; returns true if handled. */
@@ -1419,6 +1506,84 @@ export function createReloadHandler(store) {
 }
 
 /**
+ * POST `/plugins/gorge-chart/import-audio?name=<file>` — copy one uploaded
+ * audio file into the open project directory.
+ *
+ * The browser reads a local `File` and posts its bytes with the original file
+ * name; the response is `{ ok, file, absolute, duration, sampleRate, channels,
+ * format, bytes }` where `file` is the project-relative name to pass to an
+ * `addAudioPeriod` op. Local-only; audio extensions only; 256 MiB cap.
+ */
+export function createImportAudioHandler(store, options = {}) {
+  const maxBytes = Number.isFinite(options.maxAudioBytes) ? Math.max(1, options.maxAudioBytes) : MAX_AUDIO_BODY_BYTES
+  return async function handleImportAudio(req, res) {
+    if (guardEndpoint(req, res, ['POST'])) return
+    const view = store.view()
+    if (!view.openPath) {
+      jsonResponse(res, 409, { error: 'no project is open' })
+      return
+    }
+    let url
+    try {
+      url = new URL(req.url || '/', 'http://localhost')
+    } catch {
+      jsonResponse(res, 400, { error: 'invalid request url' })
+      return
+    }
+    const rawName = url.searchParams.get('name') || req.headers['x-file-name'] || ''
+    const fileName = sanitizeUploadName(rawName)
+    const extension = path.extname(fileName).toLowerCase()
+    if (!AUDIO_FILE_EXTS.has(extension)) {
+      jsonResponse(res, 400, { error: `unsupported audio file type "${extension || '(none)'}"` })
+      return
+    }
+    let body
+    try {
+      body = await readBinaryBody(req, maxBytes)
+    } catch (error) {
+      jsonResponse(res, 400, { error: messageOf(error) })
+      return
+    }
+    const dir = path.resolve(view.openPath)
+    let target
+    try {
+      target = path.join(dir, uniqueUploadName(dir, fileName))
+    } catch (error) {
+      jsonResponse(res, 400, { error: messageOf(error) })
+      return
+    }
+    if (!isPathInside(dir, target)) {
+      jsonResponse(res, 400, { error: 'invalid file name' })
+      return
+    }
+    const tmp = path.join(dir, `.${path.basename(target)}.${process.pid.toString(36)}${Date.now().toString(36)}.tmp`)
+    try {
+      fs.writeFileSync(tmp, body)
+      fs.renameSync(tmp, target)
+    } catch (error) {
+      try {
+        if (fs.existsSync(tmp)) fs.unlinkSync(tmp)
+      } catch {
+        /* ignore cleanup failures */
+      }
+      jsonResponse(res, 500, { error: `cannot write audio file: ${messageOf(error)}` })
+      return
+    }
+    const probe = probeAudioFile(target)
+    jsonResponse(res, 200, {
+      ok: true,
+      file: path.basename(target),
+      absolute: target,
+      duration: probe.duration,
+      sampleRate: probe.sampleRate,
+      channels: probe.channels,
+      format: probe.format,
+      bytes: body.length,
+    })
+  }
+}
+
+/**
  * GET `/plugins/gorge-chart/projects` — scan the configured project root and
  * return `{ projectRoot, count, projects }`. Always 200 (an unreadable root
  * yields an empty list plus a warning in the Host log).
@@ -1501,16 +1666,15 @@ export function createHandlers(store, options = {}) {
     { path: ENDPOINTS.file, handler: createFileHandler(store, options) },
     { path: ENDPOINTS.projects, handler: createProjectsHandler(store) },
     { path: ENDPOINTS.reload, handler: createReloadHandler(store) },
+    { path: ENDPOINTS.importAudio, handler: createImportAudioHandler(store, options) },
   ]
 }
 
 // ---------------------------------------------------------------------------
-// Agent tool schemas (raw JSON Schema, exactly as documented)
+// 09 · Agent tool schemas (raw JSON Schema, exactly as documented)
 // ---------------------------------------------------------------------------
 
 const NUM = { type: 'number' }
-const STR = { type: 'string' }
-const BOOL = { type: 'boolean' }
 
 /**
  * One edit operation. The model owns the exact semantics; this schema mirrors
@@ -1522,6 +1686,11 @@ const BOOL = { type: 'boolean' }
  *   { op:'setMeta', tempo?, title? }
  *   { op:'setStaffName', staffId, displayName }
  *   { op:'setPeriodConfig', periodId, fields }
+ *   { op:'addStaff', kind?, form?, displayName?, className?, fileName?, timeOffset?, minLength? }
+ *   { op:'removeStaff', staffId, deleteFile? }
+ *   { op:'addAudioPeriod', staffId?, file?, sourcePath?, name?, timeOffset?, method? }
+ *   { op:'patchAudioPeriod', staffId?, audioPeriodId, fields }
+ *   { op:'removeAudioPeriod', staffId?, audioPeriodId }
  */
 const OP_SCHEMA = {
   type: 'object',
@@ -1530,7 +1699,20 @@ const OP_SCHEMA = {
   properties: {
     op: {
       type: 'string',
-      enum: ['patch', 'add', 'remove', 'duplicate', 'setMeta', 'setStaffName', 'setPeriodConfig'],
+      enum: [
+        'patch',
+        'add',
+        'remove',
+        'duplicate',
+        'setMeta',
+        'setStaffName',
+        'setPeriodConfig',
+        'addStaff',
+        'removeStaff',
+        'addAudioPeriod',
+        'patchAudioPeriod',
+        'removeAudioPeriod',
+      ],
       description: 'Operation kind.',
     },
     elementId: { type: 'string', description: 'Opaque element id from gorge_chart_get (stable across edits).' },
@@ -1557,7 +1739,30 @@ const OP_SCHEMA = {
     tempo: { type: 'object', additionalProperties: true, properties: { bpm: NUM, offset: NUM } },
     title: { type: 'string' },
     displayName: { type: 'string' },
-    fields: { type: 'object', description: 'Field map for setPeriodConfig.' },
+    fields: { type: 'object', description: 'Field map for setPeriodConfig / patchAudioPeriod.' },
+    kind: { type: 'string', enum: ['chart', 'storyboard', 'audio'], description: 'addStaff: staff kind.' },
+    form: { type: 'string', description: 'addStaff: Gorge form ("Dremu" or "DeentyStoryboard").' },
+    className: { type: 'string', description: 'addStaff: class name; defaults to a unique generated name.' },
+    fileName: { type: 'string', description: 'addStaff: file basename ending in .g; defaults to <className>.g.' },
+    timeOffset: { type: 'number', description: 'addStaff/addAudioPeriod: start in seconds (default 0).' },
+    minLength: { oneOf: [{ type: 'number' }, { type: 'null' }], description: 'addStaff: period length in seconds (default open-ended).' },
+    file: {
+      type: 'string',
+      description:
+        'addAudioPeriod/patchAudioPeriod: project-relative audio path (e.g. "Song.wav"); an absolute path imports that file into the project.',
+    },
+    sourcePath: {
+      type: 'string',
+      description: 'addAudioPeriod/patchAudioPeriod: external audio file to copy into the project before referencing it.',
+    },
+    name: { type: 'string', description: 'addAudioPeriod: asset name shown in the editor (default: file basename).' },
+    method: { type: 'string', description: 'addAudioPeriod: @Song method name (default: unique GetSong / GetSong1 ...).' },
+    audioPeriodId: { type: 'string', description: 'patchAudioPeriod/removeAudioPeriod: id such as "a0" (from gorge_chart_get).' },
+    deleteFile: {
+      type: 'boolean',
+      description:
+        'removeStaff: also delete a staff that was loaded from disk (removes its .g and .bak). Created-in-session staffs do not need it. Permanent — confirm with the user first.',
+    },
   },
 }
 
@@ -1624,7 +1829,7 @@ const TOOL_OUTPUT = {
 }
 
 // ---------------------------------------------------------------------------
-// Agent tools
+// 10 · Agent tools
 // ---------------------------------------------------------------------------
 
 /** Compact one-element view for `gorge_chart_get`. */
@@ -1633,7 +1838,7 @@ function compactElement(element, detail) {
     id: element.id,
     type: element.type,
     start: roundNumber(element.start),
-    duration: element.duration === null || element.duration === undefined ? null : roundNumber(element.duration),
+    duration: elementDuration(element),
     lane: element.lane === undefined ? null : element.lane,
     category: element.category || null,
   }
@@ -1653,6 +1858,18 @@ function compactProjectMeta(project) {
     audio: isPlainObject(project.audio)
       ? { file: project.audio.file, name: project.audio.name, duration: roundNumber(project.audio.duration) }
       : null,
+    audioPeriods: Array.isArray(project.audioPeriods)
+      ? project.audioPeriods.slice(0, 50).map((clip) => ({
+          id: clip.id,
+          staffId: clip.staffId,
+          method: clip.method,
+          name: clip.name,
+          relativePath: clip.relativePath,
+          offset: roundNumber(clip.offset),
+          duration: roundNumber(clip.duration),
+          missing: clip.missing === true,
+        }))
+      : [],
     assets: {
       images: Array.isArray(assets.images) ? assets.images.slice(0, 200) : [],
       audio: Array.isArray(assets.audio) ? assets.audio.slice(0, 200) : [],
@@ -1746,6 +1963,19 @@ export function createTools(store, options = {}) {
         className: staff.className,
         elementCount: staffElements,
         periods,
+        ...(Array.isArray(staff.audioPeriods)
+          ? {
+              audioPeriods: staff.audioPeriods.map((clip) => ({
+                id: clip.id,
+                method: clip.method,
+                name: clip.name,
+                relativePath: clip.relativePath,
+                offset: roundNumber(clip.offset),
+                duration: roundNumber(clip.duration),
+                missing: clip.missing === true,
+              })),
+            }
+          : {}),
       })
     }
     const result = {
@@ -1781,7 +2011,7 @@ export function createTools(store, options = {}) {
               type: element.type,
               category: element.category,
               start: roundNumber(element.start),
-              duration: element.duration === null || element.duration === undefined ? null : roundNumber(element.duration),
+              duration: elementDuration(element),
               lane: element.lane === undefined ? null : element.lane,
               staffId: staff.id,
               staffName: staff.displayName,
@@ -1817,12 +2047,7 @@ export function createTools(store, options = {}) {
     })
     const snapshot = store.open(directory)
     const project = snapshot.project
-    let elementCount = 0
-    let staffCount = 0
-    for (const staff of (project && project.staffs) || []) {
-      staffCount += 1
-      for (const period of staff.periods || []) elementCount += (period.elements || []).length
-    }
+    const { staffCount, elementCount } = countProjectElements(project)
     return {
       ok: true,
       openPath: snapshot.openPath,
@@ -1865,7 +2090,8 @@ export function createTools(store, options = {}) {
 
   /** Validate the open project through the model. */
   function chartValidate() {
-    const project = store.view().project
+    const view = store.view()
+    const project = view.project
     if (!project) return { ok: false, error: 'no project is open' }
     let issues
     try {
@@ -1880,8 +2106,8 @@ export function createTools(store, options = {}) {
     })
     return {
       ok: true,
-      rev: store.view().rev,
-      dirty: store.view().dirty,
+      rev: view.rev,
+      dirty: view.dirty,
       issueCount: list.length,
       truncated: list.length > visible.length,
       issues: visible,
@@ -1968,7 +2194,7 @@ export function createTools(store, options = {}) {
     ),
     defineTool(
       'gorge_chart_edit',
-      'Edit the open Dremu chart project shown in the Web UI with an ordered op list: patch {elementId,path,value}, add {staffId,periodId?,element}, remove {elementId}, duplicate {elementId,newId?,timeShift?}, setMeta {tempo?,title?}, setStaffName {staffId,displayName}, setPeriodConfig {periodId,fields}. Every accepted edit bumps the revision and appears live in the user\u2019s editor. 编辑谱面。',
+      'Edit the open Dremu chart project shown in the Web UI with an ordered op list: patch {elementId,path,value}, add {staffId,periodId?,element}, remove {elementId}, duplicate {elementId,newId?,timeShift?}, setMeta {tempo?,title?}, setStaffName {staffId,displayName}, setPeriodConfig {periodId,fields}, addStaff {kind?,form?,displayName?,className?,fileName?}, removeStaff {staffId,deleteFile?}, addAudioPeriod {staffId?,file?,sourcePath?,name?,timeOffset?,method?}, patchAudioPeriod {staffId?,audioPeriodId,fields}, removeAudioPeriod {staffId?,audioPeriodId}. Every accepted edit bumps the revision and appears live in the user\u2019s editor. 编辑谱面。',
       TOOL_PARAMETERS.chart_edit,
       safe('gorge_chart_edit', (args) => chartEdit(args)),
     ),
@@ -1994,7 +2220,7 @@ export function createTools(store, options = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic prompt context
+// 11 · Dynamic prompt context
 // ---------------------------------------------------------------------------
 
 /** One-line workspace summary registered as dynamic prompt context. */
@@ -2007,16 +2233,14 @@ export function workspaceSummary(store) {
     )
   }
   const project = state.project
-  const staffs = Array.isArray(project.staffs) ? project.staffs : []
-  let elementCount = 0
-  for (const staff of staffs) {
-    for (const period of staff.periods || []) elementCount += (period.elements || []).length
-  }
+  const { staffCount, elementCount } = countProjectElements(project)
   const title = typeof project.title === 'string' && project.title.length > 0 ? project.title : path.basename(state.openPath)
   const duration = Number(project.duration)
   const durationText = Number.isFinite(duration) ? `${roundNumber(duration, 3)}s` : 'unknown length'
+  const audioCount = Array.isArray(project.audioPeriods) ? project.audioPeriods.length : project.audio ? 1 : 0
   return (
-    `Dremu chart workspace: "${title}" | ${staffs.length} staffs | ${elementCount} elements | ${durationText} | ` +
+    `Dremu chart workspace: "${title}" | ${staffCount} staffs | ${elementCount} elements | ` +
+    `${audioCount} audio period${audioCount === 1 ? '' : 's'} | ${durationText} | ` +
     `rev ${state.rev}${state.dirty ? ' | unsaved changes' : ''} | ${state.openPath}. The user sees this project in the ` +
     'Dremu 谱面工坊 editor panel of the Web UI; use gorge_chart_get to read it, gorge_chart_edit to change it ' +
     '(edits appear live), and gorge_chart_save to write the .g files to disk.'
@@ -2024,7 +2248,7 @@ export function workspaceSummary(store) {
 }
 
 // ---------------------------------------------------------------------------
-// Plugin configuration
+// 12 · Plugin configuration
 // ---------------------------------------------------------------------------
 
 /**
@@ -2084,7 +2308,7 @@ export function normalizeConfig(config) {
 }
 
 // ---------------------------------------------------------------------------
-// Plugin entry point
+// 13 · Plugin entry point
 // ---------------------------------------------------------------------------
 
 /**
@@ -2130,6 +2354,19 @@ export function apply(ctx, config = {}) {
   })) {
     ctx.effect(() => ctx.tools.register(definition), `gorge-chart: ${definition.name} tool`)
   }
+
+  // Ship the Dremu chart-editing skill with the bundle. Optional: a composition
+  // without the skill registry still loads the tools and the editor.
+  ctx.inject(['skills'], (skillCtx) => {
+    skillCtx.effect(() => {
+      try {
+        return registerSkillProvider(skillCtx)
+      } catch (error) {
+        warn(logger, `gorge-chart: cannot register the chart-editing skill: ${messageOf(error)}`)
+        return () => {}
+      }
+    }, 'gorge-chart: chart-editing skill provider')
+  })
 
   ctx.inject(['webServer'], (httpCtx) => {
     for (const { path: routePath, handler } of createHandlers(store, {

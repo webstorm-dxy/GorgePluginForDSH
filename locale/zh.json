@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Dremu 谱面工坊",
-    "description": "为 Gorge / Dremu 谱面打造的全页制谱器：时间轴编辑、属性检视、曲线编辑器、音箱播放与试听、撤销重做，直接读写磁盘上的 .g 谱表；Agent 也能用 gorge_chart_get / gorge_chart_edit 工具读写同一份谱面，改动实时出现在编辑器里。"
+    "description": "为 Gorge / Dremu 谱面打造的全页制谱器：时间轴编辑、属性检视、曲线编辑器、音频乐段与多段播放、撤销重做，直接读写磁盘上的 .g 谱表；Agent 也能用 gorge_chart_get / gorge_chart_edit 工具读写同一份谱面，改动实时出现在编辑器里。"
   }
 }

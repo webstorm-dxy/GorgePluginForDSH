@@ -1,5 +1,12 @@
 .DS_Store
 node_modules/
 state/
+# Local project skill root (see skills/ and skills.js); discovery only.
+.dsh/
 *.bak
 *.g.bak
+
+# Local sample chart projects and media (not part of the bundle)
+demo/
+TheSpectreE/
+TheSpectreE.zip

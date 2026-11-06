@@ -17,7 +17,8 @@
  *      re-parse -> identical fields (and byte-stable second serialization).
  *   4. applyOps add/patch/remove/duplicate/setMeta/setStaffName/setPeriodConfig
  *      on a copy -> save -> reload preserves the change; errors/unknown ops are
- *      reported, never thrown.
+ *      reported, never thrown. addStaff/removeStaff create and delete whole
+ *      staff files (chart and storyboard).
  *   5. probeAudioFile on Song.wav returns the true duration.
  *
  * NOTE: Song.wav is 32-bit IEEE-float stereo 44.1 kHz (fmt tag 3, byteRate
@@ -318,7 +319,7 @@ test('missing / unknown files return nulls and never throw', () => {
   assert.deepEqual(missing, { duration: null, sampleRate: null, channels: null, format: 'wav' })
   const junkDir = makeTemp('dremu-probe-')
   const junk = path.join(junkDir, 'junk.mp3')
-  fs.writeFileSync(junk, crypto.randomBytes(256))
+  fs.writeFileSync(junk, Buffer.alloc(256, 0x41))
   const parsed = probeAudioFile(junk)
   assert.equal(parsed.format, 'mp3')
   assert.equal(parsed.duration, null)
@@ -965,13 +966,17 @@ test('wire state has the contract shape and exact staff/period/element keys', ()
   assert.equal(wire.dirty, false)
   assert.equal(wire.catalog, CATALOG)
   const project = wire.project
-  assert.deepEqual(Object.keys(project).sort(), ['assets', 'audio', 'dir', 'duration', 'form', 'id', 'staffs', 'tempo', 'title', 'warnings'])
+  assert.deepEqual(Object.keys(project).sort(), ['assets', 'audio', 'audioPeriods', 'dir', 'duration', 'form', 'id', 'staffs', 'tempo', 'title', 'warnings'])
+  assert.ok(Array.isArray(project.audioPeriods))
   assert.ok(path.isAbsolute(project.dir))
   assert.deepEqual(Object.keys(project.tempo).sort(), ['bpm', 'offset'])
   assert.deepEqual(Object.keys(project.audio).sort(), ['duration', 'file', 'name', 'offset'])
   assert.ok(path.isAbsolute(project.audio.file))
   for (const staff of project.staffs) {
-    assert.deepEqual(Object.keys(staff).sort(), ['className', 'displayName', 'file', 'form', 'id', 'kind', 'periods'])
+    const expectedStaffKeys = staff.kind === 'audio'
+      ? ['audioPeriods', 'className', 'displayName', 'file', 'form', 'id', 'kind', 'periods']
+      : ['className', 'displayName', 'file', 'form', 'id', 'kind', 'periods']
+    assert.deepEqual(Object.keys(staff).sort(), expectedStaffKeys)
     for (const period of staff.periods) {
       assert.deepEqual(Object.keys(period).sort(), ['elements', 'id', 'method', 'minLength', 'timeOffset'])
       for (const element of period.elements) {
@@ -1062,6 +1067,479 @@ test('starts with one chart staff/period and is savable + reloadable', () => {
   assert.equal(reloaded.staffs[0].periods[0].elements.length, 0)
   assert.equal(reloaded.title, 'nested-project', 'title is the directory basename on reload')
   assert.deepEqual(saveProject(reloaded), { written: [], errors: [] })
+})
+
+// ===========================================================================
+// K2. addStaff / removeStaff (left pane "添加谱表")
+// ===========================================================================
+
+section('K2. addStaff + removeStaff')
+
+test('addStaff creates a savable, reloadable chart staff with one period', () => {
+  const dir = makeTemp('dremu-addstaff-')
+  const project = createEmptyProject(dir, 'Add Staff')
+  const result = applyOps(project, [
+    {
+      op: 'addStaff',
+      kind: 'chart',
+      displayName: '第二谱表',
+      className: 'Staff2',
+      fileName: 'Staff2.g',
+      timeOffset: 1.5,
+      minLength: 8,
+    },
+    {
+      op: 'add',
+      staffId: 'Staff2.g',
+      periodId: 'p0',
+      element: { id: 'new-note', type: 'Dremu.DremuTap', fields: { laneName: 'L', hitTime: 0.5 } },
+    },
+  ])
+  assert.deepEqual(result.errors, [])
+  assert.equal(result.changed, true)
+  assert.deepEqual(result.created[0], { staffId: 'Staff2.g', kind: 'staff', staffKind: 'chart' })
+  const staff = staffById(project, 'Staff2.g')
+  assert.equal(staff.kind, 'chart')
+  assert.equal(staff.displayName, '第二谱表')
+  assert.equal(staff.className, 'Staff2')
+  assert.equal(staff._created, true)
+  assert.equal(staff.periods.length, 1)
+  assert.equal(staff.periods[0].timeOffset, 1.5)
+  assert.equal(staff.periods[0].minLength, 8)
+  assert.equal(staff.periods[0].elements.length, 1)
+  assert.equal(staff.periods[0].elements[0].start, 2, 'absolute start = timeOffset + hitTime')
+
+  const saved = saveProject(project)
+  assert.deepEqual(saved.errors, [])
+  assert.ok(saved.written.some((file) => file.endsWith('Staff2.g')))
+  const text = fs.readFileSync(path.join(dir, 'Staff2.g'), 'utf8')
+  assert.ok(/string displayName = "第二谱表"/.test(text))
+  assert.ok(/class Staff2/.test(text))
+  assert.ok(/timeOffset : 1\.5/.test(text))
+  assert.ok(/minLength : 8\.0/.test(text))
+
+  const reloaded = loadProject(dir)
+  const wire = projectToWire(reloaded, { rev: 1 })
+  const wireStaff = wire.project.staffs.find((item) => item.id === 'Staff2.g')
+  assert.ok(wireStaff, 'the new staff is in the wire project')
+  assert.equal(wireStaff.periods[0].elements.length, 1)
+  assert.equal(wireStaff.periods[0].elements[0].type, 'Dremu.DremuTap')
+  assert.equal(wireStaff.periods[0].elements[0].start, 2)
+})
+
+test('addStaff without names generates unique Staff2.g / Staff3.g identities', () => {
+  const project = createEmptyProject(makeTemp('dremu-addstaff-auto-'), 'Auto names')
+  applyOps(project, [{ op: 'addStaff', kind: 'chart', displayName: 'A' }])
+  applyOps(project, [{ op: 'addStaff', kind: 'chart', displayName: 'B' }])
+  assert.deepEqual(project.staffs.map((staff) => staff.id), ['DremuStaff.g', 'Staff.g', 'Staff2.g'])
+  assert.deepEqual(project.staffs.map((staff) => staff.className), ['DremuStaff', 'Staff', 'Staff2'])
+  assert.equal(project.staffs[1].displayName, 'A')
+  assert.equal(project.staffs[1].periods[0].minLength, null)
+})
+
+test('addStaff creates a DeentyStoryboard staff that accepts Image elements', () => {
+  const project = createEmptyProject(makeTemp('dremu-addstaff-sb-'), 'Storyboard')
+  const result = applyOps(project, [
+    { op: 'addStaff', kind: 'storyboard', displayName: '演出', className: 'Storyboard2' },
+    {
+      op: 'add',
+      staffId: 'Storyboard2.g',
+      periodId: 'p0',
+      element: { id: 'img', type: 'DeentyStoryboard.Image', fields: { assetName: 'bg.png', startMoment: 2 } },
+    },
+  ])
+  assert.deepEqual(result.errors, [])
+  const staff = staffById(project, 'Storyboard2.g')
+  assert.equal(staff.kind, 'storyboard')
+  assert.equal(staff.form, 'DeentyStoryboard')
+  assert.equal(projectToWire(project, { rev: 0 }).project.staffs.find((item) => item.id === staff.id).kind, 'storyboard')
+  assert.equal(staff.periods[0].elements[0].category, 'other')
+})
+
+test('addStaff rejects bad names and collisions without mutating', () => {
+  const project = createEmptyProject(makeTemp('dremu-addstaff-bad-'), 'Bad')
+  const before = project.staffs.length
+  const result = applyOps(project, [
+    { op: 'addStaff', kind: 'song' },
+    { op: 'addStaff', kind: 'storyboard', form: 'Dremu' },
+    { op: 'addStaff', className: 'bad-name' },
+    { op: 'addStaff', fileName: '../Escape.g' },
+    { op: 'addStaff', fileName: 'DremuStaff.g' },
+    { op: 'addStaff', className: 'DremuStaff' },
+    { op: 'addStaff', className: 'bad-name-2', unknownKey: true },
+  ])
+  assert.equal(result.changed, false)
+  assert.equal(project.staffs.length, before)
+  assert.ok(result.errors.some((error) => /kind must be "chart", "storyboard" or "audio"/.test(error)))
+  assert.ok(result.errors.some((error) => /storyboard staff must use form/.test(error)))
+  assert.ok(result.errors.some((error) => /className must be a C# identifier/.test(error)))
+  assert.ok(result.errors.some((error) => /fileName must/.test(error)))
+  assert.ok(result.errors.some((error) => /already exists in the project/.test(error)))
+  assert.ok(result.errors.some((error) => /unknown key "unknownKey"/.test(error)))
+})
+
+test('addStaff creates an empty @AudioStaff that saves and reloads', () => {
+  const dir = makeTemp('dremu-addstaff-audio-')
+  const project = createEmptyProject(dir, 'Audio')
+  const result = applyOps(project, [{ op: 'addStaff', kind: 'audio', displayName: '音轨' }])
+  assert.deepEqual(result.errors, [])
+  assert.equal(result.changed, true)
+  assert.equal(result.created[0].staffKind, 'audio')
+  const staff = project.staffs.find((item) => item.kind === 'audio')
+  assert.ok(staff)
+  assert.equal(staff.id, 'Song.g')
+  assert.equal(staff.displayName, '音轨')
+  assert.deepEqual(staff.audioPeriods, [])
+  assert.deepEqual(saveProject(project).errors, [])
+  const reloaded = loadProject(dir)
+  assert.equal(reloaded.staffs.find((item) => item.kind === 'audio').audioPeriods.length, 0)
+})
+
+test('addStaff refuses to overwrite a stray .g file on disk', () => {
+  const dir = makeTemp('dremu-addstaff-disk-')
+  const project = createEmptyProject(dir, 'Disk')
+  fs.writeFileSync(path.join(dir, 'Taken.g'), 'not a chart')
+  const result = applyOps(project, [{ op: 'addStaff', className: 'Taken' }])
+  assert.equal(result.changed, false)
+  assert.ok(result.errors.some((error) => /already exists on disk/.test(error)))
+  assert.equal(fs.readFileSync(path.join(dir, 'Taken.g'), 'utf8'), 'not a chart')
+})
+
+test('removeStaff deletes a session-created .g and rejects staffs from disk', () => {
+  const dir = makeTemp('dremu-removestaff-')
+  const project = createEmptyProject(dir, 'Remove')
+  assert.deepEqual(saveProject(project).errors, [])
+  assert.deepEqual(applyOps(project, [{ op: 'addStaff', className: 'Temp', displayName: '临时' }]).errors, [])
+  assert.deepEqual(saveProject(project).errors, [])
+  const createdFile = path.join(dir, 'Temp.g')
+  assert.ok(fs.existsSync(createdFile))
+
+  const rejected = applyOps(project, [{ op: 'removeStaff', staffId: 'DremuStaff.g' }])
+  assert.equal(rejected.changed, false)
+  assert.ok(rejected.errors.some((error) => /only staffs created in this session/.test(error)))
+  assert.ok(fs.existsSync(path.join(dir, 'DremuStaff.g')))
+
+  const removed = applyOps(project, [{ op: 'removeStaff', staffId: 'Temp.g' }])
+  assert.deepEqual(removed.errors, [])
+  assert.equal(removed.changed, true)
+  assert.ok(!project.staffs.some((staff) => staff.id === 'Temp.g'))
+  assert.ok(!fs.existsSync(createdFile), 'the created .g file is gone')
+
+  // Undo of the removal / redo of addStaff can create the same identity again.
+  const readded = applyOps(project, [{ op: 'addStaff', className: 'Temp', displayName: '临时' }])
+  assert.deepEqual(readded.errors, [])
+  assert.ok(project.staffs.some((staff) => staff.id === 'Temp.g'))
+  assert.deepEqual(saveProject(project).errors, [])
+  assert.ok(fs.existsSync(createdFile))
+})
+
+test('removeStaff before the first save only touches the in-memory model', () => {
+  const dir = makeTemp('dremu-removestaff-unsaved-')
+  const project = createEmptyProject(dir, 'Unsaved')
+  assert.deepEqual(applyOps(project, [{ op: 'addStaff', className: 'Scratch' }]).errors, [])
+  assert.ok(!fs.existsSync(path.join(dir, 'Scratch.g')))
+  assert.deepEqual(applyOps(project, [{ op: 'removeStaff', staffId: 'Scratch.g' }]).errors, [])
+  assert.ok(!fs.existsSync(path.join(dir, 'Scratch.g')))
+  assert.ok(!project.staffs.some((staff) => staff.id === 'Scratch.g'))
+})
+
+test('removeStaff deleteFile:true deletes a staff loaded from disk (and its .bak)', () => {
+  const dir = makeTemp('dremu-removestaff-disk-')
+  const project = createEmptyProject(dir, 'Delete disk staff')
+  assert.deepEqual(saveProject(project).errors, [])
+  const chartFile = path.join(dir, 'DremuStaff.g')
+  fs.writeFileSync(chartFile + '.bak', 'previous bytes')
+  // A minimal @AudioStaff, so the removal path also has to clear project.audio.
+  fs.writeFileSync(
+    path.join(dir, 'Song.g'),
+    [
+      '[',
+      '    string displayName = "音频"',
+      ']',
+      '@AudioStaff',
+      'class Song',
+      '{',
+      '    [',
+      '        GorgeFramework.PeriodConfig^ config = GorgeFramework.PeriodConfig : {',
+      '            timeOffset : 0.0,',
+      '        }',
+      '    ]',
+      '    @Song',
+      '    static GorgeFramework.AudioAsset^ GetSong()',
+      '    {',
+      '        return GorgeFramework.WavAudioAsset : {',
+      '            name : "song",',
+      '            wavFilePath : "song.wav",',
+      '        };',
+      '    }',
+      '}',
+    ].join('\n'),
+  )
+
+  const loaded = loadProject(dir)
+  assert.ok(loaded.audio, 'the audio staff is mapped to project.audio')
+  assert.equal(loaded.staffs.length, 2)
+
+  const refused = applyOps(loaded, [{ op: 'removeStaff', staffId: 'DremuStaff.g' }])
+  assert.equal(refused.changed, false)
+  assert.ok(refused.errors.some((error) => /deleteFile:true/.test(error)))
+  assert.ok(fs.existsSync(chartFile), 'a disk staff is not deleted without the explicit flag')
+
+  const badFlag = applyOps(loaded, [{ op: 'removeStaff', staffId: 'DremuStaff.g', deleteFile: 'yes' }])
+  assert.equal(badFlag.changed, false)
+  assert.ok(badFlag.errors.some((error) => /deleteFile must be a boolean/.test(error)))
+
+  const removed = applyOps(loaded, [{ op: 'removeStaff', staffId: 'DremuStaff.g', deleteFile: true }])
+  assert.deepEqual(removed.errors, [])
+  assert.equal(removed.changed, true)
+  assert.ok(!fs.existsSync(chartFile), 'the staff file is gone')
+  assert.ok(!fs.existsSync(chartFile + '.bak'), 'the .bak backup is gone too')
+  assert.equal(loaded.staffs.length, 1)
+
+  const removedAudio = applyOps(loaded, [{ op: 'removeStaff', staffId: 'Song.g', deleteFile: true }])
+  assert.deepEqual(removedAudio.errors, [])
+  assert.equal(loaded.audio, null, 'removing the audio staff clears project.audio')
+  assert.equal(loaded.staffs.length, 0)
+  assert.equal(loaded.duration, 0)
+})
+
+// ===========================================================================
+// K3. audio periods (add / patch / remove / import)
+// ===========================================================================
+
+section('K3. audio periods')
+
+/** Write a small deterministic 16-bit mono WAV (12 s @ 8 kHz by default). */
+function writeTestWav(file, seconds = 12, sampleRate = 8000) {
+  const frames = Math.round(seconds * sampleRate)
+  const data = Buffer.alloc(frames * 2)
+  for (let frame = 0; frame < frames; frame += 1) {
+    const sample = Math.round(Math.sin((2 * Math.PI * 440 * frame) / sampleRate) * 14000)
+    data.writeInt16LE(sample, frame * 2)
+  }
+  const header = Buffer.alloc(44)
+  header.write('RIFF', 0)
+  header.writeUInt32LE(36 + data.length, 4)
+  header.write('WAVE', 8)
+  header.write('fmt ', 12)
+  header.writeUInt32LE(16, 16)
+  header.writeUInt16LE(1, 20)
+  header.writeUInt16LE(1, 22)
+  header.writeUInt32LE(sampleRate, 24)
+  header.writeUInt32LE(sampleRate * 2, 28)
+  header.writeUInt16LE(2, 32)
+  header.writeUInt16LE(16, 34)
+  header.write('data', 36)
+  header.writeUInt32LE(data.length, 40)
+  fs.writeFileSync(file, Buffer.concat([header, data]))
+  return { frames, sampleRate, duration: frames / sampleRate }
+}
+
+/**
+ * A temp project with one `Song.g` (timeOffset 0) and a generated `demo.wav`.
+ * It deliberately does not copy the mutable demo project, so a user edit to
+ * `demo/Song.g` cannot change these assertions.
+ */
+function makeAudioProject(prefix) {
+  const dir = makeTemp(prefix)
+  writeTestWav(path.join(dir, 'demo.wav'))
+  // A chart staff gives the audio ops a non-audio target to reject.
+  saveProject(createEmptyProject(dir, 'Audio test'))
+  fs.writeFileSync(
+    path.join(dir, 'Song.g'),
+    [
+      '[',
+      '    string displayName = "音频"',
+      ']',
+      '@AudioStaff',
+      'class Song',
+      '{',
+      '    [',
+      '        GorgeFramework.PeriodConfig^ config = GorgeFramework.PeriodConfig : {',
+      '            timeOffset : 0.0,',
+      '        }',
+      '    ]',
+      '    @Song',
+      '    static GorgeFramework.AudioAsset^ GetSong()',
+      '    {',
+      '        return GorgeFramework.WavAudioAsset : {',
+      '            name : "demo",',
+      '            wavFilePath : "demo.wav",',
+      '        };',
+      '    }',
+      '',
+      '',
+      '}',
+      '',
+    ].join('\n'),
+  )
+  return dir
+}
+
+const AUDIO_PERIOD_KEYS = [
+  'assetType',
+  'channels',
+  'duration',
+  'file',
+  'format',
+  'id',
+  'method',
+  'missing',
+  'name',
+  'offset',
+  'relativePath',
+  'sampleRate',
+  'staffId',
+]
+
+test('addAudioPeriod appends a @Song clip, updates wire/duration, saves and reloads', () => {
+  const dir = makeAudioProject('dremu-audio-add-')
+  const project = loadProject(dir)
+  assert.equal(project.audioPeriods.length, 1)
+  assert.equal(project.audioPeriods[0].method, 'GetSong')
+  const result = applyOps(project, [
+    { op: 'addAudioPeriod', staffId: 'Song.g', file: 'demo.wav', name: '第二段', timeOffset: 20 },
+  ])
+  assert.deepEqual(result.errors, [])
+  assert.equal(result.changed, true)
+  assert.equal(result.created.length, 1)
+  assert.equal(result.created[0].kind, 'audioPeriod')
+  assert.equal(result.created[0].method, 'GetSong1')
+  assert.equal(project.audioPeriods.length, 2)
+  const second = project.audioPeriods.find((clip) => clip.method === 'GetSong1')
+  assert.ok(second)
+  assert.equal(second.name, '第二段')
+  assert.equal(second.relativePath, 'demo.wav')
+  assert.equal(second.offset, 20)
+  assert.ok(second.duration > 11 && second.duration < 13, `duration ${second.duration}`)
+  assert.equal(second.missing, false)
+  assert.equal(project.duration, 32, 'project covers the second clip (20 + 12)')
+  assert.equal(project.audio.offset, 0, 'legacy project.audio stays the first clip')
+
+  const wire = projectToWire(project, { rev: 2 }).project
+  assert.equal(wire.audioPeriods.length, 2)
+  assert.deepEqual(Object.keys(wire.audioPeriods[0]).sort(), AUDIO_PERIOD_KEYS.slice().sort())
+  assert.ok(path.isAbsolute(wire.audioPeriods[1].file))
+  assert.deepEqual(saveProject(project).errors, [])
+  const text = fs.readFileSync(path.join(dir, 'Song.g'), 'utf8')
+  assert.ok(text.includes('static GorgeFramework.AudioAsset^ GetSong1()'))
+  assert.ok(text.includes('timeOffset : 20.0,'))
+  assert.ok(text.includes('name : "第二段",'))
+  const reloaded = loadProject(dir)
+  assert.equal(reloaded.audioPeriods.length, 2)
+  assert.deepEqual(reloaded.audioPeriods.map((clip) => clip.offset), [0, 20])
+  assert.equal(reloaded.duration, 32)
+})
+
+test('addAudioPeriod imports an external file and never overwrites an audio asset', () => {
+  const dir = makeAudioProject('dremu-audio-import-')
+  const sourceDir = makeTemp('dremu-audio-source-')
+  const source = path.join(sourceDir, '外部 音频.wav')
+  writeTestWav(source)
+  const project = loadProject(dir)
+  const imported = applyOps(project, [{ op: 'addAudioPeriod', sourcePath: source, timeOffset: 3 }])
+  assert.deepEqual(imported.errors, [])
+  assert.equal(imported.created[0].imported, true)
+  assert.equal(imported.created[0].file, '外部 音频.wav')
+  assert.ok(fs.existsSync(path.join(dir, '外部 音频.wav')), 'the external file was copied into the project')
+  assert.ok(project.assets.audio.includes('外部 音频.wav'))
+  const again = applyOps(project, [{ op: 'addAudioPeriod', sourcePath: source, timeOffset: 5 }])
+  assert.deepEqual(again.errors, [])
+  assert.equal(again.created[0].file, '外部 音频_1.wav', 'a second import gets a unique name')
+  assert.ok(fs.existsSync(path.join(dir, '外部 音频_1.wav')))
+  assert.deepEqual(saveProject(project).errors, [])
+  const reloaded = loadProject(dir)
+  assert.equal(reloaded.audioPeriods.length, 3)
+  assert.deepEqual(reloaded.audioPeriods.map((clip) => clip.offset), [0, 3, 5])
+})
+
+test('patchAudioPeriod moves/renames and removeAudioPeriod is undoable by addAudioPeriod', () => {
+  const dir = makeAudioProject('dremu-audio-patch-')
+  const project = loadProject(dir)
+  applyOps(project, [{ op: 'addAudioPeriod', staffId: 'Song.g', file: 'demo.wav', name: '两段', timeOffset: 10 }])
+  const clip = project.audioPeriods.find((item) => item.method === 'GetSong1')
+  assert.ok(clip)
+  fs.copyFileSync(path.join(dir, 'demo.wav'), path.join(dir, 'alt.wav'))
+  const patched = applyOps(project, [
+    { op: 'patchAudioPeriod', staffId: 'Song.g', audioPeriodId: clip.id, fields: { timeOffset: 4.5, name: '改名', file: 'alt.wav' } },
+  ])
+  assert.deepEqual(patched.errors, [])
+  const moved = project.audioPeriods.find((item) => item.method === 'GetSong1')
+  assert.equal(moved.offset, 4.5)
+  assert.equal(moved.name, '改名')
+  assert.equal(moved.relativePath, 'alt.wav')
+  assert.equal(project.duration, 16.5)
+
+  const removed = applyOps(project, [{ op: 'removeAudioPeriod', staffId: 'Song.g', audioPeriodId: moved.id }])
+  assert.deepEqual(removed.errors, [])
+  assert.equal(project.audioPeriods.length, 1)
+  assert.equal(project.duration, 12)
+  assert.ok(fs.existsSync(path.join(dir, 'demo.wav')), 'removing a period keeps the audio file')
+
+  const restored = applyOps(project, [
+    { op: 'addAudioPeriod', staffId: 'Song.g', file: 'alt.wav', name: '改名', timeOffset: 4.5, method: 'GetSong1' },
+  ])
+  assert.deepEqual(restored.errors, [])
+  assert.equal(project.audioPeriods.length, 2)
+  assert.equal(project.audioPeriods.find((item) => item.method === 'GetSong1').offset, 4.5)
+  assert.deepEqual(saveProject(project).errors, [])
+  assert.ok(fs.readFileSync(path.join(dir, 'Song.g'), 'utf8').includes('wavFilePath : "alt.wav",'))
+  const reloadedAudio = loadProject(dir)
+  assert.equal(reloadedAudio.audioPeriods.length, 2)
+  assert.equal(reloadedAudio.audioPeriods.find((item) => item.method === 'GetSong1').relativePath, 'alt.wav')
+})
+
+test('addAudioPeriod auto-creates Song.g when the project has no audio staff', () => {
+  const dir = makeTemp('dremu-audio-autostaff-')
+  writeTestWav(path.join(dir, 'demo.wav'))
+  const project = createEmptyProject(dir, 'No audio yet')
+  assert.ok(!project.staffs.some((staff) => staff.kind === 'audio'))
+  const result = applyOps(project, [{ op: 'addAudioPeriod', file: 'demo.wav', name: '主题', timeOffset: 0 }])
+  assert.deepEqual(result.errors, [])
+  const created = project.staffs.find((staff) => staff.kind === 'audio')
+  assert.ok(created, 'an audio staff was created')
+  assert.equal(created.id, 'Song.g')
+  assert.equal(created.displayName, '音频')
+  assert.equal(created.audioPeriods.length, 1)
+  assert.deepEqual(result.created.map((entry) => entry.kind), ['staff', 'audioPeriod'])
+  assert.deepEqual(saveProject(project).errors, [])
+  assert.ok(fs.existsSync(path.join(dir, 'Song.g')))
+  const reloaded = loadProject(dir)
+  assert.equal(reloaded.staffs.find((staff) => staff.kind === 'audio').audioPeriods.length, 1)
+  assert.ok(reloaded.audio)
+})
+
+test('bad audio-period ops are reported without mutation; missing files validate', () => {
+  const dir = makeAudioProject('dremu-audio-bad-')
+  fs.writeFileSync(path.join(dir, 'not-audio.txt'), 'hello')
+  const project = loadProject(dir)
+  const before = project.audioPeriods.length
+  const bad = applyOps(project, [
+    { op: 'addAudioPeriod', staffId: 'Song.g' },
+    { op: 'addAudioPeriod', staffId: 'Song.g', file: 'nope.wav' },
+    { op: 'addAudioPeriod', staffId: 'Song.g', file: 'not-audio.txt' },
+    { op: 'addAudioPeriod', staffId: 'Song.g', file: 'demo.wav', timeOffset: -1 },
+    { op: 'addAudioPeriod', staffId: 'DremuStaff.g', file: 'demo.wav' },
+    { op: 'addAudioPeriod', staffId: 'Missing.g', file: 'demo.wav' },
+    { op: 'patchAudioPeriod', staffId: 'Song.g', audioPeriodId: 'a9', fields: { timeOffset: 1 } },
+    { op: 'removeAudioPeriod', staffId: 'Song.g', audioPeriodId: 'a9' },
+    { op: 'addAudioPeriod', staffId: 'Song.g', file: 'demo.wav', method: 'bad-name' },
+  ])
+  assert.equal(bad.changed, false)
+  assert.equal(project.audioPeriods.length, before)
+  assert.ok(bad.errors.some((error) => /requires file/.test(error)))
+  assert.ok(bad.errors.some((error) => /audio file not found/.test(error)))
+  assert.ok(bad.errors.some((error) => /unsupported audio file type/.test(error)))
+  assert.ok(bad.errors.some((error) => /timeOffset must be a finite number >= 0/.test(error)))
+  assert.ok(bad.errors.some((error) => /is not an audio staff/.test(error)))
+  assert.ok(bad.errors.some((error) => /unknown staff/.test(error)))
+  assert.ok(bad.errors.some((error) => /unknown audio period/.test(error)))
+  assert.ok(bad.errors.some((error) => /method must be a C# identifier/.test(error)))
+
+  fs.unlinkSync(path.join(dir, 'demo.wav'))
+  const missing = loadProject(dir)
+  assert.equal(missing.audioPeriods[0].missing, true)
+  assert.ok(validateProject(missing).some((issue) => issue.code === 'missing-audio' && issue.level === 'error'))
 })
 
 // ===========================================================================

@@ -391,8 +391,12 @@ let scheduled = false;
 let mountedRoot = null;
 let effectQueue = [];
 
-function slotFor(index) {
-  if (!hookSlots[index]) hookSlots[index] = { hooks: [], cursor: 0 };
+function slotFor(index, type) {
+  // A different component type at the same tree position is a remount: React
+  // discards the old fibre (and its hook state), so the harness must too.
+  if (!hookSlots[index] || hookSlots[index].type !== type) {
+    hookSlots[index] = { type, hooks: [], cursor: 0 };
+  }
   return hookSlots[index];
 }
 
@@ -511,7 +515,7 @@ function renderNode(node) {
   const props = node.props || {};
   if (typeof type === 'function') {
     const previous = activeSlot;
-    activeSlot = slotFor(renderCursor);
+    activeSlot = slotFor(renderCursor, type);
     renderCursor += 1;
     activeSlot.cursor = 0;
     let output;
@@ -662,6 +666,19 @@ const CATALOG = {
         { name: 'holdLine', type: 'curve', default: { t: 'obj', type: 'GorgeFramework.LinearCurve', fields: { timeStart: 0, valueStart: 0, timeEnd: 1, valueEnd: 1 } } },
       ],
     },
+    {
+      type: 'DeentyStoryboard.Image',
+      shortName: 'Image',
+      category: 'other',
+      group: 'DeentyStoryboard',
+      color: '#f472b6',
+      timing: { start: 'startMoment', duration: 'keepTime', lane: null },
+      fields: [
+        { name: 'assetName', type: 'string', default: '' },
+        { name: 'startMoment', type: 'number', default: 0 },
+        { name: 'keepTime', type: 'number', default: 1 },
+      ],
+    },
   ],
   valueTypes: {},
   palettes: {},
@@ -674,7 +691,24 @@ const PROJECT = {
   form: 'Dremu',
   tempo: { bpm: 120, offset: 0 },
   duration: 40,
-  audio: { name: 'Song.wav', file: '/tmp/gorge-fixture/Song.wav', duration: 40 },
+  audio: { name: 'Song.wav', file: '/tmp/gorge-fixture/Song.wav', duration: 12 },
+  audioPeriods: [
+    {
+      id: 'a0',
+      staffId: 'Song.g',
+      method: 'GetSong',
+      name: 'Song',
+      assetType: 'GorgeFramework.WavAudioAsset',
+      relativePath: 'Song.wav',
+      file: '/tmp/gorge-fixture/Song.wav',
+      offset: 0,
+      duration: 12,
+      sampleRate: 8000,
+      channels: 1,
+      format: 'wav',
+      missing: false,
+    },
+  ],
   assets: { images: [], audio: ['Song.wav'] },
   warnings: ['样例警告'],
   staffs: [
@@ -750,6 +784,32 @@ const PROJECT = {
         },
       ],
     },
+    {
+      id: 'Song.g',
+      file: '/tmp/gorge-fixture/Song.g',
+      kind: 'audio',
+      form: '',
+      displayName: '音频',
+      className: 'Song',
+      periods: [],
+      audioPeriods: [
+        {
+          id: 'a0',
+          staffId: 'Song.g',
+          method: 'GetSong',
+          name: 'Song',
+          assetType: 'GorgeFramework.WavAudioAsset',
+          relativePath: 'Song.wav',
+          file: '/tmp/gorge-fixture/Song.wav',
+          offset: 0,
+          duration: 12,
+          sampleRate: 8000,
+          channels: 1,
+          format: 'wav',
+          missing: false,
+        },
+      ],
+    },
   ],
 };
 
@@ -772,6 +832,48 @@ async function loadRealState() {
     catalog: wire.catalog || model.CATALOG,
   };
 }
+
+/** 12 s 8 kHz mono click track (kick on beats, hat on offbeats) for BPM tests. */
+function makeClickWav(bpm = 128, seconds = 12, sampleRate = 8000) {
+  const frames = sampleRate * seconds;
+  const pcm = Buffer.alloc(frames * 2);
+  let seed = 7;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) % 4294967296;
+    return (seed / 4294967296) * 2 - 1;
+  };
+  for (let beat = 0; beat < seconds; beat += 60 / bpm) {
+    const start = Math.round(beat * sampleRate);
+    for (let i = 0; i < Math.min(frames - start, Math.round(0.12 * sampleRate)); i += 1) {
+      const value = Math.sin((2 * Math.PI * 60 * i) / sampleRate) * Math.exp(-i / (0.03 * sampleRate)) * 0.9;
+      pcm.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round(value * 32767))), (start + i) * 2);
+    }
+    const hat = Math.round((beat + 30 / bpm) * sampleRate);
+    for (let i = 0; i < Math.min(frames - hat, Math.round(0.03 * sampleRate)); i += 1) {
+      const at = hat + i;
+      const current = pcm.readInt16LE(at * 2) / 32767;
+      const value = current + random() * Math.exp(-i / (0.008 * sampleRate)) * 0.35;
+      pcm.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round(value * 32767))), at * 2);
+    }
+  }
+  const wav = Buffer.alloc(44 + pcm.length);
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(36 + pcm.length, 4);
+  wav.write('WAVE', 8);
+  wav.write('fmt ', 12);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(pcm.length, 40);
+  pcm.copy(wav, 44);
+  return wav;
+}
+const CLICK_WAV = makeClickWav();
 
 /** fetch stub keyed by URL. */
 let stateResponse = { ok: true, rev: 3, dirty: false, openPath: PROJECT.dir, recent: [PROJECT.dir], project: PROJECT, catalog: CATALOG };
@@ -802,7 +904,16 @@ function mockFetch(url, options) {
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, written: ['DremuStaff.g'], errors: [], rev: 5, dirty: false }) });
   }
   if (target.indexOf('/plugins/gorge-chart/file') !== -1) {
-    return Promise.resolve({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(64), json: async () => ({}) });
+    const audioBuffer = target.indexOf('.wav') !== -1 ? CLICK_WAV : null;
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => {
+        if (!audioBuffer) return new ArrayBuffer(64);
+        return audioBuffer.buffer.slice(audioBuffer.byteOffset, audioBuffer.byteOffset + audioBuffer.byteLength);
+      },
+      json: async () => ({}),
+    });
   }
   if (target.indexOf('/plugins/gorge-chart/state') !== -1) {
     return Promise.resolve({ ok: true, status: 200, json: async () => stateResponse });
@@ -842,6 +953,120 @@ assert.equal(typeof captured.factory, 'function', 'factory missing');
 const clientPlugin = captured.factory(sandboxRequire);
 assert.equal(typeof clientPlugin.apply, 'function', 'client plugin has no apply');
 assert.deepEqual(clientPlugin.inject, ['slots', 'locale'], 'client plugin inject list');
+
+// ---- Audio clip model: multi-@Song clips + legacy single-audio fallback ----
+{
+  const audio = clientPlugin.__audio;
+  assert.ok(audio && typeof audio.audioClipsOf === 'function', 'client exposes no __audio test helpers');
+  assert.ok(typeof audio.clipActiveAt === 'function');
+  const legacy = audio.audioClipsOf({ audio: { file: '/tmp/legacy.wav', name: 'Legacy', duration: 7, offset: 2.5 } });
+  assert.equal(legacy.length, 1);
+  assert.equal(legacy[0].offset, 2.5);
+  assert.equal(legacy[0].name, 'Legacy');
+  const clipA = { id: 'a0', staffId: 'Song.g', file: '/tmp/a.wav', offset: 1, duration: 2 };
+  const clipB = { id: 'a1', staffId: 'Song.g', file: '/tmp/b.wav', offset: 5, duration: 3 };
+  const multi = audio.audioClipsOf({ staffs: [{ id: 'Song.g', kind: 'audio', audioPeriods: [clipA, clipB] }], audioPeriods: [clipA, clipB] });
+  assert.equal(multi.length, 2, 'both @Song clips must reach the transport');
+  assert.equal(audio.clipActiveAt(clipA, 0.999), false);
+  assert.equal(audio.clipActiveAt(clipA, 1), true);
+  assert.equal(audio.clipActiveAt(clipA, 2.999), true);
+  assert.equal(audio.clipActiveAt(clipA, 3), false);
+  assert.equal(audio.clipActiveAt(clipB, 4.5), false);
+  assert.equal(audio.clipActiveAt(clipA, 4.5), false, 'the two clips leave a gap at 3…5 s');
+  assert.equal(audio.clipActiveAt(clipB, 5), true);
+
+  // Spectrogram: a steady 440 Hz tone must peak in the matching log band.
+  assert.equal(typeof audio.spectrumFromSamples, 'function', 'spectrum computation is not exposed');
+  const spectrum = audio.spectrumFromSamples(
+    (frame) => Math.sin((2 * Math.PI * 440 * frame) / 8000),
+    8000,
+    8000,
+  );
+  assert.ok(spectrum, 'spectrum computation returned null');
+  assert.equal(spectrum.columns, 360);
+  assert.equal(spectrum.bands, 128);
+  assert.equal(spectrum.data.length, spectrum.columns * spectrum.bands);
+  const column = 180;
+  let peakBand = -1;
+  let peakValue = -1;
+  for (let band = 0; band < spectrum.bands; band += 1) {
+    const value = spectrum.data[column * spectrum.bands + band];
+    if (value > peakValue) {
+      peakValue = value;
+      peakBand = band;
+    }
+  }
+  assert.ok(peakValue > 100, 'spectrum has no strong band for a full-scale sine');
+  const bandHz = spectrum.minHz * Math.pow(spectrum.maxHz / spectrum.minHz, (peakBand + 0.5) / spectrum.bands);
+  assert.ok(Math.abs(bandHz - 440) < 100, 'spectrum peak band is at ' + bandHz.toFixed(1) + ' Hz, expected ~440 Hz');
+  const silence = audio.spectrumFromSamples(() => 0, 4000, 8000);
+  assert.ok(silence && silence.data.every((value) => value === 0), 'silent audio must produce an empty spectrum');
+
+  // WAV fast path: parse a real PCM buffer into peaks + spectrogram.
+  const sampleRate = 8000;
+  const frames = sampleRate;
+  const pcm = Buffer.alloc(frames * 2);
+  for (let frame = 0; frame < frames; frame += 1) {
+    pcm.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * frame) / sampleRate) * 14000), frame * 2);
+  }
+  const wav = Buffer.alloc(44 + pcm.length);
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(36 + pcm.length, 4);
+  wav.write('WAVE', 8);
+  wav.write('fmt ', 12);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(pcm.length, 40);
+  pcm.copy(wav, 44);
+  const wavBuffer = wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength);
+  const wavAnalysis = audio.wavPeaks(wavBuffer, 128);
+  assert.ok(wavAnalysis, 'wavPeaks rejected a valid PCM WAV');
+  assert.ok(Math.abs(wavAnalysis.duration - 1) < 0.01, 'WAV duration: ' + wavAnalysis.duration);
+  assert.equal(wavAnalysis.channels, 1);
+  assert.equal(wavAnalysis.peaks.length, 128);
+  assert.ok(wavAnalysis.peaks.some((peak) => peak > 0.3), 'WAV peaks are silent');
+  assert.ok(wavAnalysis.spectrum && wavAnalysis.spectrum.data.length === wavAnalysis.spectrum.columns * wavAnalysis.spectrum.bands, 'WAV analysis has no spectrum');
+
+  // BPM detection: a kick+hat click track at 128 BPM must be recognized.
+  const bpmRate = 8000;
+  const bpmSeconds = 12;
+  const bpmFrames = bpmRate * bpmSeconds;
+  const bpmSamples = new Float32Array(bpmFrames);
+  let bpmSeed = 7;
+  const bpmRand = () => {
+    bpmSeed = (bpmSeed * 1664525 + 1013904223) % 4294967296;
+    return (bpmSeed / 4294967296) * 2 - 1;
+  };
+  const clickTrack = (bpm) => {
+    bpmSamples.fill(0);
+    const period = 60 / bpm;
+    for (let beat = 0; beat < bpmSeconds; beat += period) {
+      const start = Math.round(beat * bpmRate);
+      for (let i = 0; i < Math.min(bpmFrames - start, Math.round(0.12 * bpmRate)); i += 1) {
+        bpmSamples[start + i] += Math.sin((2 * Math.PI * 60 * i) / bpmRate) * Math.exp(-i / (0.03 * bpmRate)) * 0.9;
+      }
+      const hat = Math.round((beat + period / 2) * bpmRate);
+      for (let i = 0; i < Math.min(bpmFrames - hat, Math.round(0.03 * bpmRate)); i += 1) {
+        bpmSamples[hat + i] += bpmRand() * Math.exp(-i / (0.008 * bpmRate)) * 0.35;
+      }
+    }
+  };
+  clickTrack(128);
+  const bpmSpectrum = audio.spectrumFromSamples((frame) => bpmSamples[frame], bpmFrames, bpmRate);
+  assert.ok(bpmSpectrum, 'click track produced no spectrum');
+  const detected = audio.detectBpmFromSpectrum(bpmSpectrum, bpmSeconds);
+  assert.ok(detected, 'BPM detector returned null');
+  assert.ok(Math.abs(detected.bpm - 128) <= 1, 'BPM detector returned ' + detected.bpm + ', expected ~128');
+  assert.ok(detected.confidence > 0.3, 'BPM confidence is too low: ' + detected.confidence);
+  assert.equal(audio.detectBpmFromSpectrum(null, 12), null);
+  assert.equal(audio.detectBpmFromSpectrum(bpmSpectrum, 1), null, 'clips shorter than 3 s must not be analyzed');
+}
 
 // ---------------------------------------------------------------------------
 // Mount the page
@@ -905,6 +1130,9 @@ const expectedLane = (() => {
   return null;
 })();
 assert.ok(text.includes(expectedTitle), 'project title missing: ' + expectedTitle);
+const autoBpmButton = findHost(tree, (host) => host.props && String(host.className).includes('dgc-autoBpm'));
+assert.ok(autoBpmButton, 'inspector has no auto-BPM button');
+assert.equal(autoBpmButton.props.disabled, false, 'auto-BPM is still disabled after audio analysis');
 assert.ok(expectedStaff && text.includes(expectedStaff.displayName), 'staff display name missing');
 assert.ok(expectedLane && text.includes(expectedLane), 'lane name missing: ' + expectedLane);
 if (!isRealMode) assert.ok(text.includes('Fixture Song'));
@@ -1073,7 +1301,7 @@ const saveButton = findHost(tree, (host) => {
 });
 if (saveButton) {
   saveButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: saveButton });
-  await settle();
+  tree = await settle();
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.ok(calls.some((url) => url.indexOf('/plugins/gorge-chart/save') !== -1), 'save button did not POST /save');
 }
@@ -1124,6 +1352,33 @@ if (!isRealMode) {
     return host;
   }
   assert.ok(timelineCanvas(), 'timeline canvas missing');
+
+  // A lane element bar must track the pointer while it is dragged, exactly
+  // like notes do, instead of sitting still and only jumping on release.
+  // Grab the lane bar at 12 s (clear of the tap at 2 s and the hold at 6–8 s)
+  // and move it one second right: 46 px at pps = 46 → its left edge must move
+  // from x = 148 to x = 194 inside the same pointer-move frame.
+  {
+    pointer(timelineCanvas(), 'PointerDown', 700, 112);
+    // Resolve the canvas again for the move: the harness rebuilds host nodes on
+    // render, and only the node current at paint time records the preview frame.
+    const laneCanvas = timelineCanvas();
+    pointer(laneCanvas, 'PointerMove', 746, 112);
+    const laneContext = laneCanvas.getContext('2d');
+    const laneBar = laneContext.rects.find(
+      (rect) =>
+        rect.kind === 'fillRect' &&
+        rect.w > 100 &&
+        Math.abs(rect.y - 98) < 1 &&
+        Math.abs(rect.x - (148 + 46)) < 2,
+    );
+    assert.ok(
+      laneBar,
+      'lane bar did not follow the pointer during a drag; wide rects in the last frame: ' +
+        JSON.stringify(laneContext.rects.filter((rect) => rect.w > 100)),
+    );
+    pointer(timelineCanvas(), 'PointerCancel', 746, 112);
+  }
 
   // Geometry: GUTTER_W = 148, view starts at t0 = 0 with pps = 46, header
   // (ruler 26 + waveform 44) = 70. Row 0 is the staff (谱表) group header
@@ -1199,6 +1454,307 @@ if (!isRealMode) {
   assert.equal(addOp.element.fields.laneName, 'Main1', 'placed note must join the row lane');
   assert.ok(Math.abs(addOp.element.fields.hitTime - 5) < 0.2, 'placed note hitTime should be ~5, got ' + addOp.element.fields.hitTime);
   assert.ok(addOp.periodId, 'add op carries no periodId');
+
+  // -------------------------------------------------------------------------
+  // Left pane: create a staff from the header "+", then add an element to it.
+  // -------------------------------------------------------------------------
+  const addStaffButton = findHost(
+    tree,
+    (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'addStaff',
+  );
+  assert.ok(addStaffButton, 'staff section has no add button');
+  addStaffButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: addStaffButton, currentTarget: addStaffButton });
+  tree = await settle();
+  assert.ok(flattenText(tree, []).join(' ').includes('newStaff'), 'new staff dialog did not open');
+
+  const createStaffButton = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return String(host.className).indexOf('dgc-btn') !== -1 && flattenText(host.rendered, []).join('').trim() === 'create';
+  });
+  assert.ok(createStaffButton, 'new staff dialog has no create button');
+  createStaffButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: createStaffButton });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const staffBatch = editBodies[editBodies.length - 1];
+  const staffOp = staffBatch && staffBatch.ops.find((op) => op.op === 'addStaff');
+  assert.ok(staffOp, 'adding a staff did not POST an addStaff op');
+  assert.equal(staffOp.kind, 'chart');
+  assert.equal(staffOp.form, 'Dremu');
+  assert.equal(staffOp.className, 'Staff');
+  assert.equal(staffOp.fileName, 'Staff.g');
+  assert.equal(staffOp.displayName, 'defaultStaffName');
+  assert.ok(flattenText(tree, []).join(' ').includes('defaultStaffName'), 'the new staff is not listed in the left pane');
+
+  const addElementButton = findHost(
+    tree,
+    (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'addElement',
+  );
+  assert.ok(addElementButton, 'element section has no add button');
+  addElementButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: addElementButton, currentTarget: addElementButton });
+  tree = await settle();
+  const paletteRow = findHost(
+    tree,
+    (host) =>
+      host.props &&
+      typeof host.props.onClick === 'function' &&
+      String(host.className).indexOf('dgc-paletteRow') !== -1 &&
+      flattenText(host.rendered, []).join(' ').indexOf('Tap') !== -1,
+  );
+  assert.ok(paletteRow, 'element palette row for Tap not found');
+  paletteRow.props.onClick({ preventDefault() {}, stopPropagation() {}, target: paletteRow });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const paletteBatch = editBodies[editBodies.length - 1];
+  const paletteOp = paletteBatch && paletteBatch.ops.find((op) => op.op === 'add');
+  assert.ok(paletteOp, 'picking an element type did not POST an add op');
+  assert.equal(paletteOp.staffId, 'Staff.g');
+  assert.equal(paletteOp.periodId, 'p0');
+  assert.equal(paletteOp.element.type, 'Dremu.DremuTap');
+  assert.ok(Math.abs(paletteOp.element.fields.hitTime) < 0.2, 'palette add must land at the playhead (0 s)');
+  assert.ok(flattenText(tree, []).join(' ').includes('DremuTap'), 'the added element is not listed');
+
+  // Storyboard staff: the palette must switch to DeentyStoryboard.Image only.
+  const addStaffButton2 = findHost(
+    tree,
+    (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'addStaff',
+  );
+  addStaffButton2.props.onClick({ preventDefault() {}, stopPropagation() {}, target: addStaffButton2, currentTarget: addStaffButton2 });
+  tree = await settle();
+  const storyboardKind = findHost(
+    tree,
+    (host) =>
+      host.props &&
+      typeof host.props.onClick === 'function' &&
+      String(host.className).indexOf('dgc-kindCard') !== -1 &&
+      flattenText(host.rendered, []).join(' ').indexOf('staffKindStoryboardOption') !== -1,
+  );
+  assert.ok(storyboardKind, 'storyboard kind card not found');
+  storyboardKind.props.onClick({ preventDefault() {}, stopPropagation() {}, target: storyboardKind });
+  tree = await settle();
+  const createStoryboard = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return String(host.className).indexOf('dgc-btn') !== -1 && flattenText(host.rendered, []).join('').trim() === 'create';
+  });
+  createStoryboard.props.onClick({ preventDefault() {}, stopPropagation() {}, target: createStoryboard });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const storyboardStaffOp = editBodies[editBodies.length - 1].ops.find((op) => op.op === 'addStaff');
+  assert.ok(storyboardStaffOp, 'storyboard staff did not POST an addStaff op');
+  assert.equal(storyboardStaffOp.kind, 'storyboard');
+  assert.equal(storyboardStaffOp.form, 'DeentyStoryboard');
+  assert.equal(storyboardStaffOp.className, 'Storyboard');
+  assert.equal(storyboardStaffOp.fileName, 'Storyboard.g');
+  assert.equal(storyboardStaffOp.displayName, 'defaultStoryboardName');
+
+  const addImageButton = findHost(
+    tree,
+    (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'addElement',
+  );
+  addImageButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: addImageButton, currentTarget: addImageButton });
+  tree = await settle();
+  const storyboardRows = flattenHosts(tree, []).filter((host) => String(host.className).indexOf('dgc-paletteRow') !== -1);
+  assert.equal(storyboardRows.length, 1, 'storyboard palette must list exactly one element type');
+  assert.ok(flattenText(storyboardRows[0].rendered, []).join(' ').includes('Image'), 'storyboard palette is missing Image');
+  assert.ok(!flattenText(storyboardRows[0].rendered, []).join(' ').includes('Tap'), 'storyboard palette must not offer chart notes');
+  storyboardRows[0].props.onClick({ preventDefault() {}, stopPropagation() {}, target: storyboardRows[0] });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const imageOp = editBodies[editBodies.length - 1].ops.find((op) => op.op === 'add');
+  assert.ok(imageOp, 'picking Image did not POST an add op');
+  assert.equal(imageOp.staffId, 'Storyboard.g');
+  assert.equal(imageOp.element.type, 'DeentyStoryboard.Image');
+  assert.ok(Math.abs(imageOp.element.fields.startMoment) < 0.2, 'Image must land at the playhead');
+
+  // -------------------------------------------------------------------------
+  // Staff right-click menu: rename the alias, then delete a staff.
+  // -------------------------------------------------------------------------
+  const rightClickStaffRow = (row) =>
+    row.props.onContextMenu({
+      preventDefault() {},
+      stopPropagation() {},
+      clientX: 140,
+      clientY: 96,
+      target: row,
+      currentTarget: row,
+    });
+
+  // 1. Rename the alias of the chart staff (谱表A).
+  const chartStaffRow = findHost(
+    tree,
+    (host) =>
+      host.props &&
+      typeof host.props.onContextMenu === 'function' &&
+      flattenText(host.rendered, []).join(' ').indexOf('谱表A') !== -1,
+  );
+  assert.ok(chartStaffRow, 'staff rows have no context menu handler');
+  rightClickStaffRow(chartStaffRow);
+  tree = await settle();
+  const contextMenu = findHost(tree, (host) => host.props && host.props.role === 'menu');
+  assert.ok(contextMenu, 'right-clicking a staff did not open the context menu');
+  const renameItem = findHost(
+    contextMenu.rendered,
+    (host) => host.props && typeof host.props.onClick === 'function' && flattenText(host.rendered, []).join(' ').indexOf('renameStaff') !== -1,
+  );
+  assert.ok(renameItem, 'context menu has no rename item');
+  renameItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: renameItem });
+  tree = await settle();
+
+  const aliasInput = findHost(tree, (host) => host.tagName === 'INPUT' && host.props && host.props.autoFocus === true);
+  assert.ok(aliasInput, 'rename dialog has no alias input');
+  aliasInput.props.onChange({ target: { value: '新别名' } });
+  tree = await settle();
+  const editsBeforeRename = editBodies.length;
+  const applyAlias = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return String(host.className).indexOf('is-primary') !== -1 && flattenText(host.rendered, []).join('').trim() === 'apply';
+  });
+  assert.ok(applyAlias, 'rename dialog has no apply button');
+  applyAlias.props.onClick({ preventDefault() {}, stopPropagation() {}, target: applyAlias });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(editBodies.length > editsBeforeRename, 'renaming a staff did not POST an edit');
+  const renameOp = editBodies[editBodies.length - 1].ops.find((op) => op.op === 'setStaffName');
+  assert.ok(renameOp, 'rename did not emit a setStaffName op');
+  assert.equal(renameOp.staffId, 'DremuStaff.g');
+  assert.equal(renameOp.displayName, '新别名');
+  assert.ok(flattenText(tree, []).join(' ').indexOf('新别名') !== -1, 'the renamed staff alias is not listed');
+
+  // 2. Delete a staff through the same menu (permanent, confirmed first).
+  const staffRowToDelete = findHost(
+    tree,
+    (host) =>
+      host.props &&
+      typeof host.props.onContextMenu === 'function' &&
+      flattenText(host.rendered, []).join(' ').indexOf('defaultStaffName') !== -1,
+  );
+  assert.ok(staffRowToDelete, 'the created staff row was not found');
+  rightClickStaffRow(staffRowToDelete);
+  tree = await settle();
+  const deleteMenu = findHost(tree, (host) => host.props && host.props.role === 'menu');
+  assert.ok(deleteMenu, 'context menu did not open for deletion');
+  const deleteItem = findHost(
+    deleteMenu.rendered,
+    (host) => host.props && typeof host.props.onClick === 'function' && flattenText(host.rendered, []).join(' ').indexOf('deleteStaff') !== -1,
+  );
+  assert.ok(deleteItem, 'context menu has no delete item');
+  deleteItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: deleteItem });
+  tree = await settle();
+  assert.ok(flattenText(tree, []).join(' ').indexOf('deleteStaffWarning') !== -1, 'delete confirmation did not open');
+  const confirmDelete = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    const className = String(host.className);
+    return className.indexOf('dgc-btn') !== -1 && className.indexOf('is-danger') !== -1 && flattenText(host.rendered, []).join('').trim() === 'delete';
+  });
+  assert.ok(confirmDelete, 'delete confirmation has no delete button');
+  const editsBeforeDelete = editBodies.length;
+  confirmDelete.props.onClick({ preventDefault() {}, stopPropagation() {}, target: confirmDelete });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(editBodies.length > editsBeforeDelete, 'deleting a staff did not POST an edit');
+  const removeOp = editBodies[editBodies.length - 1].ops.find((op) => op.op === 'removeStaff');
+  assert.ok(removeOp, 'delete did not emit a removeStaff op');
+  assert.equal(removeOp.staffId, 'Staff.g');
+  assert.equal(removeOp.deleteFile, true, 'the Host must delete the .g file');
+  const stillListed = findHost(
+    tree,
+    (host) =>
+      host.props &&
+      typeof host.props.onContextMenu === 'function' &&
+      flattenText(host.rendered, []).join(' ').indexOf('defaultStaffName') !== -1,
+  );
+  assert.equal(stillListed, null, 'the deleted staff is still listed');
+
+  // -------------------------------------------------------------------------
+  // Audio periods (乐段): add one from the audio staff row, then drag its clip.
+  // -------------------------------------------------------------------------
+  const audioAddButton = findHost(
+    tree,
+    (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'addAudioPeriod',
+  );
+  assert.ok(audioAddButton, 'audio staff row has no add-audio-period button');
+  audioAddButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: audioAddButton, currentTarget: audioAddButton });
+  tree = await settle();
+  assert.ok(flattenText(tree, []).join(' ').indexOf('newAudioPeriod') !== -1, 'audio period dialog did not open');
+  const createAudioButton = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return String(host.className).indexOf('dgc-btn') !== -1 && String(host.className).indexOf('is-primary') !== -1 && flattenText(host.rendered, []).join('').trim() === 'create';
+  });
+  assert.ok(createAudioButton, 'audio period dialog has no create button');
+  const editsBeforeAudio = editBodies.length;
+  createAudioButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: createAudioButton });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(editBodies.length > editsBeforeAudio, 'adding an audio period did not POST an edit');
+  const audioBatch = editBodies[editBodies.length - 1];
+  const audioOp = audioBatch && audioBatch.ops.find((op) => op.op === 'addAudioPeriod');
+  assert.ok(audioOp, 'adding an audio period did not emit an addAudioPeriod op');
+  assert.equal(audioOp.staffId, 'Song.g');
+  assert.equal(audioOp.file, 'Song.wav');
+  assert.ok(Math.abs(audioOp.timeOffset) < 0.2, 'the new clip starts at the playhead');
+
+  // Grab the existing clip's bar in its timeline row and drag it ~2 s later.
+  const audioRowY = 70 + 25 + 34 + 25 + 17;
+  const editsBeforeAudioDrag = editBodies.length;
+  pointer(timelineCanvas(), 'PointerDown', 160, audioRowY);
+  pointer(timelineCanvas(), 'PointerMove', 252, audioRowY);
+  pointer(timelineCanvas(), 'PointerUp', 252, audioRowY);
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(editBodies.length > editsBeforeAudioDrag, 'dragging an audio clip did not POST an edit');
+  const audioDragBatch = editBodies[editBodies.length - 1];
+  const audioDragOp = audioDragBatch && audioDragBatch.ops.find((op) => op.op === 'patchAudioPeriod');
+  assert.ok(audioDragOp, 'dragging the clip did not emit a patchAudioPeriod op');
+  assert.equal(audioDragOp.staffId, 'Song.g');
+  assert.ok(audioDragOp.fields.timeOffset > 1 && audioDragOp.fields.timeOffset < 4, 'dragged clip offset: ' + audioDragOp.fields.timeOffset);
+
+  // Right-click the audio strip -> switch the view to the spectrum.
+  pointer(timelineCanvas(), 'ContextMenu', 300, 50);
+  tree = await settle();
+  const audioViewMenu = findHost(
+    tree,
+    (host) => host.props && host.props.role === 'menu' && flattenText(host.rendered, []).join(' ').indexOf('waveViewTitle') !== -1,
+  );
+  assert.ok(audioViewMenu, 'right-clicking the waveform did not open the audio view menu');
+  const spectrumItem = findHost(
+    audioViewMenu.rendered,
+    (host) => host.props && host.props.role === 'menuitemradio' && flattenText(host.rendered, []).join(' ').indexOf('waveViewSpectrum') !== -1,
+  );
+  assert.ok(spectrumItem, 'audio view menu has no spectrum item');
+  spectrumItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: spectrumItem });
+  tree = await settle();
+  pointer(timelineCanvas(), 'ContextMenu', 300, 50);
+  tree = await settle();
+  const audioViewMenu2 = findHost(
+    tree,
+    (host) => host.props && host.props.role === 'menu' && flattenText(host.rendered, []).join(' ').indexOf('waveViewTitle') !== -1,
+  );
+  assert.ok(audioViewMenu2, 'audio view menu did not reopen');
+  const spectrumItem2 = findHost(
+    audioViewMenu2.rendered,
+    (host) => host.props && host.props.role === 'menuitemradio' && flattenText(host.rendered, []).join(' ').indexOf('waveViewSpectrum') !== -1,
+  );
+  assert.equal(spectrumItem2.props['aria-checked'], true, 'spectrum mode is not marked active');
+  const waveItem2 = findHost(
+    audioViewMenu2.rendered,
+    (host) => host.props && host.props.role === 'menuitemradio' && flattenText(host.rendered, []).join(' ').indexOf('waveViewWaveform') !== -1,
+  );
+  waveItem2.props.onClick({ preventDefault() {}, stopPropagation() {}, target: waveItem2 });
+  tree = await settle();
+
+  // Auto BPM last: it changes the project tempo, and the drag geometry above
+  // assumes the fixture's original 120 BPM grid.
+  const editsBeforeBpm = editBodies.length;
+  autoBpmButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: autoBpmButton });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  tree = await settle();
+  assert.ok(editBodies.length > editsBeforeBpm, 'auto-BPM did not POST an edit');
+  const bpmBatch = editBodies[editBodies.length - 1];
+  const bpmOp = bpmBatch && bpmBatch.ops.find((op) => op.op === 'setMeta' && op.tempo && Number.isFinite(op.tempo.bpm));
+  assert.ok(bpmOp, 'auto-BPM did not emit setMeta.tempo: ' + JSON.stringify(bpmBatch));
+  assert.ok(Math.abs(bpmOp.tempo.bpm - 128) <= 1, 'auto-BPM set ' + bpmOp.tempo.bpm + ', expected ~128');
+  assert.ok(flattenText(tree, []).join(' ').indexOf('bpmDetected') !== -1, 'auto-BPM notice is missing');
 
 }
 else {
@@ -1558,4 +2114,9 @@ console.log('  canvas text layout: ' + canvasTextRuns + ' runs, no overlap, noth
 console.log('  slots: sidebar.panellist#gorge-chart + main#gorge-chart');
 console.log('  verified: page chrome, project/lane/element data, timeline paint, element selection,');
 console.log('            inspector fields, curve dialog (plot canvas + numeric tree), apply/undo/save round trips,');
-console.log('            note drag -> patch(hitTime), undo -> inverse patch, redo, and tap placement -> add op.');
+console.log('            note drag -> patch(hitTime), undo -> inverse patch, redo, tap placement -> add op,');
+console.log('            addStaff dialog -> addStaff op (chart + storyboard), the element palette -> add op,');
+console.log('            the staff right-click menu -> setStaffName / removeStaff(deleteFile) ops,');
+console.log('            the audio-period dialog -> addAudioPeriod / clip drag -> patchAudioPeriod ops,');
+console.log('            the audio-strip right-click menu -> waveform/spectrum mode,');
+console.log('            and auto-BPM detection -> setMeta.tempo.');

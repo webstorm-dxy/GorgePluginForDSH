@@ -45,6 +45,13 @@
  *  - Strings are double-quoted UTF-8, no escapes in the corpus.
  *  - Enum/reference values are dotted names (`ImagePositionMode.ScreenCover`).
  * ---------------------------------------------------------------------------------
+ *
+ * Sections:
+ *   Lexer              source text  -> tokens (strings, numbers, dotted names, punctuation)
+ *   Parser             tokens       -> StaffFile / Value tree, with line/column errors
+ *   Expression helpers `(-1.0/0.0)`-style specials and their canonical text
+ *   Writer             Value tree   -> canonical `.g` text (byte-exact with the corpus)
+ *   Public API         parseGorgeFile / serializeGorgeFile / parseValue / formatValue
  */
 
 /** Error thrown for any unparseable / unformattable `.g` content. */
@@ -78,6 +85,78 @@ function isIdentStart(ch) {
 }
 function isIdentPart(ch) {
   return isIdentStart(ch) || isDigit(ch) || ch === '.';
+}
+
+/**
+ * Decode one double-quoted string literal.
+ *
+ * Escapes are the five the corpus uses (`\" \\ \n \r \t`), plus `\uXXXX`;
+ * an unknown escape keeps the escaped character verbatim. A literal may not
+ * span lines.
+ *
+ * @param {string} text
+ * @param {number} start  index of the opening quote
+ * @param {number} startLine  1-based line of the opening quote
+ * @param {number} startColumn 1-based column of the opening quote
+ * @returns {{value: string, end: number}} decoded text and the index after the
+ *          closing quote.
+ */
+function readStringLiteral(text, start, startLine, startColumn) {
+  const n = text.length;
+  let i = start + 1;
+  let value = '';
+  while (i < n) {
+    const c = text[i];
+    if (c === '"') return { value, end: i + 1 };
+    if (c === '\n' || c === '\r') {
+      throw new GorgeCodecError('newline inside string literal', startLine, startColumn);
+    }
+    if (c === '\\') {
+      const escape = text[i + 1];
+      if (escape === '"') {
+        value += '"';
+        i += 2;
+        continue;
+      }
+      if (escape === '\\') {
+        value += '\\';
+        i += 2;
+        continue;
+      }
+      if (escape === 'n') {
+        value += '\n';
+        i += 2;
+        continue;
+      }
+      if (escape === 'r') {
+        value += '\r';
+        i += 2;
+        continue;
+      }
+      if (escape === 't') {
+        value += '\t';
+        i += 2;
+        continue;
+      }
+      if (escape === 'u') {
+        const hex = text.slice(i + 2, i + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+          // No newlines are allowed, so the current column is offset-based.
+          throw new GorgeCodecError('invalid \\u escape in string literal', startLine, startColumn + (i - start));
+        }
+        value += String.fromCharCode(parseInt(hex, 16));
+        i += 6;
+        continue;
+      }
+      // Unknown escape: keep the escaped character verbatim.
+      value += escape ?? '';
+      i += 2;
+      continue;
+    }
+    value += c;
+    i += 1;
+  }
+  throw new GorgeCodecError('unterminated string literal', startLine, startColumn);
 }
 
 /**
@@ -121,75 +200,10 @@ function lex(text) {
 
     // string literal
     if (ch === '"') {
-      i += 1;
-      column += 1;
-      let value = '';
-      let closed = false;
-      while (i < n) {
-        const c = text[i];
-        if (c === '"') {
-          i += 1;
-          column += 1;
-          closed = true;
-          break;
-        }
-        if (c === '\n' || c === '\r') {
-          throw new GorgeCodecError('newline inside string literal', startLine, startColumn);
-        }
-        if (c === '\\') {
-          const e = text[i + 1];
-          if (e === '"') {
-            value += '"';
-            i += 2;
-            column += 2;
-            continue;
-          }
-          if (e === '\\') {
-            value += '\\';
-            i += 2;
-            column += 2;
-            continue;
-          }
-          if (e === 'n') {
-            value += '\n';
-            i += 2;
-            column += 2;
-            continue;
-          }
-          if (e === 'r') {
-            value += '\r';
-            i += 2;
-            column += 2;
-            continue;
-          }
-          if (e === 't') {
-            value += '\t';
-            i += 2;
-            column += 2;
-            continue;
-          }
-          if (e === 'u') {
-            const hex = text.slice(i + 2, i + 6);
-            if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
-              throw new GorgeCodecError('invalid \\u escape in string literal', line, column);
-            }
-            value += String.fromCharCode(parseInt(hex, 16));
-            i += 6;
-            column += 6;
-            continue;
-          }
-          // Unknown escape: keep the escaped character verbatim.
-          value += e ?? '';
-          i += 2;
-          column += 2;
-          continue;
-        }
-        value += c;
-        i += 1;
-        column += 1;
-      }
-      if (!closed) throw new GorgeCodecError('unterminated string literal', startLine, startColumn);
-      push('string', value, text.slice(start, i), startLine, startColumn, start, i);
+      const literal = readStringLiteral(text, i, startLine, startColumn);
+      column += literal.end - i;
+      i = literal.end;
+      push('string', literal.value, text.slice(start, i), startLine, startColumn, start, i);
       continue;
     }
 

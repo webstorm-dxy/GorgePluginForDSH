@@ -1768,6 +1768,7 @@ are annotations for this document, **not** part of the file; `.g` comments use
 |---|---|
 | 谱表 / staff | one `@ElementStaff` / `@AudioStaff` class (one row) |
 | 乐段 / period | one `@Chart` method + its `PeriodConfig` (one block) |
+| 音频乐段 / audio period | one `@Song` method + its `PeriodConfig` (one audio clip on the chart timeline) |
 | 元素 / element | one injector item inside a period's array |
 | 模态 / form | a form package (`Dremu`, `DeentyStoryboard`, …) |
 | 轨道 / lane | `DremuMainLane` / `DremuGuideLane` |

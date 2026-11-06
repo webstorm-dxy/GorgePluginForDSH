@@ -2,7 +2,7 @@
   "name": "@local/gorge-chart-studio",
   "version": "0.1.0",
   "private": true,
-  "description": "Dremu 谱面编辑器 — a full-page chart studio for Gorge/Dremu .g chart projects in the DeepSeek Harness Web UI: timeline editing, inspector, curve editors, playback, and agent tools.",
+  "description": "Dremu 谱面编辑器 — a full-page chart studio for Gorge/Dremu .g chart projects in the DeepSeek Harness Web UI: timeline editing, inspector, curve editors, multi-clip audio periods (乐段), playback, and agent tools.",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -15,6 +15,8 @@
     "client.js",
     "gorge-codec.js",
     "dremu-model.js",
+    "skills.js",
+    "skills/",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -37,7 +39,7 @@
     }
   },
   "scripts": {
-    "test": "node tests/codec.test.mjs && node tests/model.test.mjs && node tests/host.test.mjs && node tests/client-smoke.mjs",
+    "test": "node tests/codec.test.mjs && node tests/model.test.mjs && node tests/host.test.mjs && node tests/skill.test.mjs && node tests/client-smoke.mjs",
     "test:real": "GORGE_SMOKE_REAL=1 node tests/client-smoke.mjs"
   }
 }

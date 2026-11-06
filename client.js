@@ -18,6 +18,21 @@
  * Everything is plain browser JavaScript: no Harness client package is
  * imported, styling uses `--dsw-alias-*` theme tokens, and the stylesheet is
  * rendered by the page component so unmounting removes it.
+ *
+ * The bundle loader serves exactly one client module per package, so this half
+ * stays one file. It is organized as numbered sections; jump to them with
+ * "NN ·" (search for `// 07 ·` and so on):
+ *
+ *   01 locale dictionaries        11 left pane
+ *   02 small utilities            12 inspector
+ *   03 curve sampling             13 transport bar
+ *   04 optimistic op application  14 timeline layout model
+ *   05 stylesheet                 15 timeline canvas
+ *   06 host bridge (HTTP + SSE)   16 open-project dialog
+ *   07 audio (waveforms + clips)  17 playback scene
+ *   08 UI primitives              18 page assembly
+ *   09 generic value editor       19 sidebar panel icon
+ *   10 curve editor dialog        20 client plugin entry
  */
 window.__ModuleLoader__.load({
   id: '@local/gorge-chart-studio',
@@ -39,6 +54,7 @@ window.__ModuleLoader__.load({
     const FILE_URL = API + '/file';
     const PROJECTS_URL = API + '/projects';
     const RELOAD_URL = API + '/reload';
+    const IMPORT_AUDIO_URL = API + '/import-audio';
 
     // Timeline geometry.
     const RULER_H = 26;
@@ -52,14 +68,30 @@ window.__ModuleLoader__.load({
     const MAX_PPS = 900;
     const PPS_DEFAULT = 46;
     const SNAP_DIVISIONS = [1, 2, 3, 4, 6, 8, 12, 16];
+    /** Playback speeds offered by both transport bars. */
+    const RATE_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
     const MAX_HISTORY = 200;
+    /** localStorage key for the waveform/spectrum strip preference. */
+    const WAVE_MODE_KEY = 'gorge-chart:wave-mode';
+
+    /** Read the persisted audio-strip mode (`wave` or `spectrum`). */
+    function readWaveModePreference() {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          return window.localStorage.getItem(WAVE_MODE_KEY) === 'spectrum' ? 'spectrum' : 'wave';
+        }
+      } catch (error) {
+        /* private mode / blocked storage: fall back to the waveform */
+      }
+      return 'wave';
+    }
 
     /** Palette used when a catalog entry has no colour of its own. */
     const FALLBACK_COLORS = ['#38e8c4', '#7c8cff', '#ffd166', '#ff7ab6', '#8bd450', '#f4845f', '#a78bfa', '#4dd0e1'];
 
-    // =======================================================================
-    // Locale dictionaries (registered through the Client locale service).
-    // =======================================================================
+    // ========================================================================
+    // 01 · Locale dictionaries (registered through the Client locale service).
+    // ========================================================================
 
     const zh = {
       panel: 'Dremu 谱面工坊',
@@ -110,6 +142,12 @@ window.__ModuleLoader__.load({
       multiSelection: '已选中 {count} 个元素',
       projectInfo: '谱面信息',
       tempo: 'BPM',
+      autoBpm: '自动BPM',
+      autoBpmHint: '从项目音频自动测定 BPM，并修改项目 BPM',
+      autoBpmBusy: '分析中…',
+      bpmDetected: '已测定 BPM：{bpm}',
+      bpmNoAudio: '没有可分析的音频（请等待频谱加载，或确认音频长于 3 秒）',
+      bpmLowConfidence: '置信度较低，可手动微调',
       offset: '偏移',
       offsetUnit: '秒',
       duration: '时长',
@@ -162,10 +200,76 @@ window.__ModuleLoader__.load({
       deleted: '已删除',
       dragHint: '拖动移动时间，拖动右边缘改变长度',
       emptyStaff: '（空谱表）',
+      addStaff: '添加谱表',
+      addElement: '添加元素',
+      newStaff: '新建谱表',
+      newStaffHint: '创建新的 .g 谱表文件，保存后写入项目目录。',
+      staffKindChartOption: '谱面',
+      staffKindStoryboardOption: '演出',
+      staffKindChartDesc: '音符、长条与轨道的表演谱表',
+      staffKindStoryboardDesc: '剧情图片的演出谱表',
+      staffNameLabel: '名称',
+      staffFileLabel: '文件',
+      staffClassLabel: '类名',
+      defaultStaffName: '新谱表',
+      defaultStoryboardName: '新剧情板',
+      staffMenuHint: '右键：修改别名或删除谱表',
+      renameStaff: '修改别名',
+      deleteStaff: '删除谱表',
+      staffAliasLabel: '别名',
+      staffAliasHint: '别名是 .g 头部里的 displayName，只改界面显示名，不改文件名与类名。',
+      staffAliasEmpty: '别名不能为空',
+      staffAliasSaved: '已修改别名',
+      deleteStaffTitle: '删除谱表',
+      deleteStaffWarning: '将永久删除谱表「{name}」；它的 .g 文件（含 .bak 备份）会从磁盘移除，此操作无法撤销。',
+      deleteStaffAudioWarning: '这是音频谱表，删除后它的音频乐段也会一并移除。',
+      staffDeleted: '已删除谱表',
+      create: '创建',
+      elementTarget: '目标谱表',
+      elementTime: '位置',
+      paletteHint: '点击类型，在当前播放头处添加元素。',
+      paletteNeedStaff: '请先添加一个谱表',
+      paletteNoMatch: '没有匹配的类型',
+      createdStaff: '已创建谱表',
+      createdElement: '已创建元素',
       audio: '音频',
+      audioPeriods: '音频乐段',
+      audioPeriodCount: '{count} 个乐段',
+      addAudioPeriod: '添加音频乐段',
+      newAudioPeriod: '新建音频乐段',
+      audioPeriodHint: '乐段是音频谱表里的一个 @Song：选一个音频文件，设置它在谱面时间轴上的开始时间。',
+      audioTargetStaff: '音频谱表',
+      audioFileLabel: '音频文件',
+      audioFileFromProject: '项目内文件',
+      audioFileImport: '从本机导入',
+      audioFileImportHint: '选择本机的音频文件，导入时会复制到项目目录。',
+      audioNameLabel: '名称',
+      audioTimeLabel: '开始时间（秒）',
+      audioNeedFile: '请选择或导入一个音频文件',
+      audioNeedName: '名称不能为空',
+      audioImporting: '正在导入…',
+      audioImportFailed: '音频导入失败',
+      audioHostStale: '当前 Host 还没有加载音频乐段功能：请退出并重新打开 DeepSeek Harness（或重启 DSH 服务）后再试。',
+      audioHostStaleShort: '需重启 DSH 才能添加音频乐段',
+      audioImported: '已导入音频文件',
+      audioCreated: '已添加音频乐段',
+      audioDeleted: '已删除音频乐段',
+      noAudioPeriods: '这个音频谱表还没有乐段',
+      audioPeriodMissing: '音频文件缺失',
+      deleteAudioPeriod: '删除乐段',
+      deleteAudioPeriodTitle: '删除音频乐段',
+      deleteAudioPeriodWarning: '将从 {staff} 中删除乐段「{name}」，音频文件本身会保留在项目目录里。',
+      audioPeriodNoStaff: '请先添加一个音频谱表',
+      audioPeriodAutoStaff: '项目还没有音频谱表，保存时会自动创建 Song.g。',
       audioMissing: '未找到音频文件',
       waveLoading: '波形载入中…',
       waveUnavailable: '波形不可用',
+      waveViewTitle: '音频显示',
+      waveViewWaveform: '波形',
+      waveViewSpectrum: '频谱',
+      waveViewHint: '右键波形区域可切换波形与频谱',
+      spectrumLoading: '频谱计算中…',
+      spectrumUnavailable: '频谱不可用',
       following: '跟随',
       staffChart: '谱表',
       staffAudio: '音频',
@@ -265,6 +369,12 @@ window.__ModuleLoader__.load({
       multiSelection: '{count} elements selected',
       projectInfo: 'Chart info',
       tempo: 'BPM',
+      autoBpm: 'Auto BPM',
+      autoBpmHint: 'Detect the BPM from the project audio and update the project BPM',
+      autoBpmBusy: 'Analyzing…',
+      bpmDetected: 'Detected BPM: {bpm}',
+      bpmNoAudio: 'No audio available for analysis (wait for the spectrum, or use audio longer than 3 s)',
+      bpmLowConfidence: 'Low confidence; adjust manually if needed',
       offset: 'Offset',
       offsetUnit: 's',
       duration: 'Length',
@@ -317,10 +427,76 @@ window.__ModuleLoader__.load({
       deleted: 'Deleted',
       dragHint: 'Drag to move in time, drag the right edge to resize',
       emptyStaff: '(empty staff)',
+      addStaff: 'Add staff',
+      addElement: 'Add element',
+      newStaff: 'New staff',
+      newStaffHint: 'Creates a new .g staff file and writes it to the project on save.',
+      staffKindChartOption: 'Chart',
+      staffKindStoryboardOption: 'Storyboard',
+      staffKindChartDesc: 'Notes, holds and lanes for the playfield',
+      staffKindStoryboardDesc: 'Storyboard images shown over the chart',
+      staffNameLabel: 'Name',
+      staffFileLabel: 'File',
+      staffClassLabel: 'Class',
+      defaultStaffName: 'New staff',
+      defaultStoryboardName: 'New storyboard',
+      staffMenuHint: 'Right-click: rename alias or delete the staff',
+      renameStaff: 'Rename alias',
+      deleteStaff: 'Delete staff',
+      staffAliasLabel: 'Alias',
+      staffAliasHint: 'The alias is the .g header displayName; it only changes the UI label, not the file or class name.',
+      staffAliasEmpty: 'Alias cannot be empty',
+      staffAliasSaved: 'Alias updated',
+      deleteStaffTitle: 'Delete staff',
+      deleteStaffWarning: 'This permanently deletes the staff “{name}”. Its .g file (including the .bak backup) is removed from disk; this cannot be undone.',
+      deleteStaffAudioWarning: 'This is an audio staff; its audio periods are removed with it.',
+      staffDeleted: 'Staff deleted',
+      create: 'Create',
+      elementTarget: 'Target staff',
+      elementTime: 'Position',
+      paletteHint: 'Pick a type to add it at the playhead.',
+      paletteNeedStaff: 'Add a staff first',
+      paletteNoMatch: 'No matching type',
+      createdStaff: 'Staff created',
+      createdElement: 'Element created',
       audio: 'Audio',
+      audioPeriods: 'Audio periods',
+      audioPeriodCount: '{count} clip(s)',
+      addAudioPeriod: 'Add audio period',
+      newAudioPeriod: 'New audio period',
+      audioPeriodHint: 'One audio period is one @Song clip: pick an audio file and the chart time where it starts.',
+      audioTargetStaff: 'Audio staff',
+      audioFileLabel: 'Audio file',
+      audioFileFromProject: 'Project file',
+      audioFileImport: 'Import from this computer',
+      audioFileImportHint: 'The picked file is copied into the project directory when imported.',
+      audioNameLabel: 'Name',
+      audioTimeLabel: 'Start time (s)',
+      audioNeedFile: 'Choose or import an audio file',
+      audioNeedName: 'Name cannot be empty',
+      audioImporting: 'Importing…',
+      audioImportFailed: 'Audio import failed',
+      audioHostStale: 'This Host has not loaded audio periods yet: quit and reopen DeepSeek Harness (or restart the DSH service) and try again.',
+      audioHostStaleShort: 'Restart DSH to add audio periods',
+      audioImported: 'Audio file imported',
+      audioCreated: 'Audio period added',
+      audioDeleted: 'Audio period deleted',
+      noAudioPeriods: 'This audio staff has no audio period yet',
+      audioPeriodMissing: 'Audio file is missing',
+      deleteAudioPeriod: 'Delete period',
+      deleteAudioPeriodTitle: 'Delete audio period',
+      deleteAudioPeriodWarning: 'Removes “{name}” from {staff}; the audio file itself stays in the project directory.',
+      audioPeriodNoStaff: 'Add an audio staff first',
+      audioPeriodAutoStaff: 'No audio staff yet; saving creates Song.g automatically.',
       audioMissing: 'Audio file not found',
       waveLoading: 'Loading waveform…',
       waveUnavailable: 'Waveform unavailable',
+      waveViewTitle: 'Audio view',
+      waveViewWaveform: 'Waveform',
+      waveViewSpectrum: 'Spectrum',
+      waveViewHint: 'Right-click the waveform to switch between waveform and spectrum',
+      spectrumLoading: 'Computing spectrum…',
+      spectrumUnavailable: 'Spectrum unavailable',
       following: 'Follow',
       staffChart: 'Chart',
       staffAudio: 'Audio',
@@ -371,9 +547,9 @@ window.__ModuleLoader__.load({
       unnamed: 'unnamed',
     };
 
-    // =======================================================================
-    // Small utilities.
-    // =======================================================================
+    // ========================================================================
+    // 02 · Small utilities.
+    // ========================================================================
 
     /** Clamp a number into an inclusive range. */
     function clamp(value, lo, hi) {
@@ -515,17 +691,6 @@ window.__ModuleLoader__.load({
       return copy;
     }
 
-    /** Delete a path inside a value tree copy (array entries splice). */
-    function deleteAtPath(root, path) {
-      if (path.length === 0) return undefined;
-      const copy = deepClone(root);
-      const parent = getAtPath(copy, path.slice(0, -1));
-      const last = path[path.length - 1];
-      if (Array.isArray(parent)) parent.splice(Number(last), 1);
-      else if (isPlainObject(parent)) delete parent[last];
-      return copy;
-    }
-
     /** Effective numeric value of a scalar Value, else null. */
     function valueAsNumber(value) {
       if (typeof value === 'number') return value;
@@ -575,16 +740,9 @@ window.__ModuleLoader__.load({
       return '{}';
     }
 
-    // =======================================================================
-    // Curve sampling (display only; the Host model is authoritative).
-    // =======================================================================
-
-    /** Clamp helper for the [0,1] Hermite parameter. */
-    function hermiteBasis(t) {
-      const t2 = t * t;
-      const t3 = t2 * t;
-      return [2 * t3 - 3 * t2 + 1, t3 - 2 * t2 + t, -2 * t3 + 3 * t2, t3 - t2];
-    }
+    // ========================================================================
+    // 03 · Curve sampling (display only; the Host model is authoritative).
+    // ========================================================================
 
     /** Sample one curve-ish Value at x; returns a number (null when unknown). */
     function sampleCurve(value, x) {
@@ -770,30 +928,9 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** 0..1 colour channels from a ColorArgb-ish Value. */
-    function colorFromValue(value, fallback) {
-      const base = fallback || [1, 1, 1];
-      if (!isTypedValue(value) || value.t !== 'obj') return base;
-      const fields = value.fields || {};
-      const channel = (name, def) => {
-        const raw = valueAsNumber(fields[name]);
-        if (raw === null) return def;
-        // The corpus mixes 0..1 floats with 0..255 bytes; detect the byte range.
-        return raw > 1 ? clamp(raw / 255, 0, 1) : clamp(raw, 0, 1);
-      };
-      return [channel('r', base[0]), channel('g', base[1]), channel('b', base[2])];
-    }
-
-    /** CSS colour string from a ColorArgb-ish Value. */
-    function cssColorFromValue(value, alpha) {
-      const [r, g, b] = colorFromValue(value);
-      const a = alpha === undefined ? 1 : alpha;
-      return 'rgba(' + Math.round(r * 255) + ',' + Math.round(g * 255) + ',' + Math.round(b * 255) + ',' + a + ')';
-    }
-
-    // =======================================================================
-    // Local (optimistic) op application — mirrors the Host model contract.
-    // =======================================================================
+    // ========================================================================
+    // 04 · Local (optimistic) op application — mirrors the Host model contract.
+    // ========================================================================
 
     /** Find one element plus its staff/period by id. */
     function findElement(project, elementId) {
@@ -870,15 +1007,6 @@ window.__ModuleLoader__.load({
       return ['keepTime', 'holdTime'].find((name) => fields[name] !== undefined) || null;
     }
 
-    /** Current absolute start of an element (period offset applied). */
-    function elementStart(catalog, element, period) {
-      const field = resolveStartField(catalog, element);
-      const local = field ? valueAsNumber(element.fields && element.fields[field]) : null;
-      const offset = period && Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
-      if (local !== null) return offset + local;
-      return Number.isFinite(element.start) ? element.start : offset;
-    }
-
     /** Color for an element type, from the catalog or the fallback palette. */
     function elementColor(catalog, type) {
       const entry = catalogEntry(catalog, type);
@@ -914,6 +1042,94 @@ window.__ModuleLoader__.load({
       return best.id;
     }
 
+    /** All audio clips of a wire project (new `audioPeriods`, legacy `audio`). */
+    function audioClipsOf(project) {
+      if (!project) return [];
+      if (Array.isArray(project.audioPeriods) && project.audioPeriods.length > 0) return project.audioPeriods;
+      if (project.audio) {
+        return [
+          {
+            id: 'a0',
+            staffId: '',
+            method: 'GetSong',
+            name: project.audio.name || '',
+            relativePath: '',
+            file: project.audio.file || '',
+            offset: Number.isFinite(project.audio.offset) ? project.audio.offset : 0,
+            duration: Number.isFinite(project.audio.duration) ? project.audio.duration : null,
+            missing: false,
+          },
+        ];
+      }
+      return [];
+    }
+
+    /** Re-sort the local audio clips and refresh the legacy `audio` view. */
+    function refreshLocalAudio(project) {
+      const clips = [];
+      for (const staff of project.staffs || []) {
+        if (!staff || staff.kind !== 'audio') continue;
+        for (const clip of staff.audioPeriods || []) clips.push(Object.assign({ staffId: staff.id }, clip));
+      }
+      clips.sort((a, b) => (a.offset || 0) - (b.offset || 0) || String(a.staffId).localeCompare(String(b.staffId)));
+      project.audioPeriods = clips;
+      const first = clips[0] || null;
+      project.audio = first
+        ? { file: first.file || '', name: first.name || '', duration: first.duration === undefined ? null : first.duration, offset: first.offset || 0 }
+        : null;
+      return clips;
+    }
+
+    /** Find one audio clip and its staff in the local wire project. */
+    function findAudioClip(project, staffId, audioPeriodId) {
+      const wanted = String(audioPeriodId || '');
+      if (!wanted) return null;
+      for (const staff of (project && project.staffs) || []) {
+        if (!staff || staff.kind !== 'audio') continue;
+        if (staffId && staff.id !== staffId) continue;
+        for (const clip of staff.audioPeriods || []) {
+          if (clip.id === wanted || clip.method === wanted) return { staff, clip };
+        }
+      }
+      return null;
+    }
+
+    /** Next unique @Song method name for optimistic audio-period creation. */
+    function nextAudioMethodName(clips) {
+      const used = new Set((clips || []).map((clip) => clip && clip.method).filter(Boolean));
+      let base = 'GetSong';
+      const first = clips && clips.length > 0 ? String(clips[0].method || '') : '';
+      const prefix = first.replace(/\d+$/, '');
+      if (['GetSong', 'Period', 'Song', 'Audio'].indexOf(prefix) !== -1) base = prefix;
+      if (!used.has(base)) return base;
+      let index = 1;
+      while (used.has(base + index)) index += 1;
+      return base + index;
+    }
+
+    /**
+     * Recompute `project.duration` exactly like the Host model does: the last
+     * element end, extended by every audio clip end. Deleting the audio staff
+     * locally must shrink the transport, not leave a stale length.
+     */
+    function recomputeLocalDuration(project) {
+      let lastEnd = 0;
+      for (const staff of project.staffs || []) {
+        for (const period of staff.periods || []) {
+          for (const element of period.elements || []) {
+            const end = (element.start || 0) + (element.duration || 0);
+            if (Number.isFinite(end) && end > lastEnd) lastEnd = end;
+          }
+        }
+      }
+      for (const clip of audioClipsOf(project)) {
+        const end = (Number.isFinite(clip.offset) ? clip.offset : 0) + (Number.isFinite(clip.duration) ? clip.duration : 0);
+        if (Number.isFinite(end) && end > lastEnd) lastEnd = end;
+      }
+      project.duration = round(Math.max(lastEnd, 0), 6);
+      return project.duration;
+    }
+
     /**
      * Apply the Host's op list locally so the UI updates before the round trip.
      * Returns the new project plus the inverse ops (used for undo).
@@ -947,16 +1163,37 @@ window.__ModuleLoader__.load({
               errors.push('unknown staff ' + op.staffId);
               continue;
             }
-            const periodId = op.periodId || pickPeriod(next, op.staffId, op.element && op.element.start);
-            const period = (staff.periods || []).find((item) => item.id === periodId) || (staff.periods || [])[0];
-            if (!period) {
-              errors.push('no period in ' + op.staffId);
+            if (!op.element || typeof op.element.type !== 'string') {
+              errors.push('add requires element.type');
               continue;
             }
+            const explicitPeriod = typeof op.periodId === 'string' && op.periodId.length > 0;
+            const absoluteStart = op.element.start !== undefined && Number.isFinite(Number(op.element.start)) ? Number(op.element.start) : 0;
+            let period = null;
+            if (explicitPeriod) {
+              period = (staff.periods || []).find((item) => item.id === op.periodId) || null;
+              if (!period) {
+                errors.push('unknown period ' + op.periodId + ' in ' + op.staffId);
+                continue;
+              }
+            } else if ((staff.periods || []).length === 0) {
+              // Mirror the Host: an `add` without a period allocates one.
+              period = { id: 'p0', method: 'Period', timeOffset: round(absoluteStart, 6), minLength: null, elements: [] };
+              staff.periods = [period];
+            } else {
+              const periodId = pickPeriod(next, op.staffId, absoluteStart);
+              period = (staff.periods || []).find((item) => item.id === periodId) || (staff.periods || [])[0];
+            }
+            const fields = deepClone(op.element.fields) || {};
+            const entry = catalogEntry(catalog, op.element.type);
+            const timing = (entry && entry.timing) || {};
+            if (!explicitPeriod && timing.start && fields[timing.start] === undefined) {
+              fields[timing.start] = round(absoluteStart - (Number.isFinite(period.timeOffset) ? period.timeOffset : 0), 6);
+            }
             const element = {
-              id: (op.element && op.element.id) || 'new:' + Math.random().toString(36).slice(2, 10),
+              id: op.element.id || 'new:' + Math.random().toString(36).slice(2, 10),
               type: op.element.type,
-              fields: deepClone(op.element.fields) || {},
+              fields,
             };
             element.category = elementCategory(catalog, element.type);
             deriveTiming(element, period, catalog);
@@ -976,6 +1213,119 @@ window.__ModuleLoader__.load({
               element: { id: found.element.id, type: found.element.type, fields: deepClone(found.element.fields) },
             });
             found.period.elements.splice(found.elementIndex, 1);
+          } else if (op.op === 'addAudioPeriod') {
+            let staff = null;
+            if (typeof op.staffId === 'string' && op.staffId.length > 0) {
+              staff = (next.staffs || []).find((item) => item.id === op.staffId) || null;
+              if (!staff) {
+                errors.push('unknown staff ' + op.staffId);
+                continue;
+              }
+              if (staff.kind !== 'audio') {
+                errors.push('staff ' + staff.id + ' is not an audio staff');
+                continue;
+              }
+            } else {
+              staff = (next.staffs || []).find((item) => item && item.kind === 'audio') || null;
+            }
+            let createdStaff = false;
+            if (!staff) {
+              const identity = uniqueStaffIdentity(next, 'audio');
+              const dir = typeof next.dir === 'string' ? next.dir.replace(/\/$/, '') : '';
+              staff = {
+                id: identity.fileName,
+                file: dir ? dir + '/' + identity.fileName : identity.fileName,
+                kind: 'audio',
+                form: '',
+                displayName: '新音频',
+                className: identity.className,
+                periods: [],
+                audioPeriods: [],
+              };
+              next.staffs = next.staffs || [];
+              next.staffs.push(staff);
+              createdStaff = true;
+            }
+            const relativeFile = String(op.file || '').replace(/\\/g, '/');
+            if (!relativeFile) {
+              errors.push('addAudioPeriod requires file');
+              continue;
+            }
+            const clips = staff.audioPeriods || (staff.audioPeriods = []);
+            const method = typeof op.method === 'string' && op.method.length > 0 ? op.method : nextAudioMethodName(clips);
+            const extension = relativeFile.indexOf('.') === -1 ? '' : relativeFile.slice(relativeFile.lastIndexOf('.'));
+            const baseName = relativeFile.split('/').pop() || relativeFile;
+            const name = typeof op.name === 'string' && op.name.trim().length > 0 ? op.name.trim() : baseName.slice(0, baseName.length - extension.length);
+            const offset = Number.isFinite(Number(op.timeOffset)) ? round(Number(op.timeOffset), 6) : 0;
+            const dir = typeof next.dir === 'string' ? next.dir.replace(/\/$/, '') : '';
+            let maxIndex = -1;
+            for (const clip of clips) {
+              const match = /^a(\d+)$/.exec(String(clip.id || ''));
+              if (match) maxIndex = Math.max(maxIndex, Number(match[1]));
+            }
+            const clip = {
+              id: 'a' + (maxIndex + 1),
+              staffId: staff.id,
+              method,
+              name,
+              assetType: 'GorgeFramework.WavAudioAsset',
+              relativePath: relativeFile,
+              file: dir ? dir + '/' + relativeFile : relativeFile,
+              offset,
+              duration: Number.isFinite(Number(op.duration)) ? round(Number(op.duration), 6) : null,
+              sampleRate: null,
+              channels: null,
+              format: null,
+              missing: false,
+            };
+            clips.push(clip);
+            refreshLocalAudio(next);
+            // Undo runs the inverse list in reverse: remove the clip before the
+            // staff it was auto-created in.
+            if (createdStaff) inverse.push({ op: 'removeStaff', staffId: staff.id });
+            inverse.push({ op: 'removeAudioPeriod', staffId: staff.id, audioPeriodId: clip.id });
+          } else if (op.op === 'patchAudioPeriod') {
+            const found = findAudioClip(next, op.staffId, op.audioPeriodId);
+            if (!found) {
+              errors.push('unknown audio period ' + op.audioPeriodId);
+              continue;
+            }
+            const fields = op.fields && typeof op.fields === 'object' ? op.fields : {};
+            const previous = {};
+            if (fields.timeOffset !== undefined && Number.isFinite(Number(fields.timeOffset))) {
+              previous.timeOffset = found.clip.offset;
+              found.clip.offset = round(Number(fields.timeOffset), 6);
+            }
+            if (typeof fields.name === 'string' && fields.name.trim().length > 0) {
+              previous.name = found.clip.name;
+              found.clip.name = fields.name.trim();
+            }
+            if (typeof fields.file === 'string' && fields.file.length > 0) {
+              previous.file = found.clip.relativePath || found.clip.file;
+              found.clip.relativePath = fields.file.replace(/\\/g, '/');
+              const dir = typeof next.dir === 'string' ? next.dir.replace(/\/$/, '') : '';
+              found.clip.file = dir ? dir + '/' + found.clip.relativePath : found.clip.relativePath;
+            }
+            refreshLocalAudio(next);
+            inverse.push({ op: 'patchAudioPeriod', staffId: found.staff.id, audioPeriodId: found.clip.id, fields: previous });
+          } else if (op.op === 'removeAudioPeriod') {
+            const found = findAudioClip(next, op.staffId, op.audioPeriodId);
+            if (!found) {
+              errors.push('unknown audio period ' + op.audioPeriodId);
+              continue;
+            }
+            if (found.clip.relativePath) {
+              inverse.push({
+                op: 'addAudioPeriod',
+                staffId: found.staff.id,
+                file: found.clip.relativePath,
+                name: found.clip.name,
+                timeOffset: found.clip.offset,
+                method: found.clip.method,
+              });
+            }
+            found.staff.audioPeriods = (found.staff.audioPeriods || []).filter((clip) => clip !== found.clip);
+            refreshLocalAudio(next);
           } else if (op.op === 'setMeta') {
             const previous = { op: 'setMeta' };
             if (op.tempo) {
@@ -995,6 +1345,88 @@ window.__ModuleLoader__.load({
             }
             inverse.push({ op: 'setStaffName', staffId: op.staffId, displayName: staff.displayName });
             staff.displayName = op.displayName;
+          } else if (op.op === 'addStaff') {
+            const kind = op.kind === 'storyboard' ? 'storyboard' : op.kind === 'audio' ? 'audio' : 'chart';
+            const className =
+              typeof op.className === 'string' && op.className.length > 0
+                ? op.className
+                : (typeof op.fileName === 'string' && op.fileName.length > 0 ? op.fileName.replace(/\.g$/i, '') : kind === 'storyboard' ? 'Storyboard' : kind === 'audio' ? 'Song' : 'Staff');
+            const fileName =
+              typeof op.fileName === 'string' && op.fileName.length > 0 ? op.fileName : className + '.g';
+            const form =
+              kind === 'audio'
+                ? ''
+                : kind === 'storyboard' ? 'DeentyStoryboard' : typeof op.form === 'string' && op.form.length > 0 ? op.form : 'Dremu';
+            const displayName =
+              typeof op.displayName === 'string' && op.displayName.trim().length > 0
+                ? op.displayName.trim()
+                : kind === 'storyboard' ? '新剧情板' : kind === 'audio' ? '新音频' : '新谱表';
+            if ((next.staffs || []).some((item) => String(item.id).toLowerCase() === fileName.toLowerCase())) {
+              errors.push('staff already exists: ' + fileName);
+              continue;
+            }
+            const timeOffset = Number.isFinite(op.timeOffset) ? op.timeOffset : 0;
+            const minLength = Number.isFinite(op.minLength) ? op.minLength : null;
+            const dir = typeof next.dir === 'string' ? next.dir.replace(/\/$/, '') : '';
+            next.staffs = next.staffs || [];
+            next.staffs.push({
+              id: fileName,
+              file: dir ? dir + '/' + fileName : fileName,
+              kind,
+              form,
+              displayName,
+              className,
+              periods:
+                kind === 'audio'
+                  ? []
+                  : [
+                      {
+                        id: 'p0',
+                        method: 'Period',
+                        timeOffset: round(timeOffset, 6),
+                        minLength,
+                        elements: [],
+                      },
+                    ],
+              ...(kind === 'audio' ? { audioPeriods: [] } : {}),
+            });
+            inverse.push({ op: 'removeStaff', staffId: fileName });
+          } else if (op.op === 'removeStaff') {
+            const staffIndex = (next.staffs || []).findIndex((item) => item.id === op.staffId);
+            if (staffIndex === -1) {
+              errors.push('unknown staff ' + op.staffId);
+              continue;
+            }
+            const staff = next.staffs[staffIndex];
+            const period = (staff.periods || [])[0] || null;
+            next.staffs.splice(staffIndex, 1);
+            refreshLocalAudio(next);
+            // Undo runs the inverse list in reverse: queue the audio periods
+            // before the `addStaff` that recreates their owner, so the staff
+            // exists by the time they are re-added.
+            if (staff.kind === 'audio') {
+              for (const clip of staff.audioPeriods || []) {
+                if (!clip.relativePath) continue;
+                inverse.push({
+                  op: 'addAudioPeriod',
+                  staffId: staff.id,
+                  file: clip.relativePath,
+                  name: clip.name,
+                  timeOffset: clip.offset,
+                  method: clip.method,
+                });
+              }
+            }
+            inverse.push({
+              op: 'addStaff',
+              kind: staff.kind === 'storyboard' ? 'storyboard' : staff.kind === 'audio' ? 'audio' : 'chart',
+              form: staff.form,
+              displayName: staff.displayName,
+              className: staff.className,
+              fileName: staff.id,
+              timeOffset: period && Number.isFinite(period.timeOffset) ? period.timeOffset : 0,
+              minLength: period && Number.isFinite(period.minLength) ? period.minLength : null,
+            });
           } else {
             errors.push('unsupported op ' + op.op);
           }
@@ -1002,13 +1434,15 @@ window.__ModuleLoader__.load({
           errors.push(String((error && error.message) || error));
         }
       }
+      if (inverse.length > 0) recomputeLocalDuration(next);
       return { project: next, inverse, errors };
     }
 
-    // =======================================================================
-    // Stylesheet. Rendered as a React element by the page so unmounting
-    // removes it; only theme tokens are used for chrome colours.
-    // =======================================================================
+    // ========================================================================
+    // 05 · Stylesheet.
+    // Rendered as a React element by the page so unmounting removes it; only
+    // theme tokens are used for chrome colours.
+    // ========================================================================
 
     const STYLE_TEXT = [
       '.dgc-root{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:13px;line-height:18px;overflow:hidden;position:relative}',
@@ -1018,6 +1452,7 @@ window.__ModuleLoader__.load({
       '.dgc-title span{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}',
       '.dgc-spacer{flex:1 1 auto}',
       '.dgc-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border-radius:7px;height:28px;padding:0 10px;font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap}',
+      '.dgc-autoBpm{height:24px;padding:0 7px;font-size:11px;flex:0 0 auto}',
       '.dgc-btn:hover:not(:disabled){border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}',
       '.dgc-btn:disabled{opacity:.45;cursor:default}',
       '.dgc-btn.is-primary{background:var(--dsw-alias-brand-primary);border-color:transparent;color:#fff}',
@@ -1045,6 +1480,9 @@ window.__ModuleLoader__.load({
       '.dgc-sideSection.is-elements{flex:1 1 auto;min-height:0}',
       '.dgc-sideHead{display:flex;align-items:center;gap:6px;padding:7px 10px 6px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-label-secondary)}',
       '.dgc-sideHead .dgc-spacer{flex:1}',
+      '.dgc-headBtn{appearance:none;border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-secondary);width:20px;height:20px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:0 0 auto}',
+      '.dgc-headBtn:hover:not(:disabled){color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l1)}',
+      '.dgc-headBtn:disabled{opacity:.4;cursor:default}',
       '.dgc-list{overflow:auto;min-height:0;flex:1 1 auto;padding:0 6px 8px}',
       '.dgc-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer;user-select:none}',
       '.dgc-row:hover{background:var(--dsw-alias-bg-layer-2)}',
@@ -1054,6 +1492,13 @@ window.__ModuleLoader__.load({
       '.dgc-row .dgc-rowMeta{font-size:10.5px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}',
       '.dgc-row .dgc-rowBtn{opacity:.55;border:none;background:none;color:inherit;cursor:pointer;padding:0 2px;font-size:11px}',
       '.dgc-row .dgc-rowBtn:hover{opacity:1}',
+      '.dgc-menu{position:fixed;z-index:80;min-width:186px;max-width:260px;padding:4px;border-radius:9px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-overlay);box-shadow:0 10px 28px rgba(0,0,0,.28);display:flex;flex-direction:column;gap:1px}',
+      '.dgc-menuHead{padding:5px 8px 6px;font-size:11px;line-height:15px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.dgc-menuItem{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;appearance:none;border:none;background:transparent;color:var(--dsw-alias-label-primary);border-radius:6px;padding:6px 8px;font:inherit;font-size:12px;text-align:left;cursor:pointer}',
+      '.dgc-menuItem:hover{background:var(--dsw-alias-bg-layer-2)}',
+      '.dgc-menuItem.is-danger{color:var(--dsw-alias-state-error-primary)}',
+      '.dgc-menuItem.is-danger:hover{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)}',
+      '.dgc-warnCard{border:1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 9%, transparent);color:var(--dsw-alias-label-primary);border-radius:8px;padding:8px 10px;font-size:12px;line-height:17px}',
       '.dgc-groupHead{display:flex;align-items:center;gap:6px;margin:6px 0 2px;padding:3px 6px;font-size:10.5px;font-weight:600;letter-spacing:.03em;color:var(--dsw-alias-label-secondary);text-transform:uppercase;border-top:1px solid var(--dsw-alias-border-l1)}',
       '.dgc-groupHead:first-child{margin-top:0;border-top:none}',
       '.dgc-hint{padding:10px 12px;font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-secondary)}',
@@ -1092,6 +1537,23 @@ window.__ModuleLoader__.load({
       '.dgc-modalCanvas{flex:1 1 auto;min-width:0;position:relative;background:var(--dsw-alias-bg-base)}',
       '.dgc-modalSide{flex:0 0 300px;min-width:220px;overflow:auto;padding:10px 12px;border-left:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
       '.dgc-modalFoot{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-dialogBody{display:flex;flex-direction:column;gap:10px;padding:12px 14px}',
+      '.dgc-dialogField{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--dsw-alias-label-secondary)}',
+      '.dgc-dialogField .dgc-input{height:28px;font-size:12.5px}',
+      '.dgc-kindGrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}',
+      '.dgc-kindCard{appearance:none;text-align:left;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border-radius:8px;padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;font:inherit}',
+      '.dgc-kindCard strong{font-size:12.5px;font-weight:600}',
+      '.dgc-kindCard span{font-size:10.5px;line-height:14px;color:var(--dsw-alias-label-secondary)}',
+      '.dgc-kindCard.is-active{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary) 13%, transparent)}',
+      '.dgc-dialogFoot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-paletteMeta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 14px 8px;font-size:11px;color:var(--dsw-alias-label-secondary)}',
+      '.dgc-paletteList{max-height:min(52vh,430px);overflow:auto;padding:0 8px 10px;min-height:0}',
+      '.dgc-paletteRow{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:7px;cursor:pointer;border:1px solid transparent;background:transparent;width:100%;font:inherit;color:var(--dsw-alias-label-primary);text-align:left}',
+      '.dgc-paletteRow:hover,.dgc-paletteRow:focus-visible{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l1);outline:none}',
+      '.dgc-paletteRow strong{font-size:12.5px;font-weight:500}',
+      '.dgc-paletteRow .dgc-rowMeta{margin-left:auto;font-size:10.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap}',
+      '.dgc-swatch{width:9px;height:9px;border-radius:3px;flex:0 0 auto}',
+      '.dgc-dialogEmpty{padding:20px 14px;font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary);text-align:center}',
       '.dgc-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;height:100%;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary)}',
       '.dgc-empty h3{margin:0;font-size:14px;color:var(--dsw-alias-label-primary);font-weight:600}',
       '.dgc-listRowSlim{font-size:11.5px;color:var(--dsw-alias-label-secondary);padding:1px 4px}',
@@ -1147,9 +1609,9 @@ window.__ModuleLoader__.load({
       tokenCache.clear();
     }
 
-    // =======================================================================
-    // Host bridge: state fetch, SSE, optimistic edits, undo/redo.
-    // =======================================================================
+    // ========================================================================
+    // 06 · Host bridge: state fetch, SSE, optimistic edits, undo/redo.
+    // ========================================================================
 
     /** GET JSON with an abort signal; throws a readable Error on failure. */
     async function fetchJson(url, options) {
@@ -1203,23 +1665,24 @@ window.__ModuleLoader__.load({
       }, []);
 
       /** Replace the whole client state from a Host payload. */
-      const acceptState = useCallback((payload) => {
+      const acceptState = useCallback((payload, options) => {
         if (!payload || typeof payload !== 'object') return;
+        const settings = options || {};
         serverRevRef.current = Number.isFinite(payload.rev) ? payload.rev : serverRevRef.current;
         projectRef.current = payload.project || null;
         pendingRevRef.current = 0;
         setState(payload);
         setPhase(payload.project ? 'ready' : 'empty');
         setError(null);
-        historyRef.current = { past: [], future: [] };
+        if (settings.keepHistory !== true) historyRef.current = { past: [], future: [] };
       }, []);
 
       /** Refetch the whole document (agent edits, open, reload, conflict). */
-      const refresh = useCallback(async () => {
+      const refresh = useCallback(async (options) => {
         try {
           const payload = await fetchJson(STATE_URL);
           if (!mountedRef.current) return;
-          acceptState(payload);
+          acceptState(payload, options);
         } catch (failure) {
           if (!mountedRef.current) return;
           setError(String((failure && failure.message) || failure));
@@ -1297,7 +1760,7 @@ window.__ModuleLoader__.load({
               const errors = result && Array.isArray(result.errors) ? result.errors : [];
               const rejected = result && result.changed === false;
               if (errors.length > 0 || rejected) {
-                setNotice({ kind: 'error', text: t0('errorPrefix') + (errors.length > 0 ? errors.join('; ') : t0('errorGeneric')) });
+                setNotice({ kind: 'error', text: noticeText('errorPrefix') + (errors.length > 0 ? errors.join('; ') : noticeText('errorGeneric')) });
                 // The Host did not (fully) accept the batch: resync so the page
                 // never shows an edit the document does not contain.
                 refresh();
@@ -1311,7 +1774,7 @@ window.__ModuleLoader__.load({
                 return send(batch, 1);
               }
               if (mountedRef.current) {
-                setNotice({ kind: 'error', text: t0('errorPrefix') + String((failure && failure.message) || failure) });
+                setNotice({ kind: 'error', text: noticeText('errorPrefix') + String((failure && failure.message) || failure) });
                 if (failure && failure.status === 409) refresh();
               }
             }
@@ -1364,9 +1827,17 @@ window.__ModuleLoader__.load({
             historyRef.current.future = [];
           }
           if (result.errors.length > 0) setNotice({ kind: 'error', text: result.errors.join('; ') });
-          if (settings.sync !== false) pushOps(ops);
+          if (settings.sync !== false) {
+            const pending = pushOps(ops);
+            // Audio-period ops need the Host's probe metadata (duration, file
+            // existence) to render/play the new clip; refetch canonically while
+            // keeping this gesture on the undo stack.
+            if (ops.some((op) => op && typeof op.op === 'string' && op.op.indexOf('AudioPeriod') !== -1)) {
+              pending.then(() => refresh({ keepHistory: true })).catch(() => undefined);
+            }
+          }
         },
-        [applyOptimistic, pushOps],
+        [applyOptimistic, pushOps, refresh],
       );
 
       /** Undo the last recorded op batch (local + Host). Inverse ops run in reverse. */
@@ -1401,7 +1872,7 @@ window.__ModuleLoader__.load({
             acceptState(payload);
             return true;
           } catch (failure) {
-            setNotice({ kind: 'error', text: t0('loadFailed') + ': ' + String((failure && failure.message) || failure) });
+            setNotice({ kind: 'error', text: noticeText('loadFailed') + ': ' + String((failure && failure.message) || failure) });
             return false;
           }
         },
@@ -1421,11 +1892,11 @@ window.__ModuleLoader__.load({
             text:
               result && result.errors && result.errors.length > 0
                 ? result.errors.join('; ')
-                : t0('saved') + (result && result.written ? ' · ' + result.written.length : ''),
+                : noticeText('saved') + (result && result.written ? ' · ' + result.written.length : ''),
           });
           return true;
         } catch (failure) {
-          setNotice({ kind: 'error', text: t0('errorGeneric') + ': ' + String((failure && failure.message) || failure) });
+          setNotice({ kind: 'error', text: noticeText('errorGeneric') + ': ' + String((failure && failure.message) || failure) });
           return false;
         } finally {
           setSaving(false);
@@ -1437,7 +1908,7 @@ window.__ModuleLoader__.load({
         try {
           const payload = await fetchJson(RELOAD_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
           acceptState(payload);
-          setNotice({ kind: 'ok', text: t0('reload') });
+          setNotice({ kind: 'ok', text: noticeText('reload') });
         } catch (failure) {
           setNotice({ kind: 'error', text: String((failure && failure.message) || failure) });
         }
@@ -1465,19 +1936,336 @@ window.__ModuleLoader__.load({
     }
 
     /** Translation for code outside React (notices): best-effort zh default. */
-    function t0(key) {
+    function noticeText(key) {
       return zh[key] !== undefined ? zh[key] : key;
     }
 
-    // =======================================================================
-    // Audio: waveform peaks + a transport backed by an <audio> element.
-    // =======================================================================
+    // ========================================================================
+    // 07 · Audio: per-clip waveform peaks + a multi-<audio> transport.
+    // ========================================================================
 
     /** Peak count used for the timeline waveform strip. */
     const WAVE_BINS = 4096;
+    /**
+     * Spectrogram resolution: dynamic time columns (about 44 per second, matching
+     * a 23 ms FFT hop at 44.1 kHz so the strip stays crisp at ordinary zoom
+     * levels) × log-frequency bands.
+     */
+    const SPECTRUM_MIN_COLUMNS = 360;
+    const SPECTRUM_MAX_COLUMNS = 8192;
+    const SPECTRUM_COLUMNS_PER_SECOND = 44;
+    const SPECTRUM_BANDS = 128;
+    const SPECTRUM_FFT = 1024;
+    const SPECTRUM_MIN_HZ = 40;
+    const SPECTRUM_MAX_HZ = 16000;
 
-    /** Read a 16/24/32-bit PCM WAV into a mono peak array. */
-    function wavPeaks(buffer, bins) {
+    /** Periodic Hann window for the STFT. */
+    function hannWindow(size) {
+      const window = new Float32Array(size);
+      for (let i = 0; i < size; i += 1) window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (size - 1));
+      return window;
+    }
+    const SPECTRUM_WINDOW = hannWindow(SPECTRUM_FFT);
+
+    /** In-place iterative radix-2 FFT (length must be a power of two). */
+    function fftInPlace(real, imag) {
+      const n = real.length;
+      for (let i = 1, j = 0; i < n; i += 1) {
+        let bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+          const tr = real[i];
+          real[i] = real[j];
+          real[j] = tr;
+          const ti = imag[i];
+          imag[i] = imag[j];
+          imag[j] = ti;
+        }
+      }
+      for (let len = 2; len <= n; len <<= 1) {
+        const angle = (-2 * Math.PI) / len;
+        const wLenR = Math.cos(angle);
+        const wLenI = Math.sin(angle);
+        for (let i = 0; i < n; i += len) {
+          let wR = 1;
+          let wI = 0;
+          const half = len >> 1;
+          for (let j = 0; j < half; j += 1) {
+            const uR = real[i + j];
+            const uI = imag[i + j];
+            const vR = real[i + j + half] * wR - imag[i + j + half] * wI;
+            const vI = real[i + j + half] * wI + imag[i + j + half] * wR;
+            real[i + j] = uR + vR;
+            imag[i + j] = uI + vI;
+            real[i + j + half] = uR - vR;
+            imag[i + j + half] = uI - vI;
+            const nextR = wR * wLenR - wI * wLenI;
+            wI = wR * wLenI + wI * wLenR;
+            wR = nextR;
+          }
+        }
+      }
+    }
+
+    /**
+     * Compute a compact spectrogram from a mono sample reader.
+     *
+     * `sampleAt(frame)` returns -1..1; `frames` is the clip length in samples.
+     * The result has `columns × bands` 0..255 intensity values (row 0 = lowest
+     * frequency). Column count scales with the clip duration (~12/s, clamped to
+     * 360…8192) so the cached image can be downscaled on screen instead of
+     * blurred up from a low-resolution strip.
+     */
+    function computeSpectrum(sampleAt, frames, sampleRate) {
+      if (!(frames > 0) || !(sampleRate > 0) || typeof sampleAt !== 'function') return null;
+      const duration = frames / sampleRate;
+      const columns = Math.max(
+        SPECTRUM_MIN_COLUMNS,
+        Math.min(SPECTRUM_MAX_COLUMNS, Math.round(duration * SPECTRUM_COLUMNS_PER_SECOND)),
+      );
+      const bands = SPECTRUM_BANDS;
+      const fftSize = SPECTRUM_FFT;
+      const half = fftSize >> 1;
+      const binHz = sampleRate / fftSize;
+      const nyquist = sampleRate / 2;
+      const maxHz = Math.max(SPECTRUM_MIN_HZ * 2, Math.min(SPECTRUM_MAX_HZ, nyquist * 0.95));
+      const edges = new Float64Array(bands + 1);
+      for (let b = 0; b <= bands; b += 1) {
+        edges[b] = SPECTRUM_MIN_HZ * Math.pow(maxHz / SPECTRUM_MIN_HZ, b / bands);
+      }
+      const data = new Uint8Array(columns * bands);
+      const real = new Float32Array(fftSize);
+      const imag = new Float32Array(fftSize);
+      for (let c = 0; c < columns; c += 1) {
+        const center = Math.floor(((c + 0.5) / columns) * frames);
+        const start = center - half;
+        for (let i = 0; i < fftSize; i += 1) {
+          const frame = start + i;
+          real[i] = frame >= 0 && frame < frames ? sampleAt(frame) * SPECTRUM_WINDOW[i] : 0;
+          imag[i] = 0;
+        }
+        fftInPlace(real, imag);
+        for (let b = 0; b < bands; b += 1) {
+          const from = Math.max(1, Math.floor(edges[b] / binHz));
+          const to = Math.min(half - 1, Math.max(from, Math.ceil(edges[b + 1] / binHz) - 1));
+          let power = 0;
+          for (let i = from; i <= to; i += 1) {
+            const magnitude = real[i] * real[i] + imag[i] * imag[i];
+            if (magnitude > power) power = magnitude;
+          }
+          const normalized = Math.sqrt(power) / half;
+          const db = 20 * Math.log10(normalized + 1e-7);
+          const level = Math.max(0, Math.min(1, (db + 75) / 60));
+          data[c * bands + b] = Math.round(level * 255);
+        }
+      }
+      return { columns, bands, data, minHz: SPECTRUM_MIN_HZ, maxHz, sampleRate };
+    }
+
+    /** Heat-map colour for one spectrogram intensity (0..1). */
+    function spectrumColorRgb(value) {
+      const v = Math.max(0, Math.min(1, value));
+      const stops = [
+        [0, [8, 10, 26]],
+        [0.22, [38, 30, 104]],
+        [0.45, [112, 34, 138]],
+        [0.68, [212, 76, 92]],
+        [0.85, [250, 166, 58]],
+        [1, [255, 246, 198]],
+      ];
+      for (let i = 0; i < stops.length - 1; i += 1) {
+        const a = stops[i];
+        const b = stops[i + 1];
+        if (v > b[0]) continue;
+        const t = b[0] === a[0] ? 0 : (v - a[0]) / (b[0] - a[0]);
+        return [
+          Math.round(a[1][0] + (b[1][0] - a[1][0]) * t),
+          Math.round(a[1][1] + (b[1][1] - a[1][1]) * t),
+          Math.round(a[1][2] + (b[1][2] - a[1][2]) * t),
+        ];
+      }
+      return [255, 246, 198];
+    }
+
+    /**
+     * Estimate a tempo from an onset-strength envelope with a Goertzel
+     * tempogram: candidates 60…200 BPM in 0.25 BPM steps, harmonic support for
+     * 2×/3× the fundamental, and a mild log-normal prior around 120 BPM.
+     */
+    function detectBpmFromOnsets(onsets, rate) {
+      const count = onsets && onsets.length ? onsets.length : 0;
+      if (!(rate > 0) || count < Math.max(16, Math.round(rate * 3))) return null;
+      let mean = 0;
+      for (let i = 0; i < count; i += 1) mean += onsets[i];
+      mean /= count;
+      const signal = new Float32Array(count);
+      let peak = 0;
+      for (let i = 0; i < count; i += 1) {
+        const value = Math.max(0, onsets[i] - mean * 0.3);
+        signal[i] = value;
+        if (value > peak) peak = value;
+      }
+      if (peak <= 0) return null;
+      // Hann window keeps the long-clip DFT from leaking between candidates.
+      const window = new Float32Array(count);
+      for (let i = 0; i < count; i += 1) {
+        window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (count - 1));
+        signal[i] /= peak;
+      }
+      const MIN_BPM = 60;
+      const MAX_BPM = 200;
+      const STEP = 0.25;
+      const candidates = Math.floor((MAX_BPM - MIN_BPM) / STEP) + 1;
+      const magnitudes = new Float32Array(candidates);
+      for (let index = 0; index < candidates; index += 1) {
+        const bpm = MIN_BPM + index * STEP;
+        const frequency = bpm / 60;
+        const coefficient = 2 * Math.cos((2 * Math.PI * frequency) / rate);
+        let previous = 0;
+        let current = 0;
+        for (let i = 0; i < count; i += 1) {
+          const next = signal[i] * window[i] + coefficient * current - previous;
+          previous = current;
+          current = next;
+        }
+        const power = current * current + previous * previous - coefficient * previous * current;
+        magnitudes[index] = Math.sqrt(Math.max(0, power)) / count;
+      }
+      const at = (bpm) => {
+        const position = (bpm - MIN_BPM) / STEP;
+        const lower = Math.floor(position);
+        const upper = Math.ceil(position);
+        if (lower < 0 || upper >= candidates) return 0;
+        if (lower === upper) return magnitudes[lower];
+        const fraction = position - lower;
+        return magnitudes[lower] * (1 - fraction) + magnitudes[upper] * fraction;
+      };
+      const weightedScores = new Float32Array(candidates);
+      let best = null;
+      for (let index = 0; index < candidates; index += 1) {
+        const bpm = MIN_BPM + index * STEP;
+        let score = magnitudes[index];
+        if (bpm * 2 <= MAX_BPM) score += 0.5 * at(bpm * 2);
+        if (bpm * 3 <= MAX_BPM) score += 0.25 * at(bpm * 3);
+        const prior = Math.exp(-0.5 * Math.pow(Math.log2(bpm / 120) / 0.8, 2));
+        const weighted = score * (0.55 + 0.45 * prior);
+        weightedScores[index] = weighted;
+        if (!best || weighted > best.weighted) best = { index, bpm, weighted, magnitude: magnitudes[index] };
+      }
+      if (!best) return null;
+      // Parabolic interpolation between the three bins around the peak gives a
+      // sub-step estimate (the 0.25 BPM grid alone would drift on long songs).
+      const left = best.index > 0 ? weightedScores[best.index - 1] : best.weighted;
+      const right = best.index + 1 < candidates ? weightedScores[best.index + 1] : best.weighted;
+      const denominator = left - 2 * best.weighted + right;
+      let delta = denominator !== 0 ? (0.5 * (left - right)) / denominator : 0;
+      if (!Number.isFinite(delta)) delta = 0;
+      delta = Math.max(-0.49, Math.min(0.49, delta));
+      const bpm = Math.max(MIN_BPM, Math.min(MAX_BPM, best.bpm + delta * STEP));
+      let average = 0;
+      for (let index = 0; index < candidates; index += 1) average += magnitudes[index];
+      average /= candidates;
+      const confidence = average > 1e-9 ? Math.max(0, Math.min(1, best.magnitude / (average * 5))) : 0;
+      return { bpm, confidence };
+    }
+
+    /**
+     * Detect the BPM of one spectrogram: low-band-weighted spectral flux (bass
+     * and kick carry the beat; offbeat hats matter less) followed by the
+     * tempogram detector above.
+     *
+     * @returns {{bpm:number, confidence:number}|null}
+     */
+    function detectBpmFromSpectrum(spectrum, duration) {
+      if (!spectrum || !spectrum.data || !(duration > 3)) return null;
+      const columns = spectrum.columns;
+      const bands = spectrum.bands;
+      const rate = columns / duration;
+      if (!(rate > 0) || columns < 8) return null;
+      const envelope = new Float32Array(columns);
+      for (let column = 1; column < columns; column += 1) {
+        let flux = 0;
+        for (let band = 0; band < bands; band += 1) {
+          const index = column * bands + band;
+          const difference = spectrum.data[index] - spectrum.data[index - bands];
+          if (difference <= 0) continue;
+          // 3× weight at the lowest band, tapering to 1× at the top.
+          flux += difference * (1 + 2 * (1 - band / Math.max(1, bands - 1)));
+        }
+        envelope[column] = flux;
+      }
+      return detectBpmFromOnsets(envelope, rate);
+    }
+
+    /**
+     * Pick a project-wide BPM. A long main song outweighs a short sting even
+     * when the sting's pulse is cleaner, so confidence is scaled by duration
+     * (full weight from 30 s).
+     */
+    function detectProjectBpm(clips, waves) {
+      let best = null;
+      for (const clip of clips || []) {
+        if (!clip) continue;
+        const key = clip.file || clip.relativePath || '';
+        const wave = key && waves ? waves[key] : null;
+        if (!wave || !wave.spectrum) continue;
+        const duration = Number.isFinite(clip.duration) && clip.duration > 0 ? clip.duration : wave.duration;
+        const result = detectBpmFromSpectrum(wave.spectrum, duration);
+        if (!result || !Number.isFinite(result.bpm)) continue;
+        const weight = Math.min(1, Math.max(0, duration || 0) / 30);
+        const score = result.confidence * weight;
+        if (!best || score > best.score) {
+          best = {
+            bpm: result.bpm,
+            confidence: result.confidence,
+            score,
+            clipId: clip.id || null,
+            clipName: clip.name || clip.method || '',
+          };
+        }
+      }
+      return best;
+    }
+
+    /** Cached offscreen canvas for one spectrogram (browsers only). */
+    function spectrumCanvasFor(spectrum) {
+      if (!spectrum || !spectrum.data) return null;
+      if (spectrum._canvas !== undefined) return spectrum._canvas;
+      spectrum._canvas = null;
+      try {
+        if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
+        const canvas = document.createElement('canvas');
+        canvas.width = spectrum.columns;
+        canvas.height = spectrum.bands;
+        const context = canvas.getContext('2d');
+        if (!context || typeof context.createImageData !== 'function' || typeof context.putImageData !== 'function') return null;
+        const image = context.createImageData(spectrum.columns, spectrum.bands);
+        const pixels = image.data;
+        for (let c = 0; c < spectrum.columns; c += 1) {
+          for (let b = 0; b < spectrum.bands; b += 1) {
+            const rgb = spectrumColorRgb(spectrum.data[c * spectrum.bands + b] / 255);
+            const y = spectrum.bands - 1 - b;
+            const at = (y * spectrum.columns + c) * 4;
+            pixels[at] = rgb[0];
+            pixels[at + 1] = rgb[1];
+            pixels[at + 2] = rgb[2];
+            pixels[at + 3] = 255;
+          }
+        }
+        context.putImageData(image, 0, 0);
+        spectrum._canvas = canvas;
+      } catch (error) {
+        spectrum._canvas = null;
+      }
+      return spectrum._canvas;
+    }
+
+    /**
+     * Parse the RIFF/WAVE header and return a frame reader. Supports PCM
+     * 8/16/24/32-bit and IEEE-float 32-bit files (format 1 or 3).
+     */
+    function readWavInfo(buffer) {
       const view = new DataView(buffer);
       if (view.byteLength < 44) return null;
       const readAscii = (offset, length) => {
@@ -1510,32 +2298,53 @@ window.__ModuleLoader__.load({
         offset = body + size + (size % 2);
       }
       if (dataOffset < 0 || dataLength <= 0) return null;
-      if (audioFormat !== 1 || [8, 16, 24, 32].indexOf(bits) === -1) return null;
+      if ([8, 16, 24, 32].indexOf(bits) === -1) return null;
+      if (audioFormat !== 1 && !(audioFormat === 3 && bits === 32)) return null;
       const bytesPerSample = bits / 8;
       const frameBytes = bytesPerSample * channels;
       const frames = Math.floor(dataLength / frameBytes);
       if (frames <= 0) return null;
+      const readSample = (frame, channel) => {
+        const base = dataOffset + frame * frameBytes + channel * bytesPerSample;
+        if (bits === 16) return view.getInt16(base, true) / 32768;
+        if (bits === 24) {
+          const raw = view.getUint8(base) | (view.getUint8(base + 1) << 8) | (view.getInt8(base + 2) << 16);
+          return raw / 8388608;
+        }
+        if (bits === 32) return audioFormat === 3 ? view.getFloat32(base, true) : view.getInt32(base, true) / 2147483648;
+        return (view.getUint8(base) - 128) / 128;
+      };
+      const sampleAt = (frame) => {
+        let sum = 0;
+        for (let channel = 0; channel < channels; channel += 1) sum += readSample(frame, channel);
+        return sum / channels;
+      };
+      return { view, audioFormat, channels, sampleRate, bits, dataOffset, dataLength, frameBytes, frames, sampleAt };
+    }
+
+    /** Read a PCM/float WAV into a mono peak array. */
+    function wavPeaks(buffer, bins) {
+      const info = readWavInfo(buffer);
+      if (!info) return null;
       const peaks = new Float32Array(bins);
-      const step = frames / bins;
+      const step = info.frames / bins;
       for (let bin = 0; bin < bins; bin += 1) {
         const from = Math.floor(bin * step);
-        const to = Math.min(frames, Math.floor((bin + 1) * step));
+        const to = Math.min(info.frames, Math.floor((bin + 1) * step));
         let peak = 0;
         for (let frame = from; frame < to; frame += 1) {
-          const base = dataOffset + frame * frameBytes;
-          let sample = 0;
-          if (bits === 16) sample = view.getInt16(base, true) / 32768;
-          else if (bits === 24) {
-            const raw = view.getUint8(base) | (view.getUint8(base + 1) << 8) | (view.getInt8(base + 2) << 16);
-            sample = raw / 8388608;
-          } else if (bits === 32) sample = view.getFloat32(base, true);
-          else sample = (view.getUint8(base) - 128) / 128;
-          const magnitude = Math.abs(sample);
+          const magnitude = Math.abs(info.sampleAt(frame));
           if (magnitude > peak) peak = magnitude;
         }
         peaks[bin] = peak;
       }
-      return { peaks, duration: frames / sampleRate, sampleRate, channels };
+      let spectrum = null;
+      try {
+        spectrum = computeSpectrum(info.sampleAt, info.frames, info.sampleRate);
+      } catch (error) {
+        spectrum = null;
+      }
+      return { peaks, duration: info.frames / info.sampleRate, sampleRate: info.sampleRate, channels: info.channels, spectrum };
     }
 
     /** Decode non-WAV audio through Web Audio as a fallback for the waveform. */
@@ -1552,20 +2361,43 @@ window.__ModuleLoader__.load({
         }
       });
       if (!decoded) return null;
-      const channel = decoded.getChannelData(0);
+      const channels = [];
+      for (let index = 0; index < decoded.numberOfChannels; index += 1) channels.push(decoded.getChannelData(index));
+      const length = channels.length > 0 ? channels[0].length : 0;
+      if (length <= 0) return null;
+      const sampleAt =
+        channels.length === 1
+          ? (frame) => channels[0][frame]
+          : (frame) => {
+              let sum = 0;
+              for (const channel of channels) sum += channel[frame];
+              return sum / channels.length;
+            };
       const peaks = new Float32Array(bins);
-      const step = channel.length / bins;
+      const step = length / bins;
       for (let bin = 0; bin < bins; bin += 1) {
         const from = Math.floor(bin * step);
-        const to = Math.min(channel.length, Math.floor((bin + 1) * step));
+        const to = Math.min(length, Math.floor((bin + 1) * step));
         let peak = 0;
-        for (let i = from; i < to; i += 1) {
-          const magnitude = Math.abs(channel[i]);
+        for (let frame = from; frame < to; frame += 1) {
+          const magnitude = Math.abs(sampleAt(frame));
           if (magnitude > peak) peak = magnitude;
         }
         peaks[bin] = peak;
       }
-      return { peaks, duration: decoded.duration, sampleRate: decoded.sampleRate, channels: decoded.numberOfChannels };
+      let spectrum = null;
+      try {
+        spectrum = computeSpectrum(sampleAt, length, decoded.sampleRate);
+      } catch (error) {
+        spectrum = null;
+      }
+      return {
+        peaks,
+        duration: decoded.duration,
+        sampleRate: decoded.sampleRate,
+        channels: decoded.numberOfChannels,
+        spectrum,
+      };
     }
 
     /** File URL for one project asset (absolute path). */
@@ -1573,67 +2405,109 @@ window.__ModuleLoader__.load({
       return FILE_URL + '?path=' + encodeURIComponent(filePath || '');
     }
 
-    /** Load and analyse the project audio for the waveform strip. */
-    function useWaveform(audioFile, audioPath) {
-      const [wave, setWave] = useState(null);
-      const [status, setStatus] = useState(audioFile ? 'loading' : 'none');
+    /**
+     * Load and analyse every distinct audio clip used by the project for the
+     * timeline waveform strip. Returns `{ waves, status }` where `waves` maps
+     * `clip.file || clip.relativePath` to `{ peaks, duration, spectrum }`
+     * (`spectrum` is the cached STFT result used by the spectrum view).
+     */
+    function useWaveforms(clips) {
+      const [waves, setWaves] = useState({});
+      const [status, setStatus] = useState('none');
+      const signature = (clips || [])
+        .map((clip) => (clip ? clip.file || clip.relativePath || '' : ''))
+        .filter((path, index, all) => path && all.indexOf(path) === index)
+        .join('\n');
       useEffect(() => {
         let cancelled = false;
-        setWave(null);
-        if (!audioFile) {
+        const paths = signature ? signature.split('\n') : [];
+        // Keep already-decoded waves; only the new paths need fetching.
+        setWaves((current) => {
+          const next = {};
+          for (const path of paths) if (current[path]) next[path] = current[path];
+          return next;
+        });
+        if (paths.length === 0) {
           setStatus('none');
           return undefined;
         }
         setStatus('loading');
-        const target = audioPath || audioFile;
-        fetch(assetUrl(target), { cache: 'no-store' })
-          .then((response) => {
-            if (!response.ok) throw new Error('HTTP ' + response.status);
-            return response.arrayBuffer();
-          })
-          .then((buffer) => {
-            if (cancelled) return;
-            let result = null;
-            try {
-              result = wavPeaks(buffer, WAVE_BINS);
-            } catch (error) {
-              result = null;
-            }
-            if (result) {
-              setWave(result);
-              setStatus('ready');
-              return null;
-            }
-            return decodePeaks(buffer, WAVE_BINS)
-              .then((decoded) => {
-                if (cancelled) return;
-                if (decoded) {
-                  setWave(decoded);
-                  setStatus('ready');
-                } else {
-                  setStatus('error');
-                }
-              })
-              .catch(() => {
-                if (!cancelled) setStatus('error');
-              });
-          })
-          .catch(() => {
-            if (!cancelled) setStatus('error');
-          });
+        let remaining = paths.length;
+        let failed = false;
+        const settle = () => {
+          remaining -= 1;
+          if (cancelled || remaining > 0) return;
+          setStatus(failed ? 'error' : 'ready');
+        };
+        for (const target of paths) {
+          fetch(assetUrl(target), { cache: 'no-store' })
+            .then((response) => {
+              if (!response.ok) throw new Error('HTTP ' + response.status);
+              return response.arrayBuffer();
+            })
+            .then((buffer) => {
+              if (cancelled) return null;
+              let result = null;
+              try {
+                result = wavPeaks(buffer, WAVE_BINS);
+              } catch (error) {
+                result = null;
+              }
+              if (result) {
+                setWaves((current) => Object.assign({}, current, { [target]: result }));
+                return null;
+              }
+              return decodePeaks(buffer, WAVE_BINS)
+                .then((decoded) => {
+                  if (cancelled || !decoded) {
+                    if (!cancelled) failed = true;
+                    return;
+                  }
+                  setWaves((current) => Object.assign({}, current, { [target]: decoded }));
+                })
+                .catch(() => {
+                  failed = true;
+                });
+            })
+            .catch(() => {
+              failed = true;
+            })
+            .finally(settle);
+        }
         return () => {
           cancelled = true;
         };
-      }, [audioFile, audioPath]);
-      return { wave, status };
+      }, [signature]);
+      return { waves, status };
+    }
+
+    /** Stable identity of one audio clip across wire refreshes. */
+    function audioClipKey(clip, index) {
+      if (!clip) return 'clip:' + index;
+      return [clip.staffId || '', clip.id || clip.method || '', clip.file || clip.relativePath || '', index].join('|');
+    }
+
+    /** True while `time` is inside one audio clip's chart-time window. */
+    function clipActiveAt(clip, time, audio) {
+      if (!clip) return false;
+      const start = Number.isFinite(clip.offset) ? clip.offset : 0;
+      if (time < start - 1e-6) return false;
+      let length = Number.isFinite(clip.duration) && clip.duration > 0 ? clip.duration : null;
+      if (length === null && audio && Number.isFinite(audio.duration) && audio.duration > 0) length = audio.duration;
+      return length === null || time < start + length;
     }
 
     /**
-     * Transport: owns one <audio> element for the project audio, exposes the
-     * live playhead and the usual play/pause/seek/rate controls.
+     * Transport for one or more audio clips ("音频乐段"), exposing the live
+     * chart playhead and the usual play/pause/seek/rate controls.
+     *
+     * Each clip gets its own <audio> element; clips start/stop as the playhead
+     * enters/leaves `[offset, offset + duration)`. The clock is audio-driven
+     * while a clip is actually playing and falls back to the wall clock for
+     * gaps, missing audio, and before the first clip starts.
      */
-    function useTransport(audioPath, fallbackDuration, chartOffset) {
-      const audioRef = useRef(null);
+    function useTransport(clips, fallbackDuration, resetKey) {
+      const audioMapRef = useRef(new Map());
       const [time, setTime] = useState(0);
       const [playing, setPlaying] = useState(false);
       const [rate, setRateState] = useState(1);
@@ -1641,58 +2515,71 @@ window.__ModuleLoader__.load({
       const [muted, setMuted] = useState(false);
       const timeRef = useRef(0);
       const rafRef = useRef(0);
-      const startRef = useRef(0);
-      // Chart time = audio time + audioOffset (the audio staff's PeriodConfig
-      // timeOffset, e.g. Song.g has 0.373 s).
-      const offsetRef = useRef(Number.isFinite(chartOffset) ? chartOffset : 0);
-      offsetRef.current = Number.isFinite(chartOffset) ? chartOffset : 0;
-      // Loop inputs kept in refs so the RAF callback never closes over stale
-      // state and so audio can be started once the chart playhead reaches the
-      // audio start (charts may begin before the audio does).
+      const clipsRef = useRef([]);
       const playingRef = useRef(false);
       const rateRef = useRef(1);
       const mutedRef = useRef(false);
-      const durationRef = useRef(0);
-      const audioPreStartRef = useRef(false);
+      const durationRef = useRef(fallbackDuration || 0);
+      /** Wall-clock anchor: chart time + performance.now() + rate at anchor. */
+      const anchorRef = useRef({ chart: 0, at: 0, rate: 1 });
+      const clipSignature = (clips || [])
+        .map((clip, index) => audioClipKey(clip, index) + ':' + (clip.offset || 0) + ':' + (clip.duration === null || clip.duration === undefined ? '' : clip.duration))
+        .join('||');
 
-      useEffect(() => {
-        if (fallbackDuration && fallbackDuration > 0) setDuration(fallbackDuration);
-      }, [fallbackDuration]);
+      clipsRef.current = Array.isArray(clips) ? clips : [];
+
+      const pauseAll = useCallback(() => {
+        for (const entry of audioMapRef.current.values()) {
+          try {
+            entry.audio.pause();
+          } catch (error) {
+            /* ignore */
+          }
+        }
+      }, []);
+
+      const disposeAll = useCallback(() => {
+        for (const entry of audioMapRef.current.values()) {
+          try {
+            entry.audio.pause();
+            entry.audio.removeAttribute('src');
+          } catch (error) {
+            /* ignore */
+          }
+        }
+        audioMapRef.current.clear();
+      }, []);
+
+      const ensureAudio = useCallback((clip) => {
+        if (!clip || typeof Audio !== 'function') return null;
+        const key = audioClipKey(clip, 0);
+        const existing = audioMapRef.current.get(key);
+        if (existing) return existing.audio;
+        const source = clip.file || clip.relativePath || '';
+        if (!source) return null;
+        const audio = new Audio();
+        audio.preload = 'auto';
+        audio.src = assetUrl(source);
+        const entry = { audio, key };
+        audioMapRef.current.set(key, entry);
+        return audio;
+      }, []);
 
       useEffect(
         () => () => {
           if (rafRef.current) cancelAnimationFrame(rafRef.current);
           rafRef.current = 0;
-          const audio = audioRef.current;
-          if (audio) {
-            try {
-              audio.pause();
-              audio.removeAttribute('src');
-            } catch (error) {
-              /* ignore */
-            }
-          }
+          disposeAll();
         },
-        [],
+        [disposeAll],
       );
 
-      // A different project means a different audio file: drop the old element.
-      // Duration-only changes (a Host refresh recomputes it) must NOT reset the
-      // transport, so this effect is keyed on the audio path alone.
+      // A different project (or reload) replaces the document: drop elements and
+      // reset the playhead. Adding another clip must NOT reset it.
       useEffect(() => {
-        const audio = audioRef.current;
-        if (audio) {
-          try {
-            audio.pause();
-            audio.removeAttribute('src');
-          } catch (error) {
-            /* ignore */
-          }
-        }
-        audioRef.current = null;
-        audioPreStartRef.current = false;
+        disposeAll();
         timeRef.current = 0;
-        startRef.current = performance.now();
+        anchorRef.current = { chart: 0, at: performance.now(), rate: rateRef.current };
         playingRef.current = false;
         setTime(0);
         setPlaying(false);
@@ -1700,165 +2587,192 @@ window.__ModuleLoader__.load({
           cancelAnimationFrame(rafRef.current);
           rafRef.current = 0;
         }
-      }, [audioPath]);
+      }, [resetKey, disposeAll]);
+
+      // Keep one element per live clip; drop elements whose clip disappeared.
+      useEffect(() => {
+        const wanted = new Set();
+        for (const clip of clipsRef.current) {
+          if (!clip) continue;
+          const audio = ensureAudio(clip);
+          if (audio) wanted.add(audioClipKey(clip, 0));
+        }
+        for (const [key, entry] of Array.from(audioMapRef.current.entries())) {
+          if (wanted.has(key)) continue;
+          try {
+            entry.audio.pause();
+            entry.audio.removeAttribute('src');
+          } catch (error) {
+            /* ignore */
+          }
+          audioMapRef.current.delete(key);
+        }
+      }, [clipSignature, ensureAudio]);
+
+      // Duration: the project duration or the furthest clip end, whichever is
+      // later. Audio metadata may refine an unknown clip duration while loading.
+      useEffect(() => {
+        let total = Number.isFinite(fallbackDuration) ? fallbackDuration : 0;
+        for (const clip of clipsRef.current) {
+          const length = Number.isFinite(clip.duration) ? clip.duration : 0;
+          const end = (Number.isFinite(clip.offset) ? clip.offset : 0) + length;
+          if (end > total) total = end;
+        }
+        durationRef.current = Math.max(total, 0);
+        setDuration(durationRef.current);
+      }, [fallbackDuration, clipSignature]);
+
+      /** Start/stop clip elements to match `chartTime`. */
+      const syncClips = useCallback((chartTime, options) => {
+        const settings = options || {};
+        const isPlaying = playingRef.current;
+        for (const clip of clipsRef.current) {
+          if (!clip) continue;
+          const audio = ensureAudio(clip);
+          if (!audio || audio.error) continue;
+          const offset = Number.isFinite(clip.offset) ? clip.offset : 0;
+          const active = clipActiveAt(clip, chartTime, audio);
+          audio.playbackRate = rateRef.current;
+          audio.muted = mutedRef.current;
+          if (!active) {
+            if (!audio.paused) {
+              try {
+                audio.pause();
+              } catch (error) {
+                /* ignore */
+              }
+            }
+            if (settings.seek) {
+              try {
+                audio.currentTime = 0;
+              } catch (error) {
+                /* ignore */
+              }
+            }
+            continue;
+          }
+          const target = Math.max(0, chartTime - offset);
+          if (settings.seek || audio.paused || Math.abs(audio.currentTime - target) > 0.35) {
+            try {
+              audio.currentTime = target;
+            } catch (error) {
+              /* ignore */
+            }
+          }
+          if (!isPlaying) {
+            if (!audio.paused) {
+              try {
+                audio.pause();
+              } catch (error) {
+                /* ignore */
+              }
+            }
+            continue;
+          }
+          if (audio.paused) {
+            const promise = audio.play();
+            if (promise && typeof promise.catch === 'function') promise.catch(() => undefined);
+          }
+        }
+      }, [ensureAudio]);
 
       const tick = useCallback(() => {
         if (!playingRef.current) {
           rafRef.current = 0;
           return;
         }
-        const audio = audioRef.current;
-        const offset = offsetRef.current;
+        // Prefer an actually-playing clip as the clock; otherwise extrapolate
+        // from the wall clock (gaps, loading media, missing audio).
+        let authoritative = null;
+        for (const clip of clipsRef.current) {
+          const audio = ensureAudio(clip);
+          if (!audio || !clipActiveAt(clip, timeRef.current, audio)) continue;
+          if (audio.paused || audio.error || audio.readyState < 2) continue;
+          const offset = Number.isFinite(clip.offset) ? clip.offset : 0;
+          authoritative = { audio, offset };
+          break;
+        }
         let current;
-        const audioAuthoritative = !!audio && !audio.error && audio.readyState >= 2 && !audio.paused;
-        if (audioAuthoritative) {
-          current = audio.currentTime + offset;
+        if (authoritative) {
+          current = authoritative.audio.currentTime + authoritative.offset;
         } else {
-          // Wall clock while the media is loading or while the chart playhead is
-          // still before the audio start.
-          current = Math.max(0, (performance.now() - startRef.current) / 1000);
-          if (audio && audioPreStartRef.current && current >= offset) {
-            audioPreStartRef.current = false;
-            try {
-              audio.currentTime = Math.max(0, current - offset);
-            } catch (error) {
-              /* ignore */
-            }
-            audio.playbackRate = rateRef.current;
-            audio.muted = mutedRef.current;
-            const promise = audio.play();
-            if (promise && typeof promise.catch === 'function') promise.catch(() => undefined);
+          const anchor = anchorRef.current;
+          current = anchor.chart + ((performance.now() - anchor.at) / 1000) * anchor.rate;
+        }
+        // Refine durations once an element knows its real length.
+        let total = Number.isFinite(durationRef.current) ? durationRef.current : 0;
+        for (const clip of clipsRef.current) {
+          let length = Number.isFinite(clip.duration) ? clip.duration : 0;
+          if (!length) {
+            const audio = ensureAudio(clip);
+            if (audio && Number.isFinite(audio.duration) && audio.duration > 0) length = audio.duration;
+          }
+          const end = (Number.isFinite(clip.offset) ? clip.offset : 0) + length;
+          if (end > total) total = end;
+        }
+        if (total > 0 && Math.abs(total - durationRef.current) > 0.01) {
+          durationRef.current = total;
+          setDuration(total);
+        }
+        syncClips(current);
+        if (durationRef.current > 0 && current >= durationRef.current) {
+          current = durationRef.current;
+          playingRef.current = false;
+          setPlaying(false);
+          pauseAll();
+          if (rafRef.current) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = 0;
           }
         }
         if (Math.abs(current - timeRef.current) > 0.004) {
           timeRef.current = current;
           setTime(current);
         }
-        if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
-          const total = Math.max(audio.duration + offset, durationRef.current || 0);
-          if (Math.abs(durationRef.current - total) > 0.01) {
-            durationRef.current = total;
-            setDuration(total);
-          }
-        }
-        rafRef.current = requestAnimationFrame(tick);
-      }, []);
-
-      const ensureAudio = useCallback(() => {
-        if (audioRef.current) return audioRef.current;
-        if (typeof Audio !== 'function' || !audioPath) return null;
-        const audio = new Audio();
-        audio.preload = 'auto';
-        audio.src = assetUrl(audioPath);
-        audioRef.current = audio;
-        // Stop the clock when the track ends: without this the RAF loop would
-        // keep running for the lifetime of the page.
-        audio.addEventListener('ended', () => {
-          playingRef.current = false;
-          setPlaying(false);
-          if (rafRef.current) {
-            cancelAnimationFrame(rafRef.current);
-            rafRef.current = 0;
-          }
-          setTime(timeRef.current);
-        });
-        return audio;
-      }, [audioPath]);
+        if (playingRef.current) rafRef.current = requestAnimationFrame(tick);
+      }, [ensureAudio, pauseAll, syncClips]);
 
       const play = useCallback(() => {
-        const audio = ensureAudio();
-        const offset = offsetRef.current;
         const startChartTime = timeRef.current;
         playingRef.current = true;
         setPlaying(true);
-        startRef.current = performance.now() - startChartTime * 1000;
-        audioPreStartRef.current = !!audio && startChartTime < offset;
-        if (audio) {
-          audio.playbackRate = rate;
-          audio.muted = muted;
-          if (!audioPreStartRef.current) {
-            try {
-              audio.currentTime = Math.max(0, startChartTime - offset);
-            } catch (error) {
-              /* ignore */
-            }
-            const promise = audio.play();
-            if (promise && typeof promise.catch === 'function') {
-              promise.catch(() => {
-                playingRef.current = false;
-                setPlaying(false);
-              });
-            }
-          }
-        }
+        anchorRef.current = { chart: startChartTime, at: performance.now(), rate: rateRef.current };
+        syncClips(startChartTime, { seek: true });
         if (!rafRef.current) rafRef.current = requestAnimationFrame(tick);
-      }, [ensureAudio, muted, rate, tick]);
+      }, [syncClips, tick]);
 
       const pause = useCallback(() => {
         playingRef.current = false;
         setPlaying(false);
-        audioPreStartRef.current = false;
-        const audio = audioRef.current;
-        if (audio) {
-          try {
-            audio.pause();
-          } catch (error) {
-            /* ignore */
-          }
-        }
+        pauseAll();
         if (rafRef.current) {
           cancelAnimationFrame(rafRef.current);
           rafRef.current = 0;
         }
         setTime(timeRef.current);
-      }, []);
+      }, [pauseAll]);
 
       const seek = useCallback((seconds) => {
         const limit = durationRef.current > 0 ? durationRef.current : Infinity;
         const target = clamp(seconds, 0, limit);
-        const audio = audioRef.current;
-        const offset = offsetRef.current;
         timeRef.current = target;
-        startRef.current = performance.now() - target * 1000;
+        anchorRef.current = { chart: target, at: performance.now(), rate: rateRef.current };
         setTime(target);
-        if (!audio) return;
-        if (playingRef.current && target < offset) {
-          // Before the audio starts: hold the media until the playhead reaches it.
-          audioPreStartRef.current = true;
-          try {
-            audio.pause();
-          } catch (error) {
-            /* ignore */
-          }
-          return;
-        }
-        audioPreStartRef.current = false;
-        try {
-          audio.currentTime = Math.max(0, target - offset);
-        } catch (error) {
-          /* ignore */
-        }
-        if (playingRef.current && audio.paused) {
-          audio.playbackRate = rateRef.current;
-          audio.muted = mutedRef.current;
-          const promise = audio.play();
-          if (promise && typeof promise.catch === 'function') promise.catch(() => undefined);
-        }
-      }, []);
+        syncClips(target, { seek: true });
+      }, [syncClips]);
 
       const setRate = useCallback((value) => {
+        anchorRef.current = { chart: timeRef.current, at: performance.now(), rate: value };
         rateRef.current = value;
         setRateState(value);
-        const audio = audioRef.current;
-        if (audio) audio.playbackRate = value;
-      }, []);
+        syncClips(timeRef.current);
+      }, [syncClips]);
 
       const toggleMute = useCallback(() => {
         const next = !mutedRef.current;
         mutedRef.current = next;
         setMuted(next);
-        const audio = audioRef.current;
-        if (audio) audio.muted = next;
+        for (const entry of audioMapRef.current.values()) entry.audio.muted = next;
       }, []);
 
       playingRef.current = playing;
@@ -1869,9 +2783,9 @@ window.__ModuleLoader__.load({
       return { time, timeRef, playing, duration, rate, muted, play, pause, seek, setRate, toggleMute };
     }
 
-    // =======================================================================
-    // UI primitives.
-    // =======================================================================
+    // ========================================================================
+    // 08 · UI primitives.
+    // ========================================================================
 
     /** Inline 16px glyphs; stroke uses currentColor so theme colours apply. */
     const ICON_PATHS = {
@@ -1886,6 +2800,7 @@ window.__ModuleLoader__.load({
       plus: ['M8 3.6v8.8', 'M3.6 8h8.8'],
       minus: ['M3.6 8h8.8'],
       trash: ['M3.6 5h8.8', 'M6.3 5V3.6h3.4V5', 'M5 5l.5 8h5l.5-8'],
+      pencil: ['M3.4 12.6l.7-3.1 7-7 2.4 2.4-7 7-3.1.7z', 'M9.9 4.4l1.8 1.8'],
       duplicate: ['M5.4 5.4h7v7h-7z', 'M3.6 10.6V3.6h7'],
       zoomIn: ['M7.9 3.4a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9z', 'M11.2 11.2l2.4 2.4', 'M7.9 5.9v4', 'M5.9 7.9h4'],
       zoomOut: ['M7.9 3.4a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9z', 'M11.2 11.2l2.4 2.4', 'M5.9 7.9h4'],
@@ -1906,6 +2821,8 @@ window.__ModuleLoader__.load({
       mute: ['M3.6 6.4h2.2L8.4 3.8v8.4L5.8 9.6H3.6z', 'M10.8 6.4l2.8 3.2', 'M13.6 6.4l-2.8 3.2'],
       close: ['M4.2 4.2l7.6 7.6', 'M11.8 4.2l-7.6 7.6'],
       preview: ['M2.6 4.4h10.8v7.2H2.6z', 'M6.7 6.2v3.6l3.6-1.8z'],
+      wave: ['M2.4 8c1.2 0 1.2-3.2 2.7-3.2S6.6 11.2 8.1 11.2 9.4 4.8 10.9 4.8s1.5 3.2 2.7 3.2'],
+      spectrum: ['M3.4 9.8V7.4', 'M5.5 11.2V4.8', 'M7.6 10.4V5.6', 'M9.7 11.4V3.6', 'M11.8 9.6V6.4', 'M13.3 8.6V7.4'],
     };
 
     /** One inline icon. */
@@ -2124,9 +3041,9 @@ window.__ModuleLoader__.load({
       return h(NumberField, { value: props.value, onCommit: props.onCommit, step: props.step, placeholder: props.title });
     }
 
-    // =======================================================================
-    // Generic value editor (recursive over the typed value tree).
-    // =======================================================================
+    // ========================================================================
+    // 09 · Generic value editor (recursive over the typed value tree).
+    // ========================================================================
 
     /** Field descriptor lookup inside a value-type schema. */
     function fieldSchema(schema, name) {
@@ -2148,12 +3065,6 @@ window.__ModuleLoader__.load({
       if (/^ColorArgb$|^Color$|^ColorRgb$/.test(type)) return true;
       if (schema && schema.type === 'color' && hasRgb) return true;
       return false;
-    }
-
-    /** True when a value is a curve-ish object. */
-    function isCurveValue(value, schema) {
-      if (schema && schema.type === 'curve') return true;
-      return isDrawableCurve(value);
     }
 
     /**
@@ -2367,9 +3278,9 @@ window.__ModuleLoader__.load({
       return { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: {} };
     }
 
-    // =======================================================================
-    // Curve editor dialog — plot, drag handles, and numeric tree in one modal.
-    // =======================================================================
+    // ========================================================================
+    // 10 · Curve editor dialog — plot, drag handles, and numeric tree in one modal.
+    // ========================================================================
 
     /** Walk a value tree and collect draggable handles (as root-relative paths). */
     function collectHandles(value) {
@@ -2508,6 +3419,30 @@ window.__ModuleLoader__.load({
       return [lo - pad, hi + pad];
     }
 
+    /** Padding around a curve plot: room for the axis labels. */
+    const CURVE_PLOT_PADDING = Object.freeze({ left: 46, right: 16, top: 16, bottom: 26 });
+
+    /**
+     * Pixel <-> data mapping of one curve plot.
+     *
+     * @param {number} width  canvas CSS width
+     * @param {number} height canvas CSS height
+     * @param {{x0:number,x1:number,y0:number,y1:number}} bounds data window
+     * @returns {{pad: object, plotW: number, plotH: number, toX: Function, toY: Function}}
+     */
+    function curvePlotGeometry(width, height, bounds) {
+      const pad = CURVE_PLOT_PADDING;
+      const plotW = Math.max(10, width - pad.left - pad.right);
+      const plotH = Math.max(10, height - pad.top - pad.bottom);
+      return {
+        pad,
+        plotW,
+        plotH,
+        toX: (x) => pad.left + ((x - bounds.x0) / (bounds.x1 - bounds.x0)) * plotW,
+        toY: (y) => pad.top + plotH - ((y - bounds.y0) / (bounds.y1 - bounds.y0)) * plotH,
+      };
+    }
+
     /**
      * Modal curve editor. Edits a draft copy; Apply commits one patch op so the
      * whole dialog interaction is a single undo step.
@@ -2541,16 +3476,7 @@ window.__ModuleLoader__.load({
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, width, height);
         const bounds = boundsRef.current;
-        const padLeft = 46;
-        const padRight = 16;
-        const padTop = 16;
-        const padBottom = 26;
-        const plotW = Math.max(10, width - padLeft - padRight);
-        const plotH = Math.max(10, height - padTop - padBottom);
-        const toX = (x) => padLeft + ((x - bounds.x0) / (bounds.x1 - bounds.x0)) * plotW;
-        const toY = (y) => padTop + plotH - ((y - bounds.y0) / (bounds.y1 - bounds.y0)) * plotH;
-        const fromX = (px) => bounds.x0 + ((px - padLeft) / plotW) * (bounds.x1 - bounds.x0);
-        const fromY = (py) => bounds.y0 + ((padTop + plotH - py) / plotH) * (bounds.y1 - bounds.y0);
+        const { pad, plotW, plotH, toX, toY } = curvePlotGeometry(width, height, bounds);
 
         const labelColor = cssToken('--dsw-alias-label-secondary', '#8b93a7');
         const lineColor = cssToken('--dsw-alias-border-l1', '#2c3446');
@@ -2562,19 +3488,19 @@ window.__ModuleLoader__.load({
         ctx.font = '10px ui-monospace, monospace';
         ctx.fillStyle = labelColor;
         for (let i = 0; i <= 4; i += 1) {
-          const gy = padTop + (plotH * i) / 4;
+          const gy = pad.top + (plotH * i) / 4;
           ctx.beginPath();
-          ctx.moveTo(padLeft, gy);
-          ctx.lineTo(padLeft + plotW, gy);
+          ctx.moveTo(pad.left, gy);
+          ctx.lineTo(pad.left + plotW, gy);
           ctx.stroke();
           const value = bounds.y1 - ((bounds.y1 - bounds.y0) * i) / 4;
           ctx.fillText(formatNum(value, 3), 4, gy + 3);
         }
         for (let i = 0; i <= 4; i += 1) {
-          const gx = padLeft + (plotW * i) / 4;
+          const gx = pad.left + (plotW * i) / 4;
           ctx.beginPath();
-          ctx.moveTo(gx, padTop);
-          ctx.lineTo(gx, padTop + plotH);
+          ctx.moveTo(gx, pad.top);
+          ctx.lineTo(gx, pad.top + plotH);
           ctx.stroke();
           const value = bounds.x0 + ((bounds.x1 - bounds.x0) * i) / 4;
           ctx.fillText(formatNum(value, 3), gx - 10, height - 8);
@@ -2583,8 +3509,8 @@ window.__ModuleLoader__.load({
         if (bounds.y0 < 0 && bounds.y1 > 0) {
           ctx.strokeStyle = 'rgba(255,255,255,0.22)';
           ctx.beginPath();
-          ctx.moveTo(padLeft, toY(0));
-          ctx.lineTo(padLeft + plotW, toY(0));
+          ctx.moveTo(pad.left, toY(0));
+          ctx.lineTo(pad.left + plotW, toY(0));
           ctx.stroke();
         }
 
@@ -2614,8 +3540,8 @@ window.__ModuleLoader__.load({
           if (boundary < bounds.x0 || boundary > bounds.x1) continue;
           const px = toX(boundary);
           ctx.beginPath();
-          ctx.moveTo(px, padTop);
-          ctx.lineTo(px, padTop + plotH);
+          ctx.moveTo(px, pad.top);
+          ctx.lineTo(px, pad.top + plotH);
           ctx.stroke();
         }
         ctx.setLineDash([]);
@@ -2647,13 +3573,13 @@ window.__ModuleLoader__.load({
           } else if (handle.kind === 'y') {
             const y = valueAsNumber(getAtPath(draft, handle.yPath));
             if (y === null) return;
-            px = padLeft + plotW * 0.5;
+            px = pad.left + plotW * 0.5;
             py = toY(y);
           } else if (handle.kind === 'x') {
             const x = valueAsNumber(getAtPath(draft, handle.xPath));
             if (x === null) return;
             px = toX(x);
-            py = padTop + plotH - 8;
+            py = pad.top + plotH - 8;
           } else {
             return;
           }
@@ -2683,27 +3609,16 @@ window.__ModuleLoader__.load({
         const canvas = canvasRef.current;
         if (!canvas) return null;
         const rect = canvas.getBoundingClientRect();
-        const padLeft = 46;
-        const padRight = 16;
-        const padTop = 16;
-        const padBottom = 26;
-        const plotW = Math.max(10, rect.width - padLeft - padRight);
-        const plotH = Math.max(10, rect.height - padTop - padBottom);
         // While dragging, keep the bounds captured at pointer-down: otherwise a
         // handle that changes the curve range would move the axes under the
         // cursor and the handle would jump.
         const bounds = (dragRef.current && dragRef.current.bounds) || boundsRef.current;
+        const geometry = curvePlotGeometry(rect.width, rect.height, bounds);
         const px = event.clientX - rect.left;
         const py = event.clientY - rect.top;
         return {
-          x: (px - padLeft) / plotW,
-          y: (padTop + plotH - py) / plotH,
-          dataX: bounds.x0 + ((px - padLeft) / plotW) * (bounds.x1 - bounds.x0),
-          dataY: bounds.y0 + ((padTop + plotH - py) / plotH) * (bounds.y1 - bounds.y0),
-          plotW,
-          plotH,
-          padLeft,
-          padTop,
+          dataX: bounds.x0 + ((px - geometry.pad.left) / geometry.plotW) * (bounds.x1 - bounds.x0),
+          dataY: bounds.y0 + ((geometry.pad.top + geometry.plotH - py) / geometry.plotH) * (bounds.y1 - bounds.y0),
         };
       }, []);
 
@@ -2714,14 +3629,7 @@ window.__ModuleLoader__.load({
           if (!canvas) return -1;
           const rect = canvas.getBoundingClientRect();
           const bounds = (dragRef.current && dragRef.current.bounds) || boundsRef.current;
-          const padLeft = 46;
-          const padRight = 16;
-          const padTop = 16;
-          const padBottom = 26;
-          const plotW = Math.max(10, rect.width - padLeft - padRight);
-          const plotH = Math.max(10, rect.height - padTop - padBottom);
-          const toX = (x) => padLeft + ((x - bounds.x0) / (bounds.x1 - bounds.x0)) * plotW;
-          const toY = (y) => padTop + plotH - ((y - bounds.y0) / (bounds.y1 - bounds.y0)) * plotH;
+          const { pad, plotW, plotH, toX, toY } = curvePlotGeometry(rect.width, rect.height, bounds);
           let best = -1;
           let bestDistance = 12 * 12;
           handles.forEach((handle, index) => {
@@ -2735,13 +3643,13 @@ window.__ModuleLoader__.load({
             } else if (handle.kind === 'y') {
               const y = valueAsNumber(getAtPath(draft, handle.yPath));
               if (y === null) return;
-              hx = padLeft + plotW * 0.5;
+              hx = pad.left + plotW * 0.5;
               hy = toY(y);
             } else if (handle.kind === 'x') {
               const x = valueAsNumber(getAtPath(draft, handle.xPath));
               if (x === null) return;
               hx = toX(x);
-              hy = padTop + plotH - 8;
+              hy = pad.top + plotH - 8;
             } else {
               return;
             }
@@ -2877,13 +3785,746 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // =======================================================================
-    // Left pane: staff list and element list.
-    // =======================================================================
+    // ========================================================================
+    // 11 · Left pane: staff list and element list.
+    // ========================================================================
+
+    /** Close a dialog on Escape (capture, so the editor shortcuts stay quiet). */
+    function useDialogEscape(onClose) {
+      useEffect(() => {
+        const handler = (event) => {
+          if (event.key !== 'Escape') return;
+          event.preventDefault();
+          event.stopPropagation();
+          onClose();
+        };
+        window.addEventListener('keydown', handler, true);
+        return () => window.removeEventListener('keydown', handler, true);
+      }, [onClose]);
+    }
+
+    /** Dialog that appends one empty chart or storyboard staff to the project. */
+    function AddStaffDialog(props) {
+      const { t, project, onCancel, onCreate } = props;
+      const [kind, setKind] = useState('chart');
+      const [name, setName] = useState(t('defaultStaffName'));
+      const [edited, setEdited] = useState(false);
+      const [error, setError] = useState('');
+      useDialogEscape(onCancel);
+      const identity = useMemo(() => uniqueStaffIdentity(project, kind), [project, kind]);
+      const pickKind = (nextKind) => {
+        if (nextKind === kind) return;
+        setKind(nextKind);
+        setError('');
+        if (!edited) setName(nextKind === 'storyboard' ? t('defaultStoryboardName') : t('defaultStaffName'));
+      };
+      const submit = () => {
+        const displayName = String(name || '').trim();
+        if (displayName.length === 0) {
+          setError(t('staffNameLabel'));
+          return;
+        }
+        onCreate({ kind, displayName });
+      };
+      const kindCard = (value, label, description) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dgc-kindCard' + (kind === value ? ' is-active' : ''),
+            onClick: () => pickKind(value),
+            'aria-pressed': kind === value,
+          },
+          h('strong', null, label),
+          h('span', null, description),
+        );
+      return h(
+        'div',
+        {
+          className: 'dgc-modalBackdrop',
+          onClick: (event) => {
+            if (event.target === event.currentTarget) onCancel();
+          },
+        },
+        h(
+          'div',
+          { className: 'dgc-modal', style: { width: 'min(460px,94vw)' }, role: 'dialog', 'aria-modal': 'true' },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h('h3', null, t('newStaff')),
+            h(Button, { variant: 'ghost', onClick: onCancel, title: t('close') }, '×'),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogBody' },
+            h(
+              'div',
+              { className: 'dgc-kindGrid' },
+              kindCard('chart', t('staffKindChartOption'), t('staffKindChartDesc')),
+              kindCard('storyboard', t('staffKindStoryboardOption'), t('staffKindStoryboardDesc')),
+            ),
+            h(
+              'label',
+              { className: 'dgc-dialogField' },
+              t('staffNameLabel'),
+              h('input', {
+                className: 'dgc-input',
+                value: name,
+                autoFocus: true,
+                spellCheck: false,
+                'aria-invalid': error ? 'true' : undefined,
+                onChange: (event) => {
+                  setEdited(true);
+                  setName(event.target.value);
+                  setError('');
+                },
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') submit();
+                },
+              }),
+            ),
+            h(
+              'div',
+              { className: 'dgc-listRowSlim dgc-mono' },
+              t('staffFileLabel') + ' · ' + identity.fileName + '    ' + t('staffClassLabel') + ' · ' + identity.className,
+            ),
+            error ? h('div', { className: 'dgc-listRowSlim dgc-err' }, error) : null,
+            h('div', { className: 'dgc-hint', style: { padding: '0' } }, t('newStaffHint')),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogFoot' },
+            h('span', { className: 'dgc-spacer' }),
+            h(Button, { onClick: onCancel }, t('cancel')),
+            h(Button, { variant: 'primary', icon: 'plus', onClick: submit }, t('create')),
+          ),
+        ),
+      );
+    }
+
+    /** Dialog that inserts one catalog element at a captured playhead time. */
+    function ElementPaletteDialog(props) {
+      const { t, project, catalog, initialStaffId, time, onCancel, onPick, onRequestStaff } = props;
+      const editable = useMemo(
+        () => (project.staffs || []).filter((staff) => staff.kind === 'chart' || staff.kind === 'storyboard'),
+        [project],
+      );
+      const [staffId, setStaffId] = useState(() => {
+        const preferred = editable.find((staff) => staff.id === initialStaffId);
+        return preferred ? preferred.id : editable.length > 0 ? editable[0].id : '';
+      });
+      const [query, setQuery] = useState('');
+      useDialogEscape(onCancel);
+
+      const staff = editable.find((item) => item.id === staffId) || editable[0] || null;
+      const effectiveStaffId = staff ? staff.id : '';
+      const isStoryboard = !!staff && staff.kind === 'storyboard';
+      const entries = useMemo(() => {
+        const needle = query.trim().toLowerCase();
+        return (catalog.elements || []).filter((entry) => {
+          if (!entry || entry.category === 'inner') return false;
+          const allowed = isStoryboard ? entry.group === 'DeentyStoryboard' : entry.category === 'note' || entry.category === 'hold' || entry.category === 'lane';
+          if (!allowed) return false;
+          if (!needle) return true;
+          return [entry.type, entry.shortName, entry.label, shortType(entry.type)]
+            .join(' ')
+            .toLowerCase()
+            .indexOf(needle) !== -1;
+        });
+      }, [catalog, isStoryboard, query]);
+
+      const categoryLabel = (entry) => {
+        if (entry.category === 'lane') return t('filterLanes');
+        if (entry.category === 'note' || entry.category === 'hold') return t('filterNotes');
+        return t('filterOther');
+      };
+      let lastGroup = null;
+      const rows = [];
+      for (const entry of entries) {
+        const group = categoryLabel(entry);
+        if (group !== lastGroup) {
+          lastGroup = group;
+          rows.push(h('div', { key: 'group:' + group, className: 'dgc-groupHead' }, group));
+        }
+        rows.push(
+          h(
+            'button',
+            {
+              key: entry.type,
+              type: 'button',
+              className: 'dgc-paletteRow',
+              title: entry.type + ' · ' + elementCategory(catalog, entry.type),
+              onClick: () => onPick(entry.type, effectiveStaffId),
+            },
+            h('span', { className: 'dgc-swatch', style: { background: elementColor(catalog, entry.type) } }),
+            h('strong', null, entry.label || entry.shortName || shortType(entry.type)),
+            h('span', { className: 'dgc-rowMeta' }, entry.type),
+          ),
+        );
+      }
+
+      return h(
+        'div',
+        {
+          className: 'dgc-modalBackdrop',
+          onClick: (event) => {
+            if (event.target === event.currentTarget) onCancel();
+          },
+        },
+        h(
+          'div',
+          { className: 'dgc-modal', style: { width: 'min(500px,94vw)' }, role: 'dialog', 'aria-modal': 'true' },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h('h3', null, t('newElement')),
+            h(Button, { variant: 'ghost', onClick: onCancel, title: t('close') }, '×'),
+          ),
+          editable.length === 0
+            ? h(
+                'div',
+                { className: 'dgc-dialogEmpty' },
+                h('div', null, t('paletteNeedStaff')),
+                h('div', { style: { marginTop: 10 } }, h(Button, { variant: 'primary', icon: 'plus', onClick: onRequestStaff }, t('addStaff'))),
+              )
+            : h(
+                'div',
+                { className: 'dgc-dialogBody', style: { gap: 8, paddingBottom: 0 } },
+                h(
+                  'div',
+                  { className: 'dgc-paletteMeta', style: { padding: 0 } },
+                  h('span', null, t('elementTarget')),
+                  editable.length === 1
+                    ? h('span', { className: 'dgc-listRowSlim', style: { padding: 0 } }, staff ? staff.displayName || staff.className || staff.id : '')
+                    : h(
+                        'select',
+                        { className: 'dgc-select', value: effectiveStaffId, onChange: (event) => setStaffId(event.target.value) },
+                        editable.map((item) =>
+                          h('option', { key: item.id, value: item.id }, (item.displayName || item.className || item.id) + ' · ' + item.id),
+                        ),
+                      ),
+                  h('span', { className: 'dgc-spacer' }),
+                  h('span', { className: 'dgc-listRowSlim dgc-mono', style: { padding: 0 } }, formatTime(time)),
+                ),
+                h('input', {
+                  className: 'dgc-input',
+                  placeholder: t('search'),
+                  value: query,
+                  autoFocus: true,
+                  spellCheck: false,
+                  onChange: (event) => setQuery(event.target.value),
+                }),
+              ),
+          editable.length === 0
+            ? null
+            : h(
+                'div',
+                { className: 'dgc-paletteList' },
+                entries.length === 0 ? h('div', { className: 'dgc-dialogEmpty' }, t('paletteNoMatch')) : rows,
+              ),
+          h(
+            'div',
+            { className: 'dgc-dialogFoot' },
+            h('span', { className: 'dgc-listRowSlim', style: { flex: '1 1 auto', padding: 0 } }, t('paletteHint')),
+            h(Button, { onClick: onCancel }, t('cancel')),
+          ),
+        ),
+      );
+    }
+
+    /**
+     * Floating right-click menu for one staff row: rename its alias or delete
+     * the staff (which removes the `.g` file on disk after confirmation).
+     */
+    function StaffContextMenu(props) {
+      const { t, staff, x, y, onRename, onDelete, onClose } = props;
+      const menuRef = useRef(null);
+      useEffect(() => {
+        const close = () => onClose();
+        const onPointerDown = (event) => {
+          const node = menuRef.current;
+          if (node && event && event.target && typeof node.contains === 'function' && node.contains(event.target)) return;
+          onClose();
+        };
+        const onKeyDown = (event) => {
+          if (!event || event.key !== 'Escape') return;
+          event.preventDefault();
+          event.stopPropagation();
+          onClose();
+        };
+        window.addEventListener('pointerdown', onPointerDown, true);
+        window.addEventListener('keydown', onKeyDown, true);
+        window.addEventListener('resize', close);
+        window.addEventListener('wheel', close, true);
+        window.addEventListener('blur', close);
+        return () => {
+          window.removeEventListener('pointerdown', onPointerDown, true);
+          window.removeEventListener('keydown', onKeyDown, true);
+          window.removeEventListener('resize', close);
+          window.removeEventListener('wheel', close, true);
+          window.removeEventListener('blur', close);
+        };
+      }, [onClose]);
+      const label = staff.displayName || staff.className || staff.id;
+      return h(
+        'div',
+        {
+          ref: menuRef,
+          className: 'dgc-menu',
+          role: 'menu',
+          'aria-label': t('staffs'),
+          style: { left: x, top: y },
+          onContextMenu: (event) => event.preventDefault(),
+        },
+        h('div', { className: 'dgc-menuHead', title: staff.file || staff.id }, label),
+        h(
+          'button',
+          { type: 'button', className: 'dgc-menuItem', role: 'menuitem', onClick: () => onRename(staff) },
+          h(Icon, { name: 'pencil', size: 13 }),
+          h('span', null, t('renameStaff')),
+        ),
+        h(
+          'button',
+          { type: 'button', className: 'dgc-menuItem is-danger', role: 'menuitem', onClick: () => onDelete(staff) },
+          h(Icon, { name: 'trash', size: 13 }),
+          h('span', null, t('deleteStaff')),
+        ),
+      );
+    }
+
+    /** Dialog that edits one staff's display alias (the `.g` displayName header). */
+    function RenameStaffDialog(props) {
+      const { t, staff, onCancel, onSubmit } = props;
+      const current = staff.displayName || staff.className || staff.id;
+      const [name, setName] = useState(current);
+      const [error, setError] = useState('');
+      useDialogEscape(onCancel);
+      const submit = () => {
+        const value = String(name || '').trim();
+        if (value.length === 0) {
+          setError(t('staffAliasEmpty'));
+          return;
+        }
+        if (value === current) {
+          onCancel();
+          return;
+        }
+        onSubmit(value);
+      };
+      return h(
+        'div',
+        {
+          className: 'dgc-modalBackdrop',
+          onClick: (event) => {
+            if (event.target === event.currentTarget) onCancel();
+          },
+        },
+        h(
+          'div',
+          { className: 'dgc-modal', style: { width: 'min(420px,94vw)' }, role: 'dialog', 'aria-modal': 'true' },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h('h3', null, t('renameStaff')),
+            h(Button, { variant: 'ghost', onClick: onCancel, title: t('close') }, '×'),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogBody' },
+            h(
+              'label',
+              { className: 'dgc-dialogField' },
+              t('staffAliasLabel'),
+              h('input', {
+                className: 'dgc-input',
+                value: name,
+                autoFocus: true,
+                spellCheck: false,
+                'aria-invalid': error ? 'true' : undefined,
+                onChange: (event) => {
+                  setName(event.target.value);
+                  setError('');
+                },
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') submit();
+                },
+              }),
+            ),
+            h(
+              'div',
+              { className: 'dgc-listRowSlim dgc-mono' },
+              t('staffFileLabel') + ' · ' + staff.id + '    ' + t('staffClassLabel') + ' · ' + (staff.className || ''),
+            ),
+            error ? h('div', { className: 'dgc-listRowSlim dgc-err' }, error) : null,
+            h('div', { className: 'dgc-hint', style: { padding: '0' } }, t('staffAliasHint')),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogFoot' },
+            h('span', { className: 'dgc-spacer' }),
+            h(Button, { onClick: onCancel }, t('cancel')),
+            h(Button, { variant: 'primary', onClick: submit }, t('apply')),
+          ),
+        ),
+      );
+    }
+
+    /** Confirmation dialog for permanently deleting one staff and its `.g` file. */
+    function DeleteStaffDialog(props) {
+      const { t, staff, onCancel, onConfirm } = props;
+      useDialogEscape(onCancel);
+      const name = staff.displayName || staff.className || staff.id;
+      return h(
+        'div',
+        {
+          className: 'dgc-modalBackdrop',
+          onClick: (event) => {
+            if (event.target === event.currentTarget) onCancel();
+          },
+        },
+        h(
+          'div',
+          { className: 'dgc-modal', style: { width: 'min(430px,94vw)' }, role: 'dialog', 'aria-modal': 'true' },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h('h3', null, t('deleteStaffTitle')),
+            h(Button, { variant: 'ghost', onClick: onCancel, title: t('close') }, '×'),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogBody' },
+            h('div', { className: 'dgc-warnCard' }, t('deleteStaffWarning').replace('{name}', name)),
+            staff.kind === 'audio' ? h('div', { className: 'dgc-listRowSlim dgc-err' }, t('deleteStaffAudioWarning')) : null,
+            h('div', { className: 'dgc-listRowSlim dgc-mono' }, t('staffFileLabel') + ' · ' + (staff.file || staff.id)),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogFoot' },
+            h('span', { className: 'dgc-spacer' }),
+            h(Button, { onClick: onCancel }, t('cancel')),
+            h(Button, { variant: 'danger', icon: 'trash', onClick: onConfirm }, t('delete')),
+          ),
+        ),
+      );
+    }
+
+    /** Upload one browser `File` into the open project; returns host metadata. */
+    async function importAudioRequest(file) {
+      const response = await fetch(IMPORT_AUDIO_URL + '?name=' + encodeURIComponent(file.name || 'audio.wav'), {
+        method: 'POST',
+        headers: { 'content-type': file.type || 'application/octet-stream' },
+        body: await file.arrayBuffer(),
+      });
+      let body = null;
+      try {
+        body = await response.json();
+      } catch (error) {
+        body = null;
+      }
+      if (!response.ok) {
+        const message = body && (body.error || body.message) ? body.error || body.message : 'HTTP ' + response.status;
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
+      }
+      if (!body || typeof body.file !== 'string' || body.file.length === 0) throw new Error('import response has no file name');
+      return body;
+    }
+
+    /** Strip the extension from a file name (asset-name default). */
+    function audioStem(fileName) {
+      const base = String(fileName || '').split(/[\\/]/).pop() || '';
+      const dot = base.lastIndexOf('.');
+      return dot > 0 ? base.slice(0, dot) : base;
+    }
+
+    /**
+     * Dialog that appends one `@Song` audio period ("音频乐段") to an audio
+     * staff: pick a project audio file or import one from this computer, then
+     * set the chart time at which the clip starts.
+     */
+    function AddAudioPeriodDialog(props) {
+      const { t, project, staffId, time, hostReady, onCancel, onCreate } = props;
+      const audioStaffs = useMemo(
+        () => ((project && project.staffs) || []).filter((staff) => staff && staff.kind === 'audio'),
+        [project],
+      );
+      const assets = (project && project.assets && Array.isArray(project.assets.audio) ? project.assets.audio : []).slice();
+      const [targetStaff, setTargetStaff] = useState(() => {
+        const preferred = audioStaffs.find((staff) => staff.id === staffId);
+        return preferred ? preferred.id : audioStaffs.length > 0 ? audioStaffs[0].id : '';
+      });
+      const [mode, setMode] = useState(assets.length > 0 ? 'project' : 'import');
+      const [asset, setAsset] = useState(assets.length > 0 ? assets[0] : '');
+      const [file, setFile] = useState(null);
+      const [name, setName] = useState(assets.length > 0 ? audioStem(assets[0]) : '');
+      const [nameEdited, setNameEdited] = useState(false);
+      const [offset, setOffset] = useState(() => {
+        const seconds = Number.isFinite(time) && time >= 0 ? time : 0;
+        return String(Math.round(seconds * 1000) / 1000);
+      });
+      const [error, setError] = useState('');
+      const [busy, setBusy] = useState(false);
+      useDialogEscape(onCancel);
+
+      const pickFile = (nextFile, source) => {
+        setFile(nextFile);
+        if (!nameEdited) setName(source ? audioStem(source) : '');
+        setError('');
+      };
+      const pickMode = (next) => {
+        setMode(next);
+        setError('');
+      };
+      const submit = async () => {
+        if (hostReady === false) {
+          setError(t('audioHostStale'));
+          return;
+        }
+        const seconds = Number(String(offset).trim());
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          setError(t('audioTimeLabel'));
+          return;
+        }
+        const trimmed = String(name || '').trim();
+        if (trimmed.length === 0) {
+          setError(t('audioNeedName'));
+          return;
+        }
+        if (mode === 'import') {
+          if (!file) {
+            setError(t('audioNeedFile'));
+            return;
+          }
+          setBusy(true);
+          setError('');
+          try {
+            const uploaded = await importAudioRequest(file);
+            onCreate({
+              staffId: targetStaff,
+              file: uploaded.file,
+              name: trimmed,
+              timeOffset: Math.round(seconds * 1e6) / 1e6,
+              duration: uploaded.duration,
+            });
+          } catch (failure) {
+            const stale = failure && (failure.status === 404 || failure.status === 405);
+            setError(stale ? t('audioHostStale') : t('audioImportFailed') + ': ' + String((failure && failure.message) || failure));
+            setBusy(false);
+          }
+          return;
+        }
+        if (!asset) {
+          setError(t('audioNeedFile'));
+          return;
+        }
+        onCreate({
+          staffId: targetStaff,
+          file: asset,
+          name: trimmed,
+          timeOffset: Math.round(seconds * 1e6) / 1e6,
+        });
+      };
+      return h(
+        'div',
+        {
+          className: 'dgc-modalBackdrop',
+          onClick: (event) => {
+            if (event.target === event.currentTarget && !busy) onCancel();
+          },
+        },
+        h(
+          'div',
+          { className: 'dgc-modal', style: { width: 'min(500px,94vw)' }, role: 'dialog', 'aria-modal': 'true' },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h('h3', null, t('newAudioPeriod')),
+            h(Button, { variant: 'ghost', onClick: onCancel, title: t('close') }, '×'),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogBody' },
+            audioStaffs.length > 1
+              ? h(
+                  'label',
+                  { className: 'dgc-dialogField' },
+                  t('audioTargetStaff'),
+                  h(
+                    'select',
+                    {
+                      className: 'dgc-input',
+                      value: targetStaff,
+                      onChange: (event) => setTargetStaff(event.target.value),
+                    },
+                    audioStaffs.map((staff) => h('option', { key: staff.id, value: staff.id }, (staff.displayName || staff.className || staff.id) + ' · ' + staff.id)),
+                  ),
+                )
+              : null,
+            hostReady === false ? h('div', { className: 'dgc-warnCard' }, t('audioHostStale')) : null,
+            audioStaffs.length === 0 ? h('div', { className: 'dgc-warnCard' }, t('audioPeriodAutoStaff')) : null,
+            h(
+              'div',
+              { className: 'dgc-kindGrid' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dgc-kindCard' + (mode === 'project' ? ' is-active' : ''),
+                  onClick: () => pickMode('project'),
+                  disabled: assets.length === 0,
+                  'aria-pressed': mode === 'project',
+                },
+                h('strong', null, t('audioFileFromProject')),
+                h('span', null, assets.length > 0 ? String(assets.length) : '—'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dgc-kindCard' + (mode === 'import' ? ' is-active' : ''),
+                  onClick: () => pickMode('import'),
+                  'aria-pressed': mode === 'import',
+                },
+                h('strong', null, t('audioFileImport')),
+                h('span', null, t('audioFileImportHint')),
+              ),
+            ),
+            mode === 'project'
+              ? h(
+                  'label',
+                  { className: 'dgc-dialogField' },
+                  t('audioFileLabel'),
+                  h(
+                    'select',
+                    {
+                      className: 'dgc-input',
+                      value: asset,
+                      onChange: (event) => {
+                        const next = event.target.value;
+                        setAsset(next);
+                        if (!nameEdited) setName(audioStem(next));
+                        setError('');
+                      },
+                    },
+                    assets.map((item) => h('option', { key: item, value: item }, item)),
+                  ),
+                )
+              : h(
+                  'label',
+                  { className: 'dgc-dialogField' },
+                  t('audioFileLabel'),
+                  h('input', {
+                    className: 'dgc-input',
+                    type: 'file',
+                    accept: '.wav,.mp3,.ogg,.m4a,.aac,.flac,.opus,audio/*',
+                    disabled: busy,
+                    onChange: (event) => {
+                      const picked = event.target.files && event.target.files[0] ? event.target.files[0] : null;
+                      pickFile(picked, picked ? picked.name : '');
+                    },
+                  }),
+                  file ? h('div', { className: 'dgc-listRowSlim' }, file.name) : null,
+                ),
+            h(
+              'label',
+              { className: 'dgc-dialogField' },
+              t('audioNameLabel'),
+              h('input', {
+                className: 'dgc-input',
+                value: name,
+                spellCheck: false,
+                disabled: busy,
+                onChange: (event) => {
+                  setNameEdited(true);
+                  setName(event.target.value);
+                  setError('');
+                },
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter' && !busy) submit();
+                },
+              }),
+            ),
+            h(
+              'label',
+              { className: 'dgc-dialogField' },
+              t('audioTimeLabel'),
+              h('input', {
+                className: 'dgc-input',
+                type: 'number',
+                min: 0,
+                step: 0.001,
+                value: offset,
+                disabled: busy,
+                onChange: (event) => {
+                  setOffset(event.target.value);
+                  setError('');
+                },
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter' && !busy) submit();
+                },
+              }),
+            ),
+            error ? h('div', { className: 'dgc-listRowSlim dgc-err' }, error) : null,
+            h('div', { className: 'dgc-hint', style: { padding: '0' } }, t('audioPeriodHint')),
+            busy ? h('div', { className: 'dgc-hint', style: { padding: '0' } }, t('audioImporting')) : null,
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogFoot' },
+            h('span', { className: 'dgc-spacer' }),
+            h(Button, { onClick: onCancel, disabled: busy }, t('cancel')),
+            h(Button, { variant: 'primary', icon: 'plus', onClick: submit, disabled: busy || hostReady === false, title: hostReady === false ? t('audioHostStaleShort') : undefined }, t('create')),
+          ),
+        ),
+      );
+    }
+
+    /** Confirmation dialog for removing one audio period (keeps the file). */
+    function DeleteAudioPeriodDialog(props) {
+      const { t, staff, clip, onCancel, onConfirm } = props;
+      useDialogEscape(onCancel);
+      const staffName = (staff && (staff.displayName || staff.className || staff.id)) || '';
+      const text = t('deleteAudioPeriodWarning').replace('{name}', clip.name || clip.method || '').replace('{staff}', staffName);
+      return h(
+        'div',
+        {
+          className: 'dgc-modalBackdrop',
+          onClick: (event) => {
+            if (event.target === event.currentTarget) onCancel();
+          },
+        },
+        h(
+          'div',
+          { className: 'dgc-modal', style: { width: 'min(430px,94vw)' }, role: 'dialog', 'aria-modal': 'true' },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h('h3', null, t('deleteAudioPeriodTitle')),
+            h(Button, { variant: 'ghost', onClick: onCancel, title: t('close') }, '×'),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogBody' },
+            h('div', { className: 'dgc-warnCard' }, text),
+            h('div', { className: 'dgc-listRowSlim dgc-mono' }, (clip.relativePath || clip.file || '') + ' · ' + formatTime(clip.offset || 0)),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogFoot' },
+            h('span', { className: 'dgc-spacer' }),
+            h(Button, { onClick: onCancel }, t('cancel')),
+            h(Button, { variant: 'danger', icon: 'trash', onClick: onConfirm }, t('delete')),
+          ),
+        ),
+      );
+    }
 
     /** One staff row with a kind badge and element count. */
     function StaffRow(props) {
-      const { staff, active, hidden, onSelect, onToggleHidden, t } = props;
+      const { staff, active, hidden, onSelect, onToggleHidden, onMenu, onAddAudio, t } = props;
       const kindLabel =
         staff.kind === 'audio'
           ? t('staffAudio')
@@ -2892,13 +4533,24 @@ window.__ModuleLoader__.load({
             : staff.kind === 'chart'
               ? t('staffChart')
               : t('staffOther');
-      const count = (staff.periods || []).reduce((total, period) => total + (period.elements || []).length, 0);
+      const count =
+        staff.kind === 'audio'
+          ? (staff.audioPeriods || []).length
+          : (staff.periods || []).reduce((total, period) => total + (period.elements || []).length, 0);
       return h(
         'div',
         {
           className: 'dgc-row' + (active ? ' is-active' : ''),
           onClick: () => onSelect(staff.id),
-          title: staff.file,
+          onContextMenu: (event) => {
+            if (event && typeof event.preventDefault === 'function') event.preventDefault();
+            if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+            onSelect(staff.id);
+            const px = event && Number.isFinite(event.clientX) ? event.clientX : 0;
+            const py = event && Number.isFinite(event.clientY) ? event.clientY : 0;
+            onMenu(staff.id, px, py);
+          },
+          title: (staff.file || staff.id) + ' · ' + t('staffMenuHint'),
         },
         h('button', {
           className: 'dgc-rowBtn',
@@ -2910,30 +4562,58 @@ window.__ModuleLoader__.load({
           style: { opacity: hidden ? 0.35 : 0.75 },
         }, h(Icon, { name: hidden ? 'mute' : 'volume', size: 13 })),
         h('span', { className: 'dgc-rowLabel', style: hidden ? { opacity: 0.5 } : undefined }, staff.displayName || staff.className || staff.id),
+        staff.kind === 'audio'
+          ? h('button', {
+              className: 'dgc-rowBtn',
+              title: t('addAudioPeriod'),
+              'aria-label': t('addAudioPeriod'),
+              onClick: (event) => {
+                event.stopPropagation();
+                if (onAddAudio) onAddAudio(staff.id);
+              },
+            }, h(Icon, { name: 'plus', size: 12 }))
+          : null,
         h('span', { className: 'dgc-rowMeta' }, kindLabel + ' · ' + count),
       );
     }
 
     /** The whole left pane. */
     function LeftPane(props) {
-      const { project, catalog, t, selection, activeStaff, setActiveStaff, hiddenStaffs, toggleStaff, selectElement, seek } = props;
+      const {
+        project,
+        catalog,
+        t,
+        selection,
+        activeStaff,
+        setActiveStaff,
+        hiddenStaffs,
+        toggleStaff,
+        selectElement,
+        seek,
+        playheadRef,
+        addStaffRef,
+        addElementRef,
+        onRenameStaff,
+        onDeleteStaff,
+        onAddAudioPeriod,
+        onDeleteAudioPeriod,
+      } = props;
       const [query, setQuery] = useState('');
       const [filter, setFilter] = useState('all');
+      const [dialog, setDialog] = useState(null);
+      /** Open right-click menu: `{ staffId, x, y }` in viewport coordinates. */
+      const [menu, setMenu] = useState(null);
 
       const staffs = (project && project.staffs) || [];
-      const lanes = useMemo(() => {
-        const names = [];
-        for (const staff of staffs) {
-          for (const period of staff.periods || []) {
-            for (const element of period.elements || []) {
-              if (element.category === 'lane' && element.fields && typeof element.fields.name === 'string' && names.indexOf(element.fields.name) === -1) {
-                names.push(element.fields.name);
-              }
-            }
-          }
-        }
-        return names;
-      }, [staffs]);
+      const audioHostReady = !!(project && Array.isArray(project.audioPeriods));
+      const hasAudioStaff = staffs.some((staff) => staff && staff.kind === 'audio');
+      const activeAudioStaff = staffs.find((staff) => staff && staff.kind === 'audio' && staff.id === activeStaff) || null;
+      const audioPeriods = activeAudioStaff && Array.isArray(activeAudioStaff.audioPeriods) ? activeAudioStaff.audioPeriods : [];
+      const shownAudioPeriods = useMemo(() => {
+        const needle = query.trim().toLowerCase();
+        if (!needle) return audioPeriods;
+        return audioPeriods.filter((clip) => [clip.name, clip.method, clip.relativePath].join(' ').toLowerCase().indexOf(needle) !== -1);
+      }, [audioPeriods, query]);
 
       const elements = useMemo(() => {
         const rows = [];
@@ -2995,6 +4675,71 @@ window.__ModuleLoader__.load({
         return out;
       }, [activeStaff, filtered, staffs]);
 
+      const editableStaffs = staffs.filter((staff) => staff.kind === 'chart' || staff.kind === 'storyboard');
+      const openStaffDialog = () => setDialog({ kind: 'staff' });
+      const openElementDialog = () => {
+        const preferred = editableStaffs.find((staff) => staff.id === activeStaff) || editableStaffs[0] || null;
+        const playhead = playheadRef && typeof playheadRef.current === 'number' && Number.isFinite(playheadRef.current) ? playheadRef.current : 0;
+        setDialog({ kind: 'element', staffId: preferred ? preferred.id : '', time: Math.max(0, playhead) });
+      };
+      const createStaff = (request) => {
+        setDialog(null);
+        if (addStaffRef && typeof addStaffRef.current === 'function') addStaffRef.current(request);
+      };
+      const pickElement = (type, staffId) => {
+        setDialog(null);
+        setFilter('all');
+        setQuery('');
+        if (addElementRef && typeof addElementRef.current === 'function') addElementRef.current(type, staffId);
+      };
+
+      // --- Staff right-click menu (rename alias / delete staff) ---------------
+      const menuStaff = menu ? staffs.find((staff) => staff.id === menu.staffId) || null : null;
+      const renameTarget =
+        dialog && dialog.kind === 'renameStaff' ? staffs.find((staff) => staff.id === dialog.staffId) || null : null;
+      const deleteTarget =
+        dialog && dialog.kind === 'deleteStaff' ? staffs.find((staff) => staff.id === dialog.staffId) || null : null;
+      const deleteAudioTarget =
+        dialog && dialog.kind === 'deleteAudioPeriod'
+          ? (() => {
+              const staff = staffs.find((item) => item.id === dialog.staffId) || null;
+              const clip = staff ? (staff.audioPeriods || []).find((item) => item.id === dialog.audioPeriodId) || null : null;
+              return staff && clip ? { staff, clip } : null;
+            })()
+          : null;
+
+      const openStaffMenu = (staffId, x, y) => {
+        // The menu is at most 260 × ~104 px (head + two items + padding): clamp
+        // so it never opens off-screen at the right/bottom edge.
+        const width = 264;
+        const height = 110;
+        const vw = typeof window !== 'undefined' && Number.isFinite(window.innerWidth) ? window.innerWidth : 1200;
+        const vh = typeof window !== 'undefined' && Number.isFinite(window.innerHeight) ? window.innerHeight : 800;
+        setMenu({
+          staffId,
+          x: clamp(x, 8, Math.max(8, vw - width - 8)),
+          y: clamp(y, 8, Math.max(8, vh - height - 8)),
+        });
+      };
+      const closeStaffMenu = () => setMenu(null);
+      const requestRename = (staff) => {
+        setMenu(null);
+        setDialog({ kind: 'renameStaff', staffId: staff.id });
+      };
+      const requestDelete = (staff) => {
+        setMenu(null);
+        setDialog({ kind: 'deleteStaff', staffId: staff.id });
+      };
+      const submitRename = (displayName) => {
+        const staff = renameTarget;
+        setDialog(null);
+        if (staff && typeof onRenameStaff === 'function') onRenameStaff(staff, displayName);
+      };
+      const submitDelete = () => {
+        const staff = deleteTarget;
+        setDialog(null);
+        if (staff && typeof onDeleteStaff === 'function') onDeleteStaff(staff);
+      };
 
       return h(
         'div',
@@ -3002,7 +4747,37 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'dgc-sideSection is-staffs' },
-          h('div', { className: 'dgc-sideHead' }, h('span', null, t('staffs')), h('span', { className: 'dgc-spacer' }), h('span', { className: 'dgc-listRowSlim' }, String(staffs.length))),
+          h(
+            'div',
+            { className: 'dgc-sideHead' },
+            h('span', null, t('staffs')),
+            h('span', { className: 'dgc-spacer' }),
+            h('span', { className: 'dgc-listRowSlim' }, String(staffs.length)),
+            hasAudioStaff
+              ? null
+              : h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dgc-headBtn',
+                    title: t('addAudioPeriod'),
+                    'aria-label': t('addAudioPeriod'),
+                    onClick: () => setDialog({ kind: 'audioPeriod', staffId: '' }),
+                  },
+                  h(Icon, { name: 'volume', size: 12 }),
+                ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dgc-headBtn',
+                title: t('addStaff'),
+                'aria-label': t('addStaff'),
+                onClick: openStaffDialog,
+              },
+              h(Icon, { name: 'plus', size: 12 }),
+            ),
+          ),
           h(
             'div',
             { className: 'dgc-list' },
@@ -3020,6 +4795,8 @@ window.__ModuleLoader__.load({
                 hidden: hiddenStaffs.has(staff.id),
                 onSelect: setActiveStaff,
                 onToggleHidden: toggleStaff,
+                onMenu: openStaffMenu,
+                onAddAudio: (id) => setDialog({ kind: 'audioPeriod', staffId: id }),
                 t,
               }),
             ),
@@ -3033,7 +4810,20 @@ window.__ModuleLoader__.load({
             { className: 'dgc-sideHead' },
             h('span', null, t('elements')),
             h('span', { className: 'dgc-spacer' }),
-            h('span', { className: 'dgc-listRowSlim' }, String(filtered.length) + '/' + String(elements.length)),
+            h('span', { className: 'dgc-listRowSlim' }, activeAudioStaff ? String(shownAudioPeriods.length) : String(filtered.length) + '/' + String(elements.length)),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dgc-headBtn',
+                title: activeAudioStaff ? t('addAudioPeriod') : t('addElement'),
+                'aria-label': activeAudioStaff ? t('addAudioPeriod') : t('addElement'),
+                onClick: activeAudioStaff
+                  ? () => setDialog({ kind: 'audioPeriod', staffId: activeAudioStaff.id })
+                  : openElementDialog,
+              },
+              h(Icon, { name: 'plus', size: 12 }),
+            ),
           ),
           h(
             'div',
@@ -3044,34 +4834,109 @@ window.__ModuleLoader__.load({
               value: query,
               onChange: (event) => setQuery(event.target.value),
             }),
-            h(
-              'div',
-              { className: 'dgc-chips' },
-              [
-                ['all', t('filterAll')],
-                ['notes', t('filterNotes')],
-                ['lanes', t('filterLanes')],
-                ['other', t('filterOther')],
-              ].map(([value, label]) =>
-                h('button', {
-                  key: value,
-                  className: 'dgc-chip' + (filter === value ? ' is-active' : ''),
-                  onClick: () => setFilter(value),
-                }, label),
-              ),
-            ),
+            activeAudioStaff
+              ? null
+              : h(
+                  'div',
+                  { className: 'dgc-chips' },
+                  [
+                    ['all', t('filterAll')],
+                    ['notes', t('filterNotes')],
+                    ['lanes', t('filterLanes')],
+                    ['other', t('filterOther')],
+                  ].map(([value, label]) =>
+                    h('button', {
+                      key: value,
+                      className: 'dgc-chip' + (filter === value ? ' is-active' : ''),
+                      onClick: () => setFilter(value),
+                    }, label),
+                  ),
+                ),
           ),
           h(
             'div',
             { className: 'dgc-list' },
-            filtered.length === 0
-              ? h('div', { className: 'dgc-hint' }, t('emptyElementList'))
+            activeAudioStaff
+              ? shownAudioPeriods.length === 0
+                ? h(
+                    'div',
+                    { className: 'dgc-dialogEmpty', style: { padding: '14px 10px' } },
+                    h('div', null, audioHostReady ? t('noAudioPeriods') : t('audioHostStale')),
+                    h(
+                      'div',
+                      { style: { marginTop: 10 } },
+                      h(
+                        Button,
+                        {
+                          variant: 'primary',
+                          icon: 'plus',
+                          disabled: !audioHostReady,
+                          title: audioHostReady ? undefined : t('audioHostStaleShort'),
+                          onClick: () => setDialog({ kind: 'audioPeriod', staffId: activeAudioStaff.id }),
+                        },
+                        t('addAudioPeriod'),
+                      ),
+                    ),
+                  )
+                : shownAudioPeriods.map((clip) =>
+                    h(
+                      'div',
+                      {
+                        key: clip.id || clip.method,
+                        className: 'dgc-row',
+                        title: (clip.method || '') + (clip.relativePath ? ' · ' + clip.relativePath : ''),
+                        onClick: () => seek(Math.max(0, clip.offset || 0)),
+                        onDoubleClick: () => seek(Math.max(0, clip.offset || 0)),
+                      },
+                      h('span', { className: 'dgc-dot', style: { background: clip.missing ? '#ff6e6e' : '#38e8c4' } }),
+                      h('span', { className: 'dgc-rowLabel' }, clip.name || clip.method || t('audioPeriods')),
+                      clip.missing ? h('span', { className: 'dgc-rowMeta', style: { color: '#ff8a8a' } }, t('audioPeriodMissing')) : null,
+                      h('span', { className: 'dgc-rowMeta', style: { width: 58, textAlign: 'right' } }, formatTime(clip.offset || 0)),
+                      h(
+                        'button',
+                        {
+                          className: 'dgc-rowBtn',
+                          title: t('deleteAudioPeriod'),
+                          'aria-label': t('deleteAudioPeriod'),
+                          onClick: (event) => {
+                            event.stopPropagation();
+                            setDialog({ kind: 'deleteAudioPeriod', staffId: activeAudioStaff.id, audioPeriodId: clip.id });
+                          },
+                        },
+                        h(Icon, { name: 'trash', size: 12 }),
+                      ),
+                    ),
+                  )
+              : filtered.length === 0
+              ? h(
+                  'div',
+                  { className: 'dgc-dialogEmpty', style: { padding: '14px 10px' } },
+                  h('div', null, t('emptyElementList')),
+                  h(
+                    'div',
+                    { style: { marginTop: 10 } },
+                    editableStaffs.length > 0
+                      ? h(Button, { icon: 'plus', onClick: openElementDialog }, t('addElement'))
+                      : h(Button, { variant: 'primary', icon: 'plus', onClick: openStaffDialog }, t('addStaff')),
+                  ),
+                )
               : displayRows.slice(0, 4000).map((row) => {
                   if (row.kind === 'header') {
                     // Staff group header for the merged ("全部") element list.
                     return h(
                       'div',
-                      { key: row.key, className: 'dgc-groupHead', title: row.staffId },
+                      {
+                        key: row.key,
+                        className: 'dgc-groupHead',
+                        title: row.staffId + ' · ' + t('staffMenuHint'),
+                        onContextMenu: (event) => {
+                          if (event && typeof event.preventDefault === 'function') event.preventDefault();
+                          if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+                          const px = event && Number.isFinite(event.clientX) ? event.clientX : 0;
+                          const py = event && Number.isFinite(event.clientY) ? event.clientY : 0;
+                          openStaffMenu(row.staffId, px, py);
+                        },
+                      },
                       h(Icon, { name: 'lane', size: 12 }),
                       h('span', { className: 'dgc-rowLabel' }, row.label),
                       h('span', { className: 'dgc-spacer' }),
@@ -3098,6 +4963,79 @@ window.__ModuleLoader__.load({
                 }),
           ),
         ),
+        dialog && dialog.kind === 'staff'
+          ? h(AddStaffDialog, { t, project, onCancel: () => setDialog(null), onCreate: createStaff })
+          : null,
+        dialog && dialog.kind === 'audioPeriod'
+          ? h(AddAudioPeriodDialog, {
+              key: 'audio::' + (dialog.staffId || 'auto'),
+              t,
+              project,
+              staffId: dialog.staffId || '',
+              time: playheadRef && Number.isFinite(playheadRef.current) ? playheadRef.current : 0,
+              hostReady: audioHostReady,
+              onCancel: () => setDialog(null),
+              onCreate: (payload) => {
+                setDialog(null);
+                if (typeof onAddAudioPeriod === 'function') onAddAudioPeriod(payload);
+              },
+            })
+          : null,
+        dialog && deleteAudioTarget
+          ? h(DeleteAudioPeriodDialog, {
+              key: 'deleteAudio::' + deleteAudioTarget.staff.id + '::' + deleteAudioTarget.clip.id,
+              t,
+              staff: deleteAudioTarget.staff,
+              clip: deleteAudioTarget.clip,
+              onCancel: () => setDialog(null),
+              onConfirm: () => {
+                setDialog(null);
+                if (typeof onDeleteAudioPeriod === 'function') onDeleteAudioPeriod(deleteAudioTarget.staff.id, deleteAudioTarget.clip);
+              },
+            })
+          : null,
+        dialog && dialog.kind === 'element'
+          ? h(ElementPaletteDialog, {
+              t,
+              project,
+              catalog,
+              initialStaffId: dialog.staffId,
+              time: dialog.time,
+              onCancel: () => setDialog(null),
+              onPick: pickElement,
+              onRequestStaff: openStaffDialog,
+            })
+          : null,
+        dialog && renameTarget
+          ? h(RenameStaffDialog, {
+              key: 'rename::' + renameTarget.id,
+              t,
+              staff: renameTarget,
+              onCancel: () => setDialog(null),
+              onSubmit: submitRename,
+            })
+          : null,
+        dialog && deleteTarget
+          ? h(DeleteStaffDialog, {
+              key: 'delete::' + deleteTarget.id,
+              t,
+              staff: deleteTarget,
+              onCancel: () => setDialog(null),
+              onConfirm: submitDelete,
+            })
+          : null,
+        menu && menuStaff
+          ? h(StaffContextMenu, {
+              key: 'menu::' + menu.staffId,
+              t,
+              staff: menuStaff,
+              x: menu.x,
+              y: menu.y,
+              onRename: requestRename,
+              onDelete: requestDelete,
+              onClose: closeStaffMenu,
+            })
+          : null,
       );
     }
 
@@ -3115,17 +5053,19 @@ window.__ModuleLoader__.load({
         prev.selection === next.selection &&
         prev.activeStaff === next.activeStaff &&
         prev.hiddenStaffs === next.hiddenStaffs &&
+        prev.onAddAudioPeriod === next.onAddAudioPeriod &&
+        prev.onDeleteAudioPeriod === next.onDeleteAudioPeriod &&
         prev.t === next.t
       );
     });
 
-    // =======================================================================
-    // Inspector: project summary, multi-selection, and one element's fields.
-    // =======================================================================
+    // ========================================================================
+    // 12 · Inspector: project summary, multi-selection, and one element's fields.
+    // ========================================================================
 
     /** Editable project metadata (BPM / offset / title) plus counts. */
     function ProjectPanel(props) {
-      const { project, catalog, t, onEdit } = props;
+      const { project, catalog, t, onEdit, onDetectBpm, bpmBusy, bpmAvailable } = props;
       const counts = useMemo(() => {
         let elements = 0;
         let periods = 0;
@@ -3140,11 +5080,30 @@ window.__ModuleLoader__.load({
         'div',
         null,
         h('div', { className: 'dgc-sectionTitle' }, t('projectInfo')),
-        h(FieldRow, { label: t('tempo') }, h(NumberField, {
-          value: tempo.bpm,
-          step: 1,
-          onCommit: (bpm) => onEdit([{ op: 'setMeta', tempo: { bpm } }]),
-        })),
+        h(
+          FieldRow,
+          { label: t('tempo') },
+          h(
+            'span',
+            { style: { display: 'flex', alignItems: 'center', gap: 6, width: '100%', minWidth: 0 } },
+            h('span', { style: { flex: '1 1 auto', minWidth: 64 } }, h(NumberField, {
+              value: tempo.bpm,
+              step: 1,
+              onCommit: (bpm) => onEdit([{ op: 'setMeta', tempo: { bpm } }]),
+            })),
+            h(
+              Button,
+              {
+                icon: 'wave',
+                className: 'dgc-autoBpm',
+                title: bpmBusy ? t('autoBpmBusy') : bpmAvailable === false ? t('bpmNoAudio') : t('autoBpmHint'),
+                disabled: bpmBusy === true || bpmAvailable === false,
+                onClick: onDetectBpm,
+              },
+              bpmBusy ? t('autoBpmBusy') : t('autoBpm'),
+            ),
+          ),
+        ),
         h(FieldRow, { label: t('offset') }, h(NumberField, {
           value: tempo.offset,
           step: 0.1,
@@ -3155,6 +5114,19 @@ window.__ModuleLoader__.load({
         h(FieldRow, { label: t('periodCount') }, h('span', { className: 'dgc-mono' }, String(counts.periods))),
         h(FieldRow, { label: t('elementCount') }, h('span', { className: 'dgc-mono' }, String(counts.elements))),
         project.audio ? h(FieldRow, { label: t('audio') }, h('span', { className: 'dgc-mono', style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, project.audio.name || '')) : null,
+        project.audioPeriods && project.audioPeriods.length > 0
+          ? h(
+              FieldRow,
+              { label: t('audioPeriods') },
+              h(
+                'span',
+                { className: 'dgc-mono', style: { overflow: 'hidden', textOverflow: 'ellipsis' } },
+                project.audioPeriods
+                  .map((clip) => (clip.name || clip.method || '') + ' @ ' + formatTime(clip.offset || 0))
+                  .join(' · '),
+              ),
+            )
+          : null,
         (project.warnings || []).length > 0
           ? h(
               'div',
@@ -3382,13 +5354,16 @@ window.__ModuleLoader__.load({
         prev.catalog === next.catalog &&
         prev.selection === next.selection &&
         prev.lanes === next.lanes &&
+        prev.bpmBusy === next.bpmBusy &&
+        prev.bpmAvailable === next.bpmAvailable &&
+        prev.onDetectBpm === next.onDetectBpm &&
         prev.t === next.t
       );
     });
 
-    // =======================================================================
-    // Transport bar.
-    // =======================================================================
+    // ========================================================================
+    // 13 · Transport bar.
+    // ========================================================================
 
     /** Bottom transport: play/pause, clock, beat, scrubber, rate, follow. */
     function TransportBar(props) {
@@ -3396,7 +5371,6 @@ window.__ModuleLoader__.load({
       const tempo = (project && project.tempo) || { bpm: 120, offset: 0 };
       const duration = Math.max(1, transport.duration || (project && project.duration) || 0);
       const beat = ((transport.time - (tempo.offset || 0)) * (tempo.bpm || 120)) / 60;
-      const rateOptions = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
       return h(
         'div',
         { className: 'dgc-transport' },
@@ -3437,7 +5411,7 @@ window.__ModuleLoader__.load({
               value: String(transport.rate),
               onChange: (event) => transport.setRate(Number(event.target.value)),
             },
-            rateOptions.map((value) => h('option', { key: value, value: String(value) }, value + 'x')),
+            RATE_OPTIONS.map((value) => h('option', { key: value, value: String(value) }, value + 'x')),
           ),
         ),
         h(Button, {
@@ -3457,9 +5431,9 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // =======================================================================
-    // Timeline layout model.
-    // =======================================================================
+    // ========================================================================
+    // 14 · Timeline layout model.
+    // ========================================================================
 
     /** Flatten a staff into absolute-time elements (already derived by the Host). */
     function staffElements(staff) {
@@ -3473,15 +5447,48 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Build the timeline rows: one row per lane (with its notes) plus a misc row
-     * per staff. Rows keep the file order of lane declarations.
+     * Build the timeline rows: one row per lane (with its notes), a misc row per
+     * staff, and one draggable row per audio period (@Song clip). Rows keep the
+     * file order of lane declarations.
      */
     function buildRows(project, hiddenStaffs, collapsedStaffs) {
       const rows = [];
       if (!project || !Array.isArray(project.staffs)) return rows;
       for (const staff of project.staffs) {
-        if (staff.kind === 'audio') continue;
         if (hiddenStaffs && hiddenStaffs.has && hiddenStaffs.has(staff.id)) continue;
+        if (staff.kind === 'audio') {
+          // Audio staffs have no @Chart periods, but their @Song clips appear
+          // as rows so a segment can be seen, selected and dragged in time.
+          const clips = (staff.audioPeriods || []).slice().sort((a, b) => (a.offset || 0) - (b.offset || 0));
+          const collapsedAudio = !!(collapsedStaffs && collapsedStaffs.has && collapsedStaffs.has(staff.id));
+          rows.push({
+            kind: 'group',
+            key: staff.id + '::__group',
+            staffId: staff.id,
+            staff,
+            audioGroup: true,
+            label: staff.displayName || staff.className || staff.id,
+            sublabel: staff.className && staff.className !== (staff.displayName || '') ? staff.className : '',
+            laneCount: 0,
+            noteCount: clips.length,
+            collapsed: collapsedAudio,
+          });
+          if (!collapsedAudio) {
+            for (const clip of clips) {
+              rows.push({
+                kind: 'row',
+                key: staff.id + '::audio::' + (clip.id || clip.method || clip.offset),
+                staffId: staff.id,
+                staff,
+                audioRow: true,
+                clip,
+                lane: null,
+                notes: [],
+              });
+            }
+          }
+          continue;
+        }
         const laneNames = [];
         // Several periods of one staff legitimately reuse a lane name (e.g.
         // DremuStaff2.g has 82 lane elements over 33 names): the row is per
@@ -3619,9 +5626,101 @@ window.__ModuleLoader__.load({
       return 'n' + (prefix ? String(prefix) + '-' : '') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     }
 
-    // =======================================================================
-    // Timeline canvas.
-    // =======================================================================
+    /** Unique `ClassName` + `ClassName.g` for a new staff (matches the Host defaults). */
+    function uniqueStaffIdentity(project, kind) {
+      const base = kind === 'storyboard' ? 'Storyboard' : kind === 'audio' ? 'Song' : 'Staff';
+      const usedFiles = new Set();
+      const usedClasses = new Set();
+      for (const staff of (project && project.staffs) || []) {
+        usedFiles.add(String(staff.id).toLowerCase());
+        usedClasses.add(String(staff.className));
+      }
+      let index = 1;
+      let candidate = base;
+      while (usedClasses.has(candidate) || usedFiles.has((candidate + '.g').toLowerCase())) {
+        index += 1;
+        candidate = base + index;
+      }
+      return { className: candidate, fileName: candidate + '.g' };
+    }
+
+    /** First lane name defined by a staff (new notes target it by default). */
+    function firstLaneName(project, staffId) {
+      const staff = (project.staffs || []).find((item) => item.id === staffId);
+      if (!staff) return '';
+      for (const period of staff.periods || []) {
+        for (const element of period.elements || []) {
+          if (element.category !== 'lane') continue;
+          const name = element.fields && element.fields.name;
+          if (typeof name === 'string' && name.length > 0) return name;
+        }
+      }
+      return '';
+    }
+
+    // ========================================================================
+    // 15 · Timeline canvas.
+    // ========================================================================
+
+    /** Right-click menu for the audio strip: waveform vs. spectrum view. */
+    function WaveformContextMenu(props) {
+      const { t, x, y, mode, onSelect, onClose } = props;
+      const menuRef = useRef(null);
+      useEffect(() => {
+        const close = () => onClose();
+        const onPointerDown = (event) => {
+          const node = menuRef.current;
+          if (node && event && event.target && typeof node.contains === 'function' && node.contains(event.target)) return;
+          onClose();
+        };
+        const onKeyDown = (event) => {
+          if (!event || event.key !== 'Escape') return;
+          event.preventDefault();
+          event.stopPropagation();
+          onClose();
+        };
+        window.addEventListener('pointerdown', onPointerDown, true);
+        window.addEventListener('keydown', onKeyDown, true);
+        window.addEventListener('resize', close);
+        window.addEventListener('wheel', close, true);
+        window.addEventListener('blur', close);
+        return () => {
+          window.removeEventListener('pointerdown', onPointerDown, true);
+          window.removeEventListener('keydown', onKeyDown, true);
+          window.removeEventListener('resize', close);
+          window.removeEventListener('wheel', close, true);
+          window.removeEventListener('blur', close);
+        };
+      }, [onClose]);
+      const item = (value, label, icon) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dgc-menuItem',
+            role: 'menuitemradio',
+            'aria-checked': mode === value,
+            onClick: () => onSelect(value),
+          },
+          h('span', { style: { width: 12, textAlign: 'center', fontSize: 11, flex: '0 0 12px' } }, mode === value ? '✓' : ''),
+          h(Icon, { name: icon, size: 13 }),
+          h('span', null, label),
+        );
+      return h(
+        'div',
+        {
+          ref: menuRef,
+          className: 'dgc-menu',
+          role: 'menu',
+          'aria-label': t('waveViewTitle'),
+          style: { left: x, top: y },
+          onContextMenu: (event) => event.preventDefault(),
+        },
+        h('div', { className: 'dgc-menuHead' }, t('waveViewTitle')),
+        item('wave', t('waveViewWaveform'), 'wave'),
+        item('spectrum', t('waveViewSpectrum'), 'spectrum'),
+      );
+    }
 
     /**
      * The central timeline: beat ruler, waveform strip, lane rows, notes, hold
@@ -3646,9 +5745,9 @@ window.__ModuleLoader__.load({
         activeStaff,
         onEdit,
         onNotice,
-        wave,
+        waves,
         waveStatus,
-        audioOffset,
+        audioClips,
       } = props;
 
       const wrapRef = useRef(null);
@@ -3656,6 +5755,9 @@ window.__ModuleLoader__.load({
       const [size, setSize] = useState({ w: 0, h: 0 });
       const [view, setView] = useState({ t0: 0, pps: PPS_DEFAULT, scrollY: 0 });
       const [hover, setHover] = useState(null);
+      // Right-click menu for the audio strip and the persisted view mode.
+      const [waveMode, setWaveMode] = useState(readWaveModePreference);
+      const [waveMenu, setWaveMenu] = useState(null);
       // Which staff groups are collapsed in the timeline gutter.
       const [collapsedStaffs, setCollapsedStaffs] = useState(() => new Set());
       const dragRef = useRef(null);
@@ -3667,10 +5769,11 @@ window.__ModuleLoader__.load({
       const rowsRef = useRef([]);
       const layoutRef = useRef({ tops: [], total: 0 });
       const tempoRef = useRef(tempo);
-      const waveRef = useRef(wave);
+      const wavesRef = useRef(waves);
       const hoverRef = useRef(hover);
       const waveStatusRef = useRef(waveStatus);
-      const audioOffsetRef = useRef(Number.isFinite(audioOffset) ? audioOffset : 0);
+      const audioClipsRef = useRef(audioClips || []);
+      const waveModeRef = useRef(waveMode);
 
       viewRef.current = view;
       sizeRef.current = size;
@@ -3678,10 +5781,11 @@ window.__ModuleLoader__.load({
       selectionRef.current = selection;
       transportRef.current = transport;
       tempoRef.current = tempo;
-      waveRef.current = wave;
+      wavesRef.current = waves || {};
       hoverRef.current = hover;
       waveStatusRef.current = waveStatus;
-      audioOffsetRef.current = Number.isFinite(audioOffset) ? audioOffset : 0;
+      audioClipsRef.current = audioClips || [];
+      waveModeRef.current = waveMode;
 
       const rows = useMemo(() => buildRows(project, hiddenStaffs, collapsedStaffs), [project, hiddenStaffs, collapsedStaffs]);
       rowsRef.current = rows;
@@ -3700,6 +5804,18 @@ window.__ModuleLoader__.load({
       layoutRef.current = layout;
 
       const headerH = RULER_H + WAVE_H;
+
+      /** Switch the audio strip between waveform and spectrum, and persist it. */
+      const selectWaveMode = useCallback((mode) => {
+        const next = mode === 'spectrum' ? 'spectrum' : 'wave';
+        setWaveMode(next);
+        try {
+          if (typeof window !== 'undefined' && window.localStorage) window.localStorage.setItem(WAVE_MODE_KEY, next);
+        } catch (error) {
+          /* storage unavailable: keep the in-memory preference */
+        }
+        setWaveMenu(null);
+      }, []);
 
       // --- Resize tracking -------------------------------------------------
       useEffect(() => {
@@ -3809,202 +5925,383 @@ window.__ModuleLoader__.load({
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, width, height);
 
-        const bg = cssToken('--dsw-alias-bg-base', '#10131a');
-        const layerOne = cssToken('--dsw-alias-bg-layer-1', '#171b24');
-        const layerTwo = cssToken('--dsw-alias-bg-layer-2', '#1e2330');
-        const border = cssToken('--dsw-alias-border-l1', '#2b3244');
-        const labelPrimary = cssToken('--dsw-alias-label-primary', '#eef1f7');
-        const labelSecondary = cssToken('--dsw-alias-label-secondary', '#8b93a7');
-        const brand = cssToken('--dsw-alias-brand-primary', '#5b8cff');
-
-        ctx.fillStyle = bg;
-        ctx.fillRect(0, 0, width, height);
+        // Resolve the theme once per frame; every painter below shares it.
+        const colors = {
+          background: cssToken('--dsw-alias-bg-base', '#10131a'),
+          layerOne: cssToken('--dsw-alias-bg-layer-1', '#171b24'),
+          layerTwo: cssToken('--dsw-alias-bg-layer-2', '#1e2330'),
+          border: cssToken('--dsw-alias-border-l1', '#2b3244'),
+          labelPrimary: cssToken('--dsw-alias-label-primary', '#eef1f7'),
+          labelSecondary: cssToken('--dsw-alias-label-secondary', '#8b93a7'),
+          brand: cssToken('--dsw-alias-brand-primary', '#5b8cff'),
+        };
         const timeLeft = GUTTER_W;
         const timeWidth = Math.max(10, width - GUTTER_W);
 
-        // Ruler background.
-        ctx.fillStyle = layerOne;
-        ctx.fillRect(0, 0, width, headerH);
-        ctx.fillStyle = layerTwo;
-        ctx.fillRect(0, 0, GUTTER_W, headerH);
+        ctx.fillStyle = colors.background;
+        ctx.fillRect(0, 0, width, height);
 
-        // Beat grid + labels.
-        const step = gridStep(currentView);
-        const bpm = tempo && tempo.bpm > 0 ? tempo.bpm : 120;
-        const secondsPerBeat = 60 / bpm;
-        const origin = tempo && Number.isFinite(tempo.offset) ? tempo.offset : 0;
-        const totalBeats = (currentView.t0 + timeWidth / currentView.pps - origin) / secondsPerBeat;
-        const firstBeat = Math.floor(((currentView.t0 - origin) / secondsPerBeat) / step) * step;
-        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
-        ctx.textBaseline = 'middle';
-        for (let beat = firstBeat; beat <= totalBeats + step; beat += step) {
-          const time = origin + beat * secondsPerBeat;
-          const x = xForTime(time, currentView);
-          if (x < timeLeft - 1 || x > width) continue;
-          const isBar = Math.abs(beat - Math.round(beat)) < 1e-9;
-          const isBeat = Math.abs(beat - Math.round(beat)) < 1e-9;
-          ctx.strokeStyle = isBeat ? border : 'rgba(120,130,150,0.16)';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(Math.round(x) + 0.5, RULER_H);
-          ctx.lineTo(Math.round(x) + 0.5, height);
-          ctx.stroke();
-          // Beat label in the ruler.
-          if (isBar && (Math.abs(beat % 4) < 1e-9 || currentView.pps > 90)) {
-            ctx.fillStyle = labelSecondary;
-            ctx.fillText('♪' + formatNum(beat, 0), x + 3, RULER_H / 2);
-          }
-        }
+        paintRuler();
+        paintWaveform();
+        paintHeaderDivider();
+        paintRows();
+        paintGutterDivider();
+        paintPlayhead();
+        paintBoxSelection();
+        paintHoverTooltip();
+        paintEmptyState();
 
-        // Seconds labels along the ruler top (dense enough at any zoom).
-        const secondsStep = (() => {
-          const candidates = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120];
-          for (const candidate of candidates) if (candidate * currentView.pps >= 72) return candidate;
-          return 240;
-        })();
-        const firstSecond = Math.floor(currentView.t0 / secondsStep) * secondsStep;
-        for (let second = firstSecond; second <= currentView.t0 + timeWidth / currentView.pps + secondsStep; second += secondsStep) {
-          const x = xForTime(second, currentView);
-          if (x < timeLeft || x > width) continue;
-          ctx.fillStyle = labelPrimary;
-          ctx.fillText(formatTime(second), x + 3, 8);
-          ctx.strokeStyle = border;
-          ctx.beginPath();
-          ctx.moveTo(Math.round(x) + 0.5, 0);
-          ctx.lineTo(Math.round(x) + 0.5, RULER_H);
-          ctx.stroke();
-        }
+        // --- Ruler: background, beat grid and time labels -------------------
+        function paintRuler() {
+          ctx.fillStyle = colors.layerOne;
+          ctx.fillRect(0, 0, width, headerH);
+          ctx.fillStyle = colors.layerTwo;
+          ctx.fillRect(0, 0, GUTTER_W, headerH);
 
-        // Waveform strip.
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(timeLeft, RULER_H, timeWidth, WAVE_H);
-        ctx.clip();
-        const currentWave = waveRef.current;
-        if (currentWave && currentWave.peaks && currentWave.peaks.length > 0) {
-          const peaks = currentWave.peaks;
-          const bins = peaks.length;
-          const duration = currentWave.duration || 0;
-          const midY = RULER_H + WAVE_H / 2;
-          const amplitude = WAVE_H / 2 - 4;
-          ctx.fillStyle = 'rgba(124,140,255,0.34)';
-          for (let px = 0; px < timeWidth; px += 1) {
-            const time = timeForX(timeLeft + px, currentView) - audioOffsetRef.current;
-            if (duration <= 0 || time < 0) continue;
-            const bin = Math.floor((time / duration) * bins);
-            if (bin < 0 || bin >= bins) continue;
-            const peak = peaks[bin];
-            const h2 = Math.max(0.5, peak * amplitude);
-            ctx.fillRect(timeLeft + px, midY - h2, 1, h2 * 2);
-          }
-        } else {
-          ctx.fillStyle = labelSecondary;
-          ctx.font = '11px sans-serif';
-          ctx.fillText(
-            waveStatusRef.current === 'loading' ? t('waveLoading') : waveStatusRef.current === 'error' ? t('waveUnavailable') : t('audioMissing'),
-            timeLeft + 10,
-            RULER_H + WAVE_H / 2,
-          );
-        }
-        ctx.restore();
-
-        ctx.strokeStyle = border;
-        ctx.beginPath();
-        ctx.moveTo(0, headerH + 0.5);
-        ctx.lineTo(width, headerH + 0.5);
-        ctx.stroke();
-
-        // Rows.
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(0, headerH, width, height - headerH);
-        ctx.clip();
-        const currentRows = rowsRef.current;
-        const drag = dragRef.current;
-        const selectedIds = new Set(selectionRef.current);
-        currentRows.forEach((row, rowIndex) => {
-          const rowH = rowHeight(row);
-          const top = rowTop(rowIndex, currentView);
-          if (top > height || top + rowH < headerH) return;
-          const activeFocus = activeStaff && row.staffId === activeStaff;
-
-          // ---- Staff (谱表) group header -------------------------------
-          if (row && row.kind === 'group') {
-            const hovered = hoverRef.current && hoverRef.current.rowIndex === rowIndex;
-            ctx.fillStyle = 'rgba(255,255,255,0.05)';
-            ctx.fillRect(0, top, width, rowH);
-            ctx.fillStyle = 'rgba(255,255,255,0.09)';
-            ctx.fillRect(0, top, GUTTER_W, rowH);
-            if (activeFocus) {
-              ctx.fillStyle = 'rgba(91,140,255,0.16)';
-              ctx.fillRect(0, top, width, rowH);
-            } else if (hovered) {
-              ctx.fillStyle = 'rgba(255,255,255,0.04)';
-              ctx.fillRect(0, top, width, rowH);
-            }
-            ctx.strokeStyle = 'rgba(170,180,200,0.3)';
+          // Beat grid + labels.
+          const step = gridStep(currentView);
+          const bpm = tempo && tempo.bpm > 0 ? tempo.bpm : 120;
+          const secondsPerBeat = 60 / bpm;
+          const origin = tempo && Number.isFinite(tempo.offset) ? tempo.offset : 0;
+          const totalBeats = (currentView.t0 + timeWidth / currentView.pps - origin) / secondsPerBeat;
+          const firstBeat = Math.floor(((currentView.t0 - origin) / secondsPerBeat) / step) * step;
+          ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+          ctx.textBaseline = 'middle';
+          for (let beat = firstBeat; beat <= totalBeats + step; beat += step) {
+            const time = origin + beat * secondsPerBeat;
+            const x = xForTime(time, currentView);
+            if (x < timeLeft - 1 || x > width) continue;
+            // Whole beats are the strong lines; the label marks every 4th beat.
+            const isWholeBeat = Math.abs(beat - Math.round(beat)) < 1e-9;
+            ctx.strokeStyle = isWholeBeat ? colors.border : 'rgba(120,130,150,0.16)';
             ctx.lineWidth = 1;
             ctx.beginPath();
-            ctx.moveTo(0, Math.round(top) + 0.5);
-            ctx.lineTo(width, Math.round(top) + 0.5);
+            ctx.moveTo(Math.round(x) + 0.5, RULER_H);
+            ctx.lineTo(Math.round(x) + 0.5, height);
             ctx.stroke();
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(0, top, width, rowH);
-            ctx.clip();
-            ctx.textBaseline = 'middle';
-            // Collapse/expand chevron.
-            const cx = 13;
-            const cy = top + rowH / 2;
-            ctx.fillStyle = labelSecondary;
-            ctx.beginPath();
-            if (row.collapsed) {
-              ctx.moveTo(cx - 3, cy - 4.5);
-              ctx.lineTo(cx + 3.5, cy);
-              ctx.lineTo(cx - 3, cy + 4.5);
-            } else {
-              ctx.moveTo(cx - 4.5, cy - 2.5);
-              ctx.lineTo(cx + 4.5, cy - 2.5);
-              ctx.lineTo(cx, cy + 3.5);
+            if (isWholeBeat && (Math.abs(beat % 4) < 1e-9 || currentView.pps > 90)) {
+              ctx.fillStyle = colors.labelSecondary;
+              ctx.fillText('♪' + formatNum(beat, 0), x + 3, RULER_H / 2);
             }
-            ctx.closePath();
-            ctx.fill();
-            // Name + class name share the gutter with a hard pixel budget, so
-            // they are ellipsized instead of running into each other or into
-            // the time area.
-            const nameX = 24;
-            const nameBudget = GUTTER_W - 6 - nameX;
-            ctx.fillStyle = labelPrimary;
-            ctx.font = '600 12px sans-serif';
-            const groupName = fitText(ctx, row.label || row.staffId, nameBudget);
-            ctx.fillText(groupName, nameX, cy);
-            const groupNameWidth = ctx.measureText(groupName).width;
-            if (row.sublabel) {
-              const subX = nameX + groupNameWidth + 7;
-              const subBudget = GUTTER_W - 6 - subX;
-              if (subBudget >= 28) {
-                ctx.fillStyle = labelSecondary;
-                ctx.font = '10px sans-serif';
-                ctx.fillText(fitText(ctx, row.sublabel, subBudget), subX, cy + 0.5);
-              }
-            }
-            ctx.restore();
-            // Counts live in the time column (header band only), never over the
-            // staff name.
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(GUTTER_W, top, Math.max(0, width - GUTTER_W), rowH);
-            ctx.clip();
-            ctx.fillStyle = labelSecondary;
-            ctx.font = '9.5px sans-serif';
-            ctx.textBaseline = 'middle';
-            const countsText = t('lanes') + ' ' + row.laneCount + ' · ' + t('notes') + ' ' + row.noteCount;
-            ctx.fillText(fitText(ctx, countsText, width - GUTTER_W - 20), GUTTER_W + 10, cy);
-            ctx.restore();
-            return;
           }
 
-          // ---- Lane row -----------------------------------------------
+          // Seconds labels along the ruler top (dense enough at any zoom).
+          const secondsStep = (() => {
+            const candidates = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120];
+            for (const candidate of candidates) if (candidate * currentView.pps >= 72) return candidate;
+            return 240;
+          })();
+          const firstSecond = Math.floor(currentView.t0 / secondsStep) * secondsStep;
+          for (let second = firstSecond; second <= currentView.t0 + timeWidth / currentView.pps + secondsStep; second += secondsStep) {
+            const x = xForTime(second, currentView);
+            if (x < timeLeft || x > width) continue;
+            ctx.fillStyle = colors.labelPrimary;
+            ctx.fillText(formatTime(second), x + 3, 8);
+            ctx.strokeStyle = colors.border;
+            ctx.beginPath();
+            ctx.moveTo(Math.round(x) + 0.5, 0);
+            ctx.lineTo(Math.round(x) + 0.5, RULER_H);
+            ctx.stroke();
+          }
+        }
+
+        // --- Audio strip: waveform or spectrum, one band per audio period ----
+        function paintWaveform() {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(timeLeft, RULER_H, timeWidth, WAVE_H);
+          ctx.clip();
+          ctx.textBaseline = 'middle';
+          const mode = waveModeRef.current === 'spectrum' ? 'spectrum' : 'wave';
+          const currentClips = audioClipsRef.current || [];
+          const currentWaves = wavesRef.current || {};
+          const bandColors = ['rgba(124,140,255,0.38)', 'rgba(56,232,196,0.34)', 'rgba(255,209,102,0.32)', 'rgba(255,122,182,0.32)'];
+          let drew = false;
+
+          /** Clip name in the top-left corner of its strip. */
+          function drawClipLabel(clip, startX, endX) {
+            if (endX - startX < 70) return;
+            ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+            const x = Math.max(timeLeft, startX) + 5;
+            const budget = Math.max(20, Math.min(width, endX) - x - 6);
+            const label = fitText(ctx, clip.name || clip.method || clip.relativePath || '', budget);
+            if (!label) return;
+            const labelWidth = ctx.measureText(label).width;
+            ctx.fillStyle = 'rgba(6,8,16,0.55)';
+            ctx.fillRect(x - 2, RULER_H + 3, labelWidth + 6, 13);
+            ctx.fillStyle = colors.labelPrimary;
+            ctx.fillText(label, x, RULER_H + 10);
+          }
+
+          currentClips.forEach((clip, index) => {
+            if (!clip) return;
+            const key = clip.file || clip.relativePath || '';
+            const wave = key ? currentWaves[key] : null;
+            const offset = Number.isFinite(clip.offset) ? clip.offset : 0;
+            const duration = Number.isFinite(clip.duration) && clip.duration > 0 ? clip.duration : wave && wave.duration ? wave.duration : 0;
+            const startX = xForTime(offset, currentView);
+            const endX = duration > 0 ? xForTime(offset + duration, currentView) : width;
+            if (endX < timeLeft || startX > width) return;
+            // Clip band + start marker make the segment visible even while the
+            // waveform/spectrum is still loading.
+            ctx.fillStyle = bandColors[index % bandColors.length];
+            ctx.globalAlpha = 0.16;
+            ctx.fillRect(startX, RULER_H + 2, Math.max(2, endX - startX), WAVE_H - 4);
+            ctx.globalAlpha = 1;
+            ctx.strokeStyle = bandColors[index % bandColors.length];
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(Math.round(startX) + 0.5, RULER_H);
+            ctx.lineTo(Math.round(startX) + 0.5, RULER_H + WAVE_H);
+            ctx.stroke();
+            if (clip.missing) {
+              ctx.fillStyle = 'rgba(255,120,120,0.9)';
+              ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+              ctx.fillText(t('audioPeriodMissing'), Math.max(timeLeft, startX) + 4, RULER_H + WAVE_H - 6);
+              drew = true;
+              return;
+            }
+
+            if (mode === 'spectrum') {
+              const spectrum = wave && wave.spectrum;
+              if (!spectrum || !spectrum.data || duration <= 0) return;
+              drew = true;
+              const drawWidth = Math.max(1, endX - startX);
+              const canvas = spectrumCanvasFor(spectrum);
+              if (canvas) {
+                ctx.save();
+                // The cached image is wider than the strip, so smoothing is a
+                // downscale (crisp); high quality keeps harmonics readable.
+                ctx.imageSmoothingEnabled = true;
+                if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+                ctx.drawImage(canvas, startX, RULER_H + 3, drawWidth, WAVE_H - 6);
+                ctx.restore();
+              } else {
+                // Canvas image data is unavailable (very old browser/test
+                // harness): draw coarse blocks instead of leaving a blank band.
+                const columns = spectrum.columns;
+                const bands = spectrum.bands;
+                const step = Math.max(1, Math.ceil(columns / Math.max(1, Math.min(480, drawWidth))));
+                const bandHeight = (WAVE_H - 6) / bands;
+                const columnWidth = Math.max(1, (drawWidth / columns) * step);
+                for (let c = 0; c < columns; c += step) {
+                  const x = startX + (c / columns) * drawWidth;
+                  for (let b = 0; b < bands; b += 1) {
+                    const level = spectrum.data[c * bands + b] / 255;
+                    if (level < 0.02) continue;
+                    const rgb = spectrumColorRgb(level);
+                    ctx.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+                    ctx.fillRect(x, RULER_H + 3 + (bands - 1 - b) * bandHeight, columnWidth, bandHeight + 1);
+                  }
+                }
+              }
+              drawClipLabel(clip, startX, endX);
+              return;
+            }
+
+            if (!wave || !wave.peaks || wave.peaks.length === 0 || duration <= 0) return;
+            drew = true;
+            const peaks = wave.peaks;
+            const bins = peaks.length;
+            const sampleDuration = wave.duration && wave.duration > 0 ? wave.duration : duration;
+            const midY = RULER_H + WAVE_H / 2;
+            const amplitude = WAVE_H / 2 - 5;
+            ctx.fillStyle = bandColors[index % bandColors.length];
+            const fromPx = Math.max(0, Math.floor(startX - timeLeft));
+            const toPx = Math.min(timeWidth, Math.ceil(endX - timeLeft));
+            for (let px = fromPx; px < toPx; px += 1) {
+              const time = timeForX(timeLeft + px, currentView) - offset;
+              if (time < 0 || time > sampleDuration) continue;
+              const bin = Math.min(bins - 1, Math.max(0, Math.floor((time / sampleDuration) * bins)));
+              const h2 = Math.max(0.5, peaks[bin] * amplitude);
+              ctx.fillRect(timeLeft + px, midY - h2, 1, h2 * 2);
+            }
+            drawClipLabel(clip, startX, endX);
+          });
+
+          if (!drew && currentClips.length === 0) {
+            ctx.fillStyle = colors.labelSecondary;
+            ctx.font = '11px sans-serif';
+            ctx.fillText(
+              waveStatusRef.current === 'loading' ? t('waveLoading') : waveStatusRef.current === 'error' ? t('waveUnavailable') : t('audioMissing'),
+              timeLeft + 10,
+              RULER_H + WAVE_H / 2,
+            );
+          } else if (!drew && currentClips.length > 0) {
+            ctx.fillStyle = colors.labelSecondary;
+            ctx.font = '11px sans-serif';
+            const message =
+              mode === 'spectrum'
+                ? waveStatusRef.current === 'loading'
+                  ? t('spectrumLoading')
+                  : t('spectrumUnavailable')
+                : waveStatusRef.current === 'loading'
+                  ? t('waveLoading')
+                  : waveStatusRef.current === 'error'
+                    ? t('waveUnavailable')
+                    : '';
+            ctx.fillText(message, timeLeft + 10, RULER_H + WAVE_H / 2);
+          }
+          ctx.restore();
+        }
+
+        // --- Lane rows, their elements and notes ----------------------------
+        function paintRows() {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, headerH, width, height - headerH);
+          ctx.clip();
+          const currentRows = rowsRef.current;
+          currentRows.forEach((row, rowIndex) => {
+            const rowH = rowHeight(row);
+            const top = rowTop(rowIndex, currentView);
+            if (top > height || top + rowH < headerH) return;
+            if (row && row.kind === 'group') paintGroupRow(row, rowIndex, top, rowH);
+            else if (row && row.audioRow) paintAudioRow(row, rowIndex, top, rowH);
+            else paintLaneRow(row, rowIndex, top, rowH);
+          });
+          ctx.restore();
+        }
+
+        /** One collapsible staff (谱表) header row. */
+        function paintGroupRow(row, rowIndex, top, rowH) {
+          const activeFocus = activeStaff && row.staffId === activeStaff;
+          const hovered = hoverRef.current && hoverRef.current.rowIndex === rowIndex;
+          ctx.fillStyle = 'rgba(255,255,255,0.05)';
+          ctx.fillRect(0, top, width, rowH);
+          ctx.fillStyle = 'rgba(255,255,255,0.09)';
+          ctx.fillRect(0, top, GUTTER_W, rowH);
+          if (activeFocus) {
+            ctx.fillStyle = 'rgba(91,140,255,0.16)';
+            ctx.fillRect(0, top, width, rowH);
+          } else if (hovered) {
+            ctx.fillStyle = 'rgba(255,255,255,0.04)';
+            ctx.fillRect(0, top, width, rowH);
+          }
+          ctx.strokeStyle = 'rgba(170,180,200,0.3)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(0, Math.round(top) + 0.5);
+          ctx.lineTo(width, Math.round(top) + 0.5);
+          ctx.stroke();
+
+          // Gutter: chevron, staff name and class name.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, top, width, rowH);
+          ctx.clip();
+          ctx.textBaseline = 'middle';
+          const cx = 13;
+          const cy = top + rowH / 2;
+          ctx.fillStyle = colors.labelSecondary;
+          ctx.beginPath();
+          if (row.collapsed) {
+            ctx.moveTo(cx - 3, cy - 4.5);
+            ctx.lineTo(cx + 3.5, cy);
+            ctx.lineTo(cx - 3, cy + 4.5);
+          } else {
+            ctx.moveTo(cx - 4.5, cy - 2.5);
+            ctx.lineTo(cx + 4.5, cy - 2.5);
+            ctx.lineTo(cx, cy + 3.5);
+          }
+          ctx.closePath();
+          ctx.fill();
+          // Name + class name share the gutter with a hard pixel budget, so
+          // they are ellipsized instead of running into each other or into
+          // the time area.
+          const nameX = 24;
+          const nameBudget = GUTTER_W - 6 - nameX;
+          ctx.fillStyle = colors.labelPrimary;
+          ctx.font = '600 12px sans-serif';
+          const groupName = fitText(ctx, row.label || row.staffId, nameBudget);
+          ctx.fillText(groupName, nameX, cy);
+          const groupNameWidth = ctx.measureText(groupName).width;
+          if (row.sublabel) {
+            const subX = nameX + groupNameWidth + 7;
+            const subBudget = GUTTER_W - 6 - subX;
+            if (subBudget >= 28) {
+              ctx.fillStyle = colors.labelSecondary;
+              ctx.font = '10px sans-serif';
+              ctx.fillText(fitText(ctx, row.sublabel, subBudget), subX, cy + 0.5);
+            }
+          }
+          ctx.restore();
+
+          // Counts live in the time column (header band only), never over the
+          // staff name.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(GUTTER_W, top, Math.max(0, width - GUTTER_W), rowH);
+          ctx.clip();
+          ctx.fillStyle = colors.labelSecondary;
+          ctx.font = '9.5px sans-serif';
+          ctx.textBaseline = 'middle';
+          const countsText = row.audioGroup
+            ? t('audioPeriods') + ' ' + row.noteCount
+            : t('lanes') + ' ' + row.laneCount + ' · ' + t('notes') + ' ' + row.noteCount;
+          ctx.fillText(fitText(ctx, countsText, width - GUTTER_W - 20), GUTTER_W + 10, cy);
+          ctx.restore();
+        }
+
+        /** One audio period (乐段): a clip bar that can be dragged in time. */
+        function paintAudioRow(row, rowIndex, top, rowH) {
+          const clip = row.clip || {};
+          const activeFocus = activeStaff && row.staffId === activeStaff;
+          ctx.fillStyle = rowIndex % 2 === 0 ? 'rgba(255,255,255,0.018)' : 'rgba(0,0,0,0.06)';
+          ctx.fillRect(0, top, width, rowH);
+          if (activeFocus) {
+            ctx.fillStyle = 'rgba(91,140,255,0.08)';
+            ctx.fillRect(0, top, width, rowH);
+          }
+          // Gutter label: name + method.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, top, GUTTER_W, rowH);
+          ctx.clip();
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = clip.missing ? '#ff8a8a' : colors.labelPrimary;
+          ctx.font = '11px sans-serif';
+          const gutterLabel = clip.name || clip.method || clip.relativePath || t('audioPeriods');
+          ctx.fillStyle = colors.labelSecondary;
+          ctx.font = '9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+          ctx.fillText(formatTime(clip.offset || 0), 10, top + rowH / 2);
+          ctx.fillStyle = clip.missing ? '#ff8a8a' : colors.labelPrimary;
+          ctx.font = '11px sans-serif';
+          ctx.fillText(fitText(ctx, gutterLabel, GUTTER_W - 60), 56, top + rowH / 2);
+          ctx.restore();
+
+          // Clip bar in the time column.
+          const drag = dragRef.current && dragRef.current.mode === 'audio' && dragRef.current.clip === clip ? dragRef.current : null;
+          const offset = Math.max(0, (Number.isFinite(clip.offset) ? clip.offset : 0) + (drag ? drag.delta : 0));
+          const length = Number.isFinite(clip.duration) ? clip.duration : 0;
+          const barTop = top + 6;
+          const barH = rowH - 12;
+          const barX = xForTime(offset, currentView);
+          const barW = Math.max(6, length * currentView.pps);
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(timeLeft, top, Math.max(0, width - timeLeft), rowH);
+          ctx.clip();
+          const band = drag ? 'rgba(56,232,196,0.42)' : 'rgba(56,232,196,0.26)';
+          ctx.fillStyle = clip.missing ? 'rgba(255,110,110,0.26)' : band;
+          ctx.fillRect(barX, barTop, barW, barH);
+          ctx.strokeStyle = clip.missing ? 'rgba(255,120,120,0.85)' : 'rgba(56,232,196,0.85)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(Math.round(barX) + 0.5, Math.round(barTop) + 0.5, Math.max(1, Math.round(barW) - 1), barH - 1);
+          ctx.fillStyle = clip.missing ? '#ffd0d0' : colors.labelPrimary;
+          ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+          ctx.textBaseline = 'middle';
+          const label = clip.missing
+            ? t('audioPeriodMissing')
+            : (drag ? '⏱ ' : '') + formatTime(offset) + (length > 0 ? ' · ' + formatTime(length) : '');
+          ctx.fillStyle = clip.missing ? '#ffb0b0' : colors.labelPrimary;
+          ctx.fillText(fitText(ctx, label, Math.max(0, Math.min(barW, width - timeLeft) - 10)), barX + 5, barTop + barH / 2);
+          ctx.restore();
+        }
+
+        /** One lane row: stripe, gutter label, lane bars and its notes. */
+        function paintLaneRow(row, rowIndex, top, rowH) {
+          const activeFocus = activeStaff && row.staffId === activeStaff;
           const stripe = rowIndex % 2 === 0;
           ctx.fillStyle = stripe ? 'rgba(255,255,255,0.018)' : 'rgba(0,0,0,0.06)';
           ctx.fillRect(0, top, width, rowH);
@@ -4035,7 +6332,7 @@ window.__ModuleLoader__.load({
           ctx.beginPath();
           ctx.arc(12, top + rowH / 2, 3, 0, Math.PI * 2);
           ctx.fill();
-          ctx.fillStyle = labelPrimary;
+          ctx.fillStyle = colors.labelPrimary;
           ctx.font = '11.5px sans-serif';
           const laneLabel = row.misc ? t('miscRow') : row.lane || t('laneOrphan');
           ctx.fillText(fitText(ctx, laneLabel, GUTTER_W - 22 - 8), 22, top + rowH / 2);
@@ -4043,59 +6340,71 @@ window.__ModuleLoader__.load({
 
           // Lane bodies (every lane element that carries this row's name).
           const laneElementsOnRow = row.laneElements || (row.laneElement ? [row.laneElement] : []);
-          for (let laneIndex = 0; laneIndex < laneElementsOnRow.length; laneIndex += 1) {
-            const laneElement = laneElementsOnRow[laneIndex];
-            const durationValue = Number.isFinite(laneElement.duration) ? laneElement.duration : null;
-            const laneStart = laneElement.start || 0;
-            const laneEnd = durationValue === null ? laneStart + 0.05 : laneStart + durationValue;
-            const x0 = Math.max(timeLeft, xForTime(laneStart, currentView));
-            const x1 = Math.min(width, xForTime(laneEnd, currentView));
-            if (x1 <= x0) continue;
-            const color = elementColor(catalog, laneElement.type);
-            ctx.fillStyle = color + (laneIndex === 0 ? '22' : '14');
-            ctx.fillRect(x0, top + 3, x1 - x0, rowH - 6);
-            ctx.strokeStyle = color + '66';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(x0 + 0.5, top + 3.5, Math.max(0, x1 - x0 - 1), rowH - 7);
-            if (selectedIds.has(laneElement.id)) {
-              ctx.strokeStyle = '#ffffff';
-              ctx.lineWidth = 2;
-              ctx.strokeRect(x0 + 1, top + 4, Math.max(0, x1 - x0 - 2), rowH - 8);
-            }
-            // Type label lives INSIDE its bar: clipped to the bar rect and
-            // ellipsized to the bar width, so a short bar never spills text over
-            // its neighbours (most Dremu lanes are ~50 px wide at 1x zoom).
-            if (laneIndex === 0) {
-              const barWidth = x1 - x0;
-              const labelBudget = barWidth - 12;
-              // Below ~60 px there is no room for anything readable: the bar's
-              // colour + the gutter row already identify it, and the hover
-              // tooltip shows the type, so draw nothing rather than noise.
-              if (labelBudget >= 48) {
-                ctx.save();
-                ctx.beginPath();
-                ctx.rect(x0, top + 3, barWidth, rowH - 6);
-                ctx.clip();
-                ctx.fillStyle = color;
-                ctx.font = '10.5px sans-serif';
-                ctx.textBaseline = 'middle';
-                const label =
-                  laneElementsOnRow.length > 1
-                    ? shortType(laneElement.type) + ' ×' + laneElementsOnRow.length
-                    : shortType(laneElement.type);
-                ctx.fillText(fitText(ctx, label, labelBudget), x0 + 5, top + rowH / 2);
-                ctx.restore();
-              }
-            }
-          }
+          laneElementsOnRow.forEach((laneElement, laneIndex) => paintLaneBar(laneElement, laneIndex, laneElementsOnRow.length, top, rowH));
 
-          // Elements on this row.
+          paintRowNotes(row, top, rowH);
+        }
+
+        /** One lane element bar on a row (multiple periods can share a name). */
+        function paintLaneBar(laneElement, laneIndex, laneElementCount, top, rowH) {
+          // A lane element is a normal draggable element, so it must honour the
+          // in-flight drag exactly like notes do. Without this preview the bar
+          // sits still under the pointer and only jumps to the new time on
+          // release, which reads as "it moves but does not follow the mouse".
+          const drag = dragRef.current;
+          const dragged = drag && drag.mode === 'move' && drag.ids && drag.ids.indexOf(laneElement.id) !== -1;
+          const resized = drag && drag.mode === 'resize' && drag.ids && drag.ids.indexOf(laneElement.id) !== -1;
+          let laneStart = laneElement.start || 0;
+          let durationValue = Number.isFinite(laneElement.duration) ? laneElement.duration : null;
+          if (dragged) laneStart += drag.delta;
+          if (resized && durationValue !== null) durationValue = Math.max(0, durationValue + drag.delta);
+          const laneEnd = durationValue === null ? laneStart + 0.05 : laneStart + durationValue;
+          const x0 = Math.max(timeLeft, xForTime(laneStart, currentView));
+          const x1 = Math.min(width, xForTime(laneEnd, currentView));
+          if (x1 <= x0) return;
+          const color = elementColor(catalog, laneElement.type);
+          ctx.fillStyle = color + (laneIndex === 0 ? '22' : '14');
+          ctx.fillRect(x0, top + 3, x1 - x0, rowH - 6);
+          ctx.strokeStyle = color + '66';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x0 + 0.5, top + 3.5, Math.max(0, x1 - x0 - 1), rowH - 7);
+          if (selectionRef.current.indexOf(laneElement.id) !== -1) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x0 + 1, top + 4, Math.max(0, x1 - x0 - 2), rowH - 8);
+          }
+          // Type label lives INSIDE its bar: clipped to the bar rect and
+          // ellipsized to the bar width, so a short bar never spills text over
+          // its neighbours (most Dremu lanes are ~50 px wide at 1x zoom).
+          if (laneIndex !== 0) return;
+          const barWidth = x1 - x0;
+          const labelBudget = barWidth - 12;
+          // Below ~60 px there is no room for anything readable: the bar's
+          // colour + the gutter row already identify it, and the hover
+          // tooltip shows the type, so draw nothing rather than noise.
+          if (labelBudget < 48) return;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x0, top + 3, barWidth, rowH - 6);
+          ctx.clip();
+          ctx.fillStyle = color;
+          ctx.font = '10.5px sans-serif';
+          ctx.textBaseline = 'middle';
+          const label = laneElementCount > 1 ? shortType(laneElement.type) + ' ×' + laneElementCount : shortType(laneElement.type);
+          ctx.fillText(fitText(ctx, label, labelBudget), x0 + 5, top + rowH / 2);
+          ctx.restore();
+        }
+
+        /** Every note / element on one row, including drag-time previews. */
+        function paintRowNotes(row, top, rowH) {
+          const selectedIds = selectionRef.current;
+          const drag = dragRef.current;
           const visibleFrom = currentView.t0 - 4;
           const visibleTo = currentView.t0 + timeWidth / currentView.pps + 4;
           for (const element of row.notes) {
             let start = element.start || 0;
             let duration = element.duration;
-            const isSelected = selectedIds.has(element.id);
+            const isSelected = selectedIds.indexOf(element.id) !== -1;
             const dragged = drag && drag.mode === 'move' && drag.ids && drag.ids.indexOf(element.id) !== -1;
             const resized = drag && drag.mode === 'resize' && drag.ids && drag.ids.indexOf(element.id) !== -1;
             if (dragged) start += drag.delta;
@@ -4106,69 +6415,87 @@ window.__ModuleLoader__.load({
             const centerY = top + rowH / 2;
             const x = xForTime(start, currentView);
             if (duration !== null && duration !== undefined && duration > 0) {
-              // Hold body / timed block.
-              const width = Math.max(2, duration * currentView.pps);
-              ctx.fillStyle = color + 'cc';
-              ctx.fillRect(x, centerY - 6, width, 12);
-              ctx.fillStyle = 'rgba(0,0,0,0.32)';
-              ctx.fillRect(x, centerY - 6, Math.min(width, 3), 12);
-              if (category === 'hold' && Array.isArray(element.fields && element.fields.innerNotes ? element.fields.innerNotes.items : null)) {
-                for (const inner of element.fields.innerNotes.items) {
-                  const innerStart = valueAsNumber(inner && inner.fields ? inner.fields.hitTime : null);
-                  if (innerStart === null) continue;
-                  // Inner notes are relative to the hold start.
-                  const ix2 = xForTime(start + innerStart, currentView);
-                  ctx.fillStyle = 'rgba(255,255,255,0.75)';
-                  ctx.fillRect(ix2 - 1, centerY - 6, 2, 12);
-                }
-              }
-              if (isSelected) {
-                ctx.strokeStyle = '#ffffff';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(x - 1, centerY - 7, width + 2, 14);
-              }
-              if (drag && drag.mode === 'resize' && drag.primaryId === element.id) {
-                ctx.fillStyle = '#ffffff';
-                ctx.fillRect(x + width - 2, centerY - 8, 4, 16);
-              }
+              paintTimedElement(element, start, category, x, duration, centerY, color, isSelected);
             } else {
-              // Instant note marker.
-              const radius = NOTE_R;
-              ctx.beginPath();
-              if (category === 'hold') {
-                ctx.arc(x, centerY, radius, 0, Math.PI * 2);
-              } else if (shortType(element.type).toLowerCase().indexOf('drag') !== -1) {
-                ctx.moveTo(x - radius, centerY - radius);
-                ctx.lineTo(x, centerY);
-                ctx.lineTo(x - radius, centerY + radius);
-                ctx.closePath();
-              } else {
-                ctx.moveTo(x, centerY - radius);
-                ctx.lineTo(x + radius, centerY);
-                ctx.lineTo(x, centerY + radius);
-                ctx.lineTo(x - radius, centerY);
-                ctx.closePath();
-              }
-              ctx.fillStyle = color;
-              ctx.fill();
-              ctx.lineWidth = isSelected ? 2 : 1;
-              ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.42)';
-              ctx.stroke();
+              paintInstantNote(element, category, x, centerY, color, isSelected);
+            }
+            if (drag && drag.mode === 'resize' && drag.primaryId === element.id && duration !== null && duration !== undefined && duration > 0) {
+              const width = Math.max(2, duration * currentView.pps);
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(x + width - 2, centerY - 8, 4, 16);
             }
           }
-        });
-        ctx.restore();
+        }
 
-        // Gutter divider.
-        ctx.strokeStyle = border;
-        ctx.beginPath();
-        ctx.moveTo(GUTTER_W + 0.5, 0);
-        ctx.lineTo(GUTTER_W + 0.5, height);
-        ctx.stroke();
+        /** Hold body / timed element: bar, inner-note ticks and selection. */
+        function paintTimedElement(element, start, category, x, duration, centerY, color, isSelected) {
+          const width = Math.max(2, duration * currentView.pps);
+          ctx.fillStyle = color + 'cc';
+          ctx.fillRect(x, centerY - 6, width, 12);
+          ctx.fillStyle = 'rgba(0,0,0,0.32)';
+          ctx.fillRect(x, centerY - 6, Math.min(width, 3), 12);
+          if (category === 'hold' && Array.isArray(element.fields && element.fields.innerNotes ? element.fields.innerNotes.items : null)) {
+            for (const inner of element.fields.innerNotes.items) {
+              const innerStart = valueAsNumber(inner && inner.fields ? inner.fields.hitTime : null);
+              if (innerStart === null) continue;
+              // Inner notes are relative to the hold start.
+              const innerX = xForTime(start + innerStart, currentView);
+              ctx.fillStyle = 'rgba(255,255,255,0.75)';
+              ctx.fillRect(innerX - 1, centerY - 6, 2, 12);
+            }
+          }
+          if (isSelected) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x - 1, centerY - 7, width + 2, 14);
+          }
+        }
 
-        // Playhead.
-        const playheadX = xForTime(transportRef.current.time, currentView);
-        if (playheadX >= timeLeft - 1 && playheadX <= width) {
+        /** Instant note marker: circle for holds, triangle for drags, diamond otherwise. */
+        function paintInstantNote(element, category, x, centerY, color, isSelected) {
+          const radius = NOTE_R;
+          ctx.beginPath();
+          if (category === 'hold') {
+            ctx.arc(x, centerY, radius, 0, Math.PI * 2);
+          } else if (shortType(element.type).toLowerCase().indexOf('drag') !== -1) {
+            ctx.moveTo(x - radius, centerY - radius);
+            ctx.lineTo(x, centerY);
+            ctx.lineTo(x - radius, centerY + radius);
+            ctx.closePath();
+          } else {
+            ctx.moveTo(x, centerY - radius);
+            ctx.lineTo(x + radius, centerY);
+            ctx.lineTo(x, centerY + radius);
+            ctx.lineTo(x - radius, centerY);
+            ctx.closePath();
+          }
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.lineWidth = isSelected ? 2 : 1;
+          ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.42)';
+          ctx.stroke();
+        }
+
+        // --- Fixed chrome: header line and gutter divider -------------------
+        function paintHeaderDivider() {
+          ctx.strokeStyle = colors.border;
+          ctx.beginPath();
+          ctx.moveTo(0, headerH + 0.5);
+          ctx.lineTo(width, headerH + 0.5);
+          ctx.stroke();
+        }
+
+        function paintGutterDivider() {
+          ctx.strokeStyle = colors.border;
+          ctx.beginPath();
+          ctx.moveTo(GUTTER_W + 0.5, 0);
+          ctx.lineTo(GUTTER_W + 0.5, height);
+          ctx.stroke();
+        }
+
+        function paintPlayhead() {
+          const playheadX = xForTime(transportRef.current.time, currentView);
+          if (playheadX < timeLeft - 1 || playheadX > width) return;
           ctx.strokeStyle = '#ff5f7a';
           ctx.lineWidth = 1.5;
           ctx.beginPath();
@@ -4184,11 +6511,12 @@ window.__ModuleLoader__.load({
           ctx.fill();
         }
 
-        // Box selection overlay.
-        if (drag && drag.mode === 'box' && drag.box) {
+        function paintBoxSelection() {
+          const drag = dragRef.current;
+          if (!drag || drag.mode !== 'box' || !drag.box) return;
           const box = drag.box;
           ctx.fillStyle = 'rgba(91,140,255,0.16)';
-          ctx.strokeStyle = brand;
+          ctx.strokeStyle = colors.brand;
           ctx.lineWidth = 1;
           const bx = Math.min(box.x0, box.x1);
           const by = Math.min(box.y0, box.y1);
@@ -4198,8 +6526,8 @@ window.__ModuleLoader__.load({
           ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
         }
 
-        // Hover tooltip for the element under the pointer.
-        if (hoverRef.current && hoverRef.current.element) {
+        function paintHoverTooltip() {
+          if (!hoverRef.current || !hoverRef.current.element) return;
           const element = hoverRef.current.element;
           const text = shortType(element.type) + ' · ' + formatTime(element.start || 0) + (element.lane ? ' · ' + element.lane : '');
           ctx.font = '11px sans-serif';
@@ -4214,19 +6542,19 @@ window.__ModuleLoader__.load({
           ctx.fillText(text, bx + 6, by + 9);
         }
 
-        // Empty-state hint.
-        if (currentRows.length === 0) {
-          ctx.fillStyle = labelSecondary;
+        function paintEmptyState() {
+          if (rowsRef.current.length !== 0) return;
+          ctx.fillStyle = colors.labelSecondary;
           ctx.font = '12px sans-serif';
           ctx.textBaseline = 'middle';
           ctx.fillText(t('timelineEmpty'), GUTTER_W + 16, headerH + 30);
         }
-      }, [activeStaff, catalog, gridStep, headerH, rowTop, t, timeForX, xForTime]);
+      }, [activeStaff, catalog, gridStep, headerH, rowTop, t, timeForX, waveMode, xForTime]);
 
       // Redraw on any relevant change.
       useEffect(() => {
         paint();
-      }, [paint, view, size, rows, selection, hover, project, wave, waveStatus, follow]);
+      }, [paint, view, size, rows, selection, hover, project, waves, waveStatus, audioClips, waveMode, follow]);
 
       // Playhead animation while playing (no React re-render per frame).
       useEffect(() => {
@@ -4265,6 +6593,28 @@ window.__ModuleLoader__.load({
         return { x: event.clientX - rect.left, y: event.clientY - rect.top };
       }, []);
 
+      /** Right-click on the audio strip opens the waveform/spectrum switcher. */
+      const onWaveContextMenu = useCallback(
+        (event) => {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault();
+          const point = localPoint(event);
+          const inStrip = point.y >= RULER_H && point.y <= headerH && point.x >= GUTTER_W;
+          if (!inStrip || (audioClipsRef.current || []).length === 0) {
+            setWaveMenu(null);
+            return;
+          }
+          const vw = typeof window !== 'undefined' && Number.isFinite(window.innerWidth) ? window.innerWidth : 1200;
+          const vh = typeof window !== 'undefined' && Number.isFinite(window.innerHeight) ? window.innerHeight : 800;
+          const clientX = event && Number.isFinite(event.clientX) ? event.clientX : point.x;
+          const clientY = event && Number.isFinite(event.clientY) ? event.clientY : point.y;
+          setWaveMenu({
+            x: clamp(clientX, 8, Math.max(8, vw - 196)),
+            y: clamp(clientY, 8, Math.max(8, vh - 118)),
+          });
+        },
+        [headerH, localPoint],
+      );
+
       /** Element at a canvas point (rows area only). */
       const hitTest = useCallback(
         (point) => {
@@ -4275,6 +6625,16 @@ window.__ModuleLoader__.load({
           if (rowIndex < 0 || rowIndex >= currentRows.length) return null;
           const row = currentRows[rowIndex];
           if (row.kind === 'group') return { row, rowIndex, element: null, group: true };
+          if (row.audioRow) {
+            const clip = row.clip || null;
+            if (!clip || point.x < GUTTER_W) return { row, rowIndex, element: null, audio: true, clip: null };
+            const start = Number.isFinite(clip.offset) ? clip.offset : 0;
+            const length = Number.isFinite(clip.duration) ? clip.duration : 0;
+            const x0 = xForTime(start, currentView);
+            const x1 = xForTime(start + length, currentView);
+            const hitBar = point.x >= Math.min(x0, x1) - 2 && point.x <= Math.max(x0, x1) + 2;
+            return { row, rowIndex, element: null, audio: true, clip: hitBar ? clip : null };
+          }
           if (point.x < GUTTER_W) return { row, rowIndex, element: null };
           // Search from the right so later elements win overlaps.
           for (let i = row.notes.length - 1; i >= 0; i -= 1) {
@@ -4297,7 +6657,7 @@ window.__ModuleLoader__.load({
           }
           return { row, rowIndex, element: null };
         },
-        [elementBox, headerH, rowIndexAt, timeForX],
+        [elementBox, headerH, rowIndexAt, timeForX, xForTime],
       );
 
       /** Start a move of the current selection. */
@@ -4381,6 +6741,22 @@ window.__ModuleLoader__.load({
             setHover(null);
             return;
           }
+          if (hit && hit.audio) {
+            if (hit.clip) {
+              dragRef.current = {
+                mode: 'audio',
+                clip: hit.clip,
+                staffId: hit.row.staffId,
+                primaryOffset: Number.isFinite(hit.clip.offset) ? hit.clip.offset : 0,
+                delta: 0,
+                startX: point.x,
+                startY: point.y,
+                anchorTime: timeForX(point.x, currentView),
+                moved: false,
+              };
+            }
+            return;
+          }
           if (hit && hit.element) {
             const box = hit.box || elementBox(hit.element, hit.rowIndex, currentView);
             // Only a real right-edge handle resizes: a narrow element must stay
@@ -4451,6 +6827,12 @@ window.__ModuleLoader__.load({
           const deltaX = point.x - drag.startX;
           const deltaTime = timeForX(point.x, currentView) - (drag.anchorTime === undefined ? timeForX(drag.startX, currentView) : drag.anchorTime);
           if (Math.abs(deltaX) > 2) drag.moved = true;
+          if (drag.mode === 'audio') {
+            const target = snapTime(drag.primaryOffset + deltaTime, tempoRef.current, snapDiv, snapOn);
+            drag.delta = Math.max(-drag.primaryOffset, target - drag.primaryOffset);
+            paint();
+            return;
+          }
           if (drag.mode === 'move') {
             const target = snapTime(drag.primaryStart + deltaTime, tempoRef.current, snapDiv, snapOn);
             drag.delta = target - drag.primaryStart;
@@ -4504,6 +6886,21 @@ window.__ModuleLoader__.load({
             paint();
             return;
           }
+          if (drag.mode === 'audio') {
+            if (drag.moved && Math.abs(drag.delta) > 1e-9) {
+              const next = round(Math.max(0, drag.primaryOffset + drag.delta), 6);
+              onEdit([
+                {
+                  op: 'patchAudioPeriod',
+                  staffId: drag.clip.staffId || drag.staffId,
+                  audioPeriodId: drag.clip.id,
+                  fields: { timeOffset: next },
+                },
+              ]);
+            }
+            paint();
+            return;
+          }
           if (drag.mode === 'move' && drag.moved && Math.abs(drag.delta) > 1e-9) {
             const ops = [];
             for (const id of drag.ids) {
@@ -4551,13 +6948,17 @@ window.__ModuleLoader__.load({
       /** Double-click on empty space places the current tool. */
       const onDoubleClick = useCallback(
         (event) => {
-          if (tool === 'select') return;
           const point = localPoint(event);
           if (point.y < headerH || point.x < GUTTER_W) return;
           const currentView = viewRef.current;
           const currentRows = rowsRef.current;
           const rowIndex = rowIndexAt(point.y, currentView);
           const row = currentRows[rowIndex];
+          if (row && row.audioRow && row.clip) {
+            transport.seek(Math.max(0, row.clip.offset || 0));
+            return;
+          }
+          if (tool === 'select') return;
           const type = typeForTool(catalog, tool);
           if (!row || row.kind === 'group' || !type) return;
           const time = Math.max(0, snapTime(timeForX(point.x, currentView), tempoRef.current, snapDiv, snapOn));
@@ -4589,7 +6990,7 @@ window.__ModuleLoader__.load({
           setSelection([id]);
           setTool('select');
         },
-        [catalog, headerH, localPoint, onEdit, onNotice, project, rowIndexAt, setSelection, setTool, snapDiv, snapOn, t, timeForX, tool],
+        [catalog, headerH, localPoint, onEdit, onNotice, project, rowIndexAt, setSelection, setTool, snapDiv, snapOn, t, timeForX, tool, transport],
       );
 
       /** Wheel: zoom (ctrl), pan time (shift), scroll rows (default). */
@@ -4672,15 +7073,26 @@ window.__ModuleLoader__.load({
           },
           onDoubleClick,
           onWheel,
-          onContextMenu: (event) => event.preventDefault(),
+          onContextMenu: onWaveContextMenu,
           'aria-label': t('timeline'),
         }),
+        waveMenu
+          ? h(WaveformContextMenu, {
+              key: 'wave-menu',
+              t,
+              x: waveMenu.x,
+              y: waveMenu.y,
+              mode: waveMode,
+              onSelect: selectWaveMode,
+              onClose: () => setWaveMenu(null),
+            })
+          : null,
       );
     }
 
-    // =======================================================================
-    // Open-project dialog.
-    // =======================================================================
+    // ========================================================================
+    // 16 · Open-project dialog.
+    // ========================================================================
 
     /** Modal listing the chart library and accepting a manual path. */
     function OpenProjectDialog(props) {
@@ -4775,9 +7187,9 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // =======================================================================
-    // Playback scene (Dremu form renderer — playback only, no chart signals)
-    // =======================================================================
+    // ========================================================================
+    // 17 · Playback scene (Dremu form renderer — playback only, no chart signals)
+    // ========================================================================
     //
     // Ports the *visual* part of the Unity GorgeStudio "Dremu" form to a 2D
     // canvas so a chart can be previewed in the browser. The formulas, engine
@@ -4799,7 +7211,7 @@ window.__ModuleLoader__.load({
       hideHeadAtHit: true,
       clearColor: '#314d79',
       maxPointCount: 2000,
-      rateOptions: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2],
+      rateOptions: RATE_OPTIONS,
     };
 
     /**
@@ -5311,13 +7723,13 @@ window.__ModuleLoader__.load({
       const opts = options || {};
       const aspect = Number.isFinite(opts.aspect) && opts.aspect > 0 ? opts.aspect : PLAYER.aspect;
       const imageSize = typeof opts.imageSize === 'function' ? opts.imageSize : null;
-      const t = Number.isFinite(time) ? time : 0;
+      const frameTime = Number.isFinite(time) ? time : 0;
       const frame = { images: [], lanes: [], holds: [], notes: [], effects: [] };
       if (!model) return frame;
       const curveStates = new Map();
       const poses = new Map();
       function laneProgressAt(lane, at) {
-        if (at === t) {
+        if (at === frameTime) {
           let state = curveStates.get(lane);
           if (!state) {
             state = { progress: evalAdd(lane.animation, at - lane.start) };
@@ -5368,7 +7780,7 @@ window.__ModuleLoader__.load({
       function poseAtTime(lane, at) {
         const target = frameLaneOf(lane);
         if (!target) return { x: 0, y: 0, rot: 0, cos: 1, sin: 0 };
-        if (at === t) {
+        if (at === frameTime) {
           const cachedPose = poses.get(target);
           if (cachedPose) return cachedPose;
         }
@@ -5381,7 +7793,7 @@ window.__ModuleLoader__.load({
           cos: Math.cos(rot * PLAYBACK_RAD),
           sin: Math.sin(rot * PLAYBACK_RAD),
         };
-        if (at === t) poses.set(target, pose);
+        if (at === frameTime) poses.set(target, pose);
         return pose;
       }
       function applyPose(pose, point) {
@@ -5393,12 +7805,12 @@ window.__ModuleLoader__.load({
       function lanePointAt(lane, x, distance, at) {
         return lane.kind === 'guide' ? guidePointAt(lane, x, distance, at) : mainPointAt(lane, x, distance, at);
       }
-      function laneLineValue(lane, x) { return laneLineValueAt(lane, x, t); }
-      function laneNormalAt(lane, x) { return laneNormalAtTime(lane, x, t); }
-      function mainPoint(lane, x, distance) { return mainPointAt(lane, x, distance, t); }
-      function guidePoint(guide, x, distance) { return guidePointAt(guide, x, distance, t); }
-      function poseAt(lane) { return poseAtTime(lane, t); }
-      function lanePoint(lane, x, distance) { return lanePointAt(lane, x, distance, t); }
+      function laneLineValue(lane, x) { return laneLineValueAt(lane, x, frameTime); }
+      function laneNormalAt(lane, x) { return laneNormalAtTime(lane, x, frameTime); }
+      function mainPoint(lane, x, distance) { return mainPointAt(lane, x, distance, frameTime); }
+      function guidePoint(guide, x, distance) { return guidePointAt(guide, x, distance, frameTime); }
+      function poseAt(lane) { return poseAtTime(lane, frameTime); }
+      function lanePoint(lane, x, distance) { return lanePointAt(lane, x, distance, frameTime); }
       // Hit-response spawn state is fixed at the note's hit time and cached on
       // the note: local spawn point + colour pair + the 16 heart particles.
       function noteEffectData(note) {
@@ -5440,7 +7852,7 @@ window.__ModuleLoader__.load({
         return note.effect;
       }
       function noteWorld(note, lane) {
-        const elapsed = t - note.start;
+        const elapsed = frameTime - note.start;
         const lateral = evalAdd(note.position, elapsed);
         const distance = evalAdd(note.distance, elapsed);
         const pose = poseAt(lane);
@@ -5461,7 +7873,7 @@ window.__ModuleLoader__.load({
         return { x: world.x, y: world.y, rot: pose.rot + localRot };
       }
       function holdPolyline(note, lane) {
-        const elapsed = t - note.start;
+        const elapsed = frameTime - note.start;
         const waiting = elapsed < 0;
         const startDistance = waiting ? evalAdd(note.distance, elapsed) : 0;
         const endDistance = evalAdd(note.endDistance, elapsed - note.holdTime);
@@ -5492,7 +7904,7 @@ window.__ModuleLoader__.load({
         if (!image.file) return null;
         const size = imageSize(image);
         if (!size || !(size.w > 0) || !(size.h > 0)) return null;
-        const elapsed = t - image.start;
+        const elapsed = frameTime - image.start;
         const progress = image.useChartTime ? elapsed : image.keep > 0 ? elapsed / image.keep : 0;
         const alpha = clamp(evalDoubleLerp(image.alpha, progress, 0, 1), 0, 1);
         const rot = evalAdd(image.rotationZ, progress);
@@ -5552,8 +7964,8 @@ window.__ModuleLoader__.load({
       // ---- Lanes ---------------------------------------------------------
       for (const lane of model.lanes) {
         if (!lane.usable) continue;
-        if (!playbackLaneAlive(lane, t)) continue;
-        const age = t - lane.start;
+        if (!playbackLaneAlive(lane, frameTime)) continue;
+        const age = frameTime - lane.start;
         const pose = poseAt(lane);
         const startX = evalAdd(lane.drawStartX, age);
         const endX = evalAdd(lane.drawEndX, age);
@@ -5568,7 +7980,7 @@ window.__ModuleLoader__.load({
             fix = Math.sin(laneNormalAt(lane.mainLane, offset).angle * PLAYBACK_RAD);
           }
           // The guide line is drawn in the guide node's local space: that node
-          // sits on the main lane at x = position(t) and is rotated by the main
+          // sits on the main lane at x = position(frameTime) and is rotated by the main
           // lane normal, so its polyline is a perpendicular stroke through that
           // point (DremuGuideLaneLineTransformer + DremuGuideLanePositionTransformer).
           const guideRotation = (laneNormalAt(lane.mainLane, offset).angle - 90) * PLAYBACK_RAD;
@@ -5602,13 +8014,13 @@ window.__ModuleLoader__.load({
       for (const note of model.notes) {
         const lane = note.lane;
         if (!lane || !lane.usable) continue;
-        const elapsed = t - note.start;
+        const elapsed = frameTime - note.start;
         const color = colorCurveAt(note.color, elapsed);
-        if (playbackNoteHeadVisible(note, t)) {
+        if (playbackNoteHeadVisible(note, frameTime)) {
           const world = noteWorld(note, lane);
           if (world) frame.notes.push({ id: note.id, type: note.kind, laneId: lane.id, x: world.x, y: world.y, rot: world.rot, color, z: note.positionZ });
         }
-        if (playbackHoldBodyVisible(note, t)) {
+        if (playbackHoldBodyVisible(note, frameTime)) {
           const points = holdPolyline(note, lane);
           if (points.length >= 2) frame.holds.push({ id: note.id, points, color, z: note.positionZ });
         }
@@ -5616,14 +8028,14 @@ window.__ModuleLoader__.load({
 
       // ---- Hit response (DremuRespondHint + 16 heart particles) ---------
       // Autoplay responds at hitTime, so the whole effect is a pure function
-      // of `t - hitTime`; nothing here depends on input signals.
+      // of `frameTime - hitTime`; nothing here depends on input signals.
       for (const note of model.notes) {
         const lane = note.lane;
         if (!lane || !lane.usable) continue;
-        const age = t - note.start;
+        const age = frameTime - note.start;
         if (age < -PLAYBACK_EPSILON || age >= PLAYER_RESPONSE.keepTime) continue;
         const effect = noteEffectData(note);
-        const pose = effect.fixedWorld ? poseAtTime(lane, note.start) : poseAtTime(lane, t);
+        const pose = effect.fixedWorld ? poseAtTime(lane, note.start) : poseAtTime(lane, frameTime);
         const ringWorld = applyPose(pose, effect.local);
         if (!Number.isFinite(ringWorld.x) || !Number.isFinite(ringWorld.y)) continue;
         const curveTime = age / PLAYER_RESPONSE.keepTime;
@@ -5659,7 +8071,7 @@ window.__ModuleLoader__.load({
       // ---- Storyboard images --------------------------------------------
       if (imageSize) {
         for (const image of model.images) {
-          if (t < image.start - PLAYBACK_EPSILON || t > image.start + image.keep + PLAYBACK_EPSILON) continue;
+          if (frameTime < image.start - PLAYBACK_EPSILON || frameTime > image.start + image.keep + PLAYBACK_EPSILON) continue;
           const rect = storyboardRect(image);
           if (rect) frame.images.push(rect);
         }
@@ -6131,7 +8543,7 @@ window.__ModuleLoader__.load({
             { className: 'dgc-playerFrame', style: { width: frameWidth, height: frameHeight } },
             h('canvas', { className: 'dgc-playerCanvas', ref: canvasRef }),
             empty ? h('div', { className: 'dgc-playerEmpty' }, tr('playbackEmpty')) : null,
-            !project || !project.audio
+            !project || audioClipsOf(project).length === 0
               ? h('div', { className: 'dgc-playerNote' }, tr('playbackNoAudio'))
               : null,
           ),
@@ -6205,9 +8617,270 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // =======================================================================
-    // Page assembly.
-    // =======================================================================
+    // ========================================================================
+    // 18 · Page assembly.
+    // ========================================================================
+
+    /**
+     * Page header: title/path, dirty/connection badges and project actions.
+     * Pure presentation; every value arrives from ChartStudioPage.
+     */
+    function StudioHeader(props) {
+      const { t, project, dirty, connection, session, hasPlayableContent, onOpenProject, onPreview } = props;
+      return h(
+        'div',
+        { className: 'dgc-header' },
+        h(
+          'div',
+          { className: 'dgc-title' },
+          h('strong', null, project ? project.title || t('title') : t('title')),
+          h('span', { className: 'dgc-mono' }, project ? project.dir : t('subtitle')),
+        ),
+        h('span', { className: 'dgc-badge ' + (dirty ? 'is-dirty' : 'is-clean') }, dirty ? t('unsaved') : t('clean')),
+        dirty ? h('span', { className: 'dgc-badge', title: t('dirtyDot') }, '●') : null,
+        connection === 'offline' ? h('span', { className: 'dgc-badge is-dirty dgc-offline' }, t('offline')) : null,
+        h('span', { className: 'dgc-spacer' }),
+        h(Button, { icon: 'folder', onClick: onOpenProject }, t('openProject')),
+        h(Button, { icon: 'preview', onClick: onPreview, disabled: !project || !hasPlayableContent, title: t('playbackOpen') }, t('playbackOpen')),
+        h(Button, { icon: 'reload', onClick: () => session.reload(), disabled: !project }, t('reload')),
+        h(Button, { icon: 'undo', onClick: () => session.undo(), disabled: !project }, t('undo')),
+        h(Button, { icon: 'redo', onClick: () => session.redo(), disabled: !project }, t('redo')),
+        h(
+          Button,
+          {
+            variant: 'primary',
+            icon: 'save',
+            disabled: !project || session.saving,
+            onClick: () => session.save(),
+          },
+          session.saving ? t('saving') : t('save'),
+        ),
+      );
+    }
+
+    /**
+     * Toolbar: placement tools, snap division, zoom, selection actions and the
+     * chart tempo/offset fields. Pure presentation.
+     */
+    function StudioToolbar(props) {
+      const { t, tool, setTool, snapOn, snapDiv, setSnapOn, setSnapDiv, canvasApiRef, selection, onDuplicate, onDelete, tempo, onEdit } = props;
+      const tools = [
+        { id: 'select', icon: 'select', label: t('toolSelect'), key: 'V' },
+        { id: 'tap', icon: 'tap', label: t('toolTap'), key: 'Q' },
+        { id: 'drag', icon: 'drag', label: t('toolDrag'), key: 'W' },
+        { id: 'hold', icon: 'hold', label: t('toolHold'), key: 'E' },
+        { id: 'lane', icon: 'lane', label: t('toolLane'), key: 'T' },
+      ];
+      return h(
+        'div',
+        { className: 'dgc-toolbar' },
+        h(
+          'div',
+          { className: 'dgc-toolgroup' },
+          tools.map((item) =>
+            h(
+              Button,
+              {
+                key: item.id,
+                icon: item.icon,
+                active: tool === item.id,
+                title: item.label + ' (' + item.key + ')',
+                onClick: () => setTool(item.id),
+              },
+              item.label,
+            ),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dgc-toolgroup' },
+          h('label', null, h('span', null, t('snap'))),
+          h(
+            'select',
+            {
+              className: 'dgc-select',
+              value: snapOn ? String(snapDiv) : 'off',
+              onChange: (event) => {
+                if (event.target.value === 'off') setSnapOn(false);
+                else {
+                  setSnapOn(true);
+                  setSnapDiv(Number(event.target.value));
+                }
+              },
+            },
+            h('option', { value: 'off' }, t('snapOff')),
+            SNAP_DIVISIONS.map((value) => h('option', { key: value, value: String(value) }, '1/' + value)),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dgc-toolgroup' },
+          h(Button, { variant: 'ghost', icon: 'zoomOut', title: t('zoomOut'), onClick: () => canvasApiRef.current && canvasApiRef.current.zoomOut() }),
+          h(Button, { variant: 'ghost', icon: 'zoomIn', title: t('zoomIn'), onClick: () => canvasApiRef.current && canvasApiRef.current.zoomIn() }),
+          h(Button, { variant: 'ghost', icon: 'fit', title: t('fitAll'), onClick: () => canvasApiRef.current && canvasApiRef.current.fit() }),
+        ),
+        h(
+          'div',
+          { className: 'dgc-toolgroup' },
+          h(Button, { variant: 'ghost', icon: 'duplicate', title: t('duplicate'), disabled: selection.length === 0, onClick: () => onDuplicate(selection) }),
+          h(Button, { variant: 'ghost', icon: 'trash', title: t('delete'), disabled: selection.length === 0, onClick: () => onDelete(selection) }),
+        ),
+        h('span', { className: 'dgc-spacer' }),
+        h('label', null, h('span', null, t('tempo')), h(NumberField, {
+          value: tempo.bpm,
+          step: 1,
+          onCommit: (bpm) => onEdit([{ op: 'setMeta', tempo: { bpm } }]),
+        })),
+        h('label', null, h('span', null, t('offset')), h(NumberField, {
+          value: tempo.offset,
+          step: 0.05,
+          onCommit: (offset) => onEdit([{ op: 'setMeta', tempo: { offset } }]),
+        })),
+      );
+    }
+
+
+    /**
+     * Editor shortcut policy for one keydown event.
+     *
+     * The page installs a single window listener and calls this with the
+     * current action set, so a transport tick (which re-renders ~60x/s)     * cannot churn listeners and the shortcut table stays in one place.
+     *
+     * @param {KeyboardEvent} event
+     * @param {object} actions  current editor actions and state.
+     */
+    function handleEditorKey(event, actions) {
+      const {
+        preview,
+        closePreview,
+        transport,
+        session,
+        selection,
+        allElementIds,
+        setSelection,
+        copySelection,
+        pasteClipboard,
+        duplicateElements,
+        deleteElements,
+        nudgeSelection,
+        setTool,
+        setSnapDiv,
+        tempo,
+        snapDiv,
+        canvasApiRef,
+      } = actions;
+
+      const target = event.target;
+      if (preview) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closePreview();
+          return;
+        }
+        if (event.key === ' ') {
+          event.preventDefault();
+          if (transport.playing) transport.pause();
+          else transport.play();
+          return;
+        }
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          const step = event.shiftKey ? 5 : 1;
+          transport.seek(Math.max(0, transport.time + (event.key === 'ArrowRight' ? step : -step)));
+          return;
+        }
+        if (event.key === 'Home') {
+          event.preventDefault();
+          transport.seek(0);
+          return;
+        }
+        return;
+      }
+      const tag = target && target.tagName ? target.tagName.toUpperCase() : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (target && target.isContentEditable)) return;
+      const mod = event.metaKey || event.ctrlKey;
+      if (mod && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) session.redo();
+        else session.undo();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        session.redo();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        session.save();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        setSelection(allElementIds.slice(0, 4000));
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'c') {
+        event.preventDefault();
+        copySelection();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'v') {
+        event.preventDefault();
+        pasteClipboard();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'd') {
+        event.preventDefault();
+        duplicateElements(selection);
+        return;
+      }
+      if (event.key === ' ') {
+        event.preventDefault();
+        if (transport.playing) transport.pause();
+        else transport.play();
+        return;
+      }
+      if (event.key === 'Home') {
+        event.preventDefault();
+        transport.seek(0);
+        if (canvasApiRef.current) canvasApiRef.current.reveal(0);
+        return;
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault();
+        deleteElements(selection);
+        return;
+      }
+      if (event.key === 'Escape') {
+        if (selection.length > 0) setSelection([]);
+        else setTool('select');
+        return;
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        if (selection.length > 0) nudgeSelection(event.key === 'ArrowRight' ? 1 : -1);
+        else {
+          const step = (60 / ((tempo && tempo.bpm) || 120)) / (snapDiv || 4);
+          transport.seek(Math.max(0, transport.time + (event.key === 'ArrowRight' ? step : -step)));
+        }
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === 'q') setTool('tap');
+      else if (key === 'w') setTool('drag');
+      else if (key === 'e') setTool('hold');
+      else if (key === 't') setTool('lane');
+      else if (key === 'v') setTool('select');
+      else if (/^[1-8]$/.test(event.key)) setSnapDiv(SNAP_DIVISIONS[Number(event.key) - 1]);
+      else if (event.key === '=' || event.key === '+') {
+        if (canvasApiRef.current) canvasApiRef.current.zoomIn();
+      } else if (event.key === '-') {
+        if (canvasApiRef.current) canvasApiRef.current.zoomOut();
+      } else if (event.key === '0') {
+        if (canvasApiRef.current) canvasApiRef.current.fit();
+      }
+    }
 
     /** The full-page chart studio rendered inside the `main` panel slot. */
     function ChartStudioPage(props) {
@@ -6235,6 +8908,14 @@ window.__ModuleLoader__.load({
       const clipboardRef = useRef([]);
       const noticeTimerRef = useRef(0);
 
+      // A staff that disappears (undone add, host rejection, reload) must not
+      // keep the element list filtered to an id that no longer exists.
+      useEffect(() => {
+        if (!activeStaff) return;
+        if (project && (project.staffs || []).some((staff) => staff.id === activeStaff)) return;
+        setActiveStaff(null);
+      }, [activeStaff, project]);
+
       // The state payload carries `recent`; the full library is fetched on
       // demand (the projects scan touches the filesystem).
       useEffect(() => {
@@ -6252,19 +8933,24 @@ window.__ModuleLoader__.load({
         };
       }, [openDialog, state]);
 
-      const audioName = project && project.audio ? project.audio.name : null;
-      const audioPath = useMemo(() => {
-        if (!project || !project.audio) return null;
-        const file = project.audio.file || project.audio.name || '';
-        if (!file) return null;
-        if (file.charAt(0) === '/') return file;
-        const dir = project.dir || '';
-        return dir ? dir.replace(/\/$/, '') + '/' + file : file;
+      // Every @Song clip of the open project, with an absolute file path for
+      // the <audio> elements / waveform fetch. `audioClipsOf` falls back to the
+      // legacy single `project.audio` shape.
+      const audioClips = useMemo(() => {
+        if (!project) return [];
+        const dir = typeof project.dir === 'string' ? project.dir.replace(/\/$/, '') : '';
+        return audioClipsOf(project)
+          .filter((clip) => clip && (clip.file || clip.relativePath))
+          .map((clip) => {
+            let file = clip.file || '';
+            if (file.charAt(0) !== '/' && clip.relativePath) file = dir ? dir + '/' + clip.relativePath : clip.relativePath;
+            return Object.assign({}, clip, { file });
+          });
       }, [project]);
 
-      const audioOffset = project && project.audio && Number.isFinite(project.audio.offset) ? project.audio.offset : 0;
-      const transport = useTransport(audioPath, project ? project.duration : 0, audioOffset);
-      const { wave, status: waveStatus } = useWaveform(audioName, audioPath);
+      const resetKey = project ? project.dir || '' : '';
+      const transport = useTransport(audioClips, project ? project.duration : 0, resetKey);
+      const { waves, status: waveStatus } = useWaveforms(audioClips);
       const tempo = (project && project.tempo) || { bpm: 120, offset: 0 };
 
       // Playback preview: pure autoplay rendering, no chart signals.
@@ -6301,6 +8987,44 @@ window.__ModuleLoader__.load({
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
         noticeTimerRef.current = window.setTimeout(() => setNotice(null), 4200);
       }, []);
+
+      const [bpmBusy, setBpmBusy] = useState(false);
+      const bpmAvailable = useMemo(
+        () =>
+          audioClips.some((clip) => {
+            const key = clip && (clip.file || clip.relativePath) ? clip.file || clip.relativePath : '';
+            const wave = key ? waves[key] : null;
+            if (!wave || !wave.spectrum) return false;
+            const duration = Number.isFinite(clip.duration) && clip.duration > 0 ? clip.duration : wave.duration;
+            return duration > 3;
+          }),
+        [audioClips, waves],
+      );
+      /** Detect a project BPM from the analyzed audio and apply it as setMeta. */
+      const detectProjectTempo = useCallback(() => {
+        if (bpmBusy) return;
+        const result = detectProjectBpm(audioClips, waves);
+        if (!result || !Number.isFinite(result.bpm)) {
+          pushNotice({ kind: 'error', text: t('bpmNoAudio') });
+          return;
+        }
+        setBpmBusy(true);
+        // Paint the busy state first: the Goertzel scan is a short, synchronous
+        // pass over the cached spectrogram.
+        window.setTimeout(() => {
+          try {
+            // Song tempos are usually integers or halves; snap only when the
+            // estimate is very close, otherwise keep the measured decimals.
+            const half = Math.round(result.bpm * 2) / 2;
+            const bpm = Math.round((Math.abs(result.bpm - half) <= 0.12 ? half : result.bpm) * 100) / 100;
+            session.edit([{ op: 'setMeta', tempo: { bpm } }]);
+            const low = result.confidence < 0.35 ? ' · ' + t('bpmLowConfidence') : '';
+            pushNotice({ kind: 'ok', text: t('bpmDetected').replace('{bpm}', bpm.toFixed(2)) + low });
+          } finally {
+            setBpmBusy(false);
+          }
+        }, 20);
+      }, [audioClips, bpmBusy, pushNotice, session, t, waves]);
       useEffect(() => () => {
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
       }, []);
@@ -6366,6 +9090,39 @@ window.__ModuleLoader__.load({
           setSelection((current) => current.filter((id) => ids.indexOf(id) === -1));
         },
         [session],
+      );
+
+      /** Rename one staff's alias (the `.g` `displayName` header) — one undo step. */
+      const renameStaff = useCallback(
+        (staff, displayName) => {
+          const name = typeof displayName === 'string' ? displayName.trim() : '';
+          if (!staff || name.length === 0) return;
+          session.edit([{ op: 'setStaffName', staffId: staff.id, displayName: name }]);
+          pushNotice({ kind: 'ok', text: t('staffAliasSaved') + ' · ' + name });
+        },
+        [session, t, pushNotice],
+      );
+
+      /**
+       * Permanently delete one staff: the Host removes the `.g` file (and its
+       * `.bak`) after the dialog confirmed it. Deletion is not undoable, so it
+       * does not land on the undo stack.
+       */
+      const deleteStaff = useCallback(
+        (staff) => {
+          if (!staff) return;
+          const name = staff.displayName || staff.className || staff.id;
+          session.edit([{ op: 'removeStaff', staffId: staff.id, deleteFile: true }], { record: false });
+          setSelection([]);
+          setHiddenStaffs((current) => {
+            if (!current.has(staff.id)) return current;
+            const next = new Set(current);
+            next.delete(staff.id);
+            return next;
+          });
+          pushNotice({ kind: 'ok', text: t('staffDeleted') + ' · ' + name });
+        },
+        [session, t, pushNotice],
       );
 
       /** Duplicate elements one beat later (single undo step). */
@@ -6480,6 +9237,124 @@ window.__ModuleLoader__.load({
         [catalog, project, selection, session, snapDiv, tempo],
       );
 
+      /** Create one empty staff from the left pane's 新建谱表 dialog. */
+      const addStaffFromDialog = useCallback(
+        (request) => {
+          if (!project) return;
+          const kind = request && request.kind === 'storyboard' ? 'storyboard' : 'chart';
+          const identity = uniqueStaffIdentity(project, kind);
+          const displayName =
+            request && typeof request.displayName === 'string' && request.displayName.trim().length > 0
+              ? request.displayName.trim()
+              : kind === 'storyboard' ? t('defaultStoryboardName') : t('defaultStaffName');
+          session.edit([
+            {
+              op: 'addStaff',
+              kind,
+              form: kind === 'storyboard' ? 'DeentyStoryboard' : 'Dremu',
+              displayName,
+              className: identity.className,
+              fileName: identity.fileName,
+              timeOffset: 0,
+            },
+          ]);
+          setActiveStaff(identity.fileName);
+          setHiddenStaffs((current) => {
+            if (!current.has(identity.fileName)) return current;
+            const next = new Set(current);
+            next.delete(identity.fileName);
+            return next;
+          });
+          if (canvasApiRef.current) canvasApiRef.current.reveal(0);
+          pushNotice({ kind: 'ok', text: t('createdStaff') + ' · ' + displayName });
+        },
+        [project, session, t, pushNotice],
+      );
+
+      /** Add one catalog element at the playhead into the requested staff. */
+      const addElementFromDialog = useCallback(
+        (type, staffId) => {
+          if (!project) return;
+          const editable = (project.staffs || []).filter((staff) => staff.kind === 'chart' || staff.kind === 'storyboard');
+          const staff =
+            editable.find((item) => item.id === staffId) || editable.find((item) => item.id === activeStaff) || editable[0] || null;
+          if (!staff) {
+            pushNotice({ kind: 'error', text: t('paletteNeedStaff') });
+            return;
+          }
+          const entry = catalogEntry(catalog, type);
+          if (!entry) return;
+          const targetTime = Math.max(0, snapOn ? snapTime(transport.time, tempo, snapDiv, true) : transport.time);
+          const periodId = pickPeriod(project, staff.id, targetTime);
+          const period = (staff.periods || []).find((item) => item.id === periodId) || (staff.periods || [])[0] || null;
+          const periodOffset = period && Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+          const fields = fieldsForNewElement(catalog, type);
+          const timing = entry.timing || {};
+          if (period) {
+            if (entry.category === 'lane') {
+              fields.name = uniqueLaneName(project, staff.id);
+              fields[timing.start || 'generateTime'] = round(targetTime - periodOffset, 6);
+            } else {
+              fields[timing.start || 'hitTime'] = round(targetTime - periodOffset, 6);
+              if (timing.lane) {
+                const lane = firstLaneName(project, staff.id);
+                if (lane) fields[timing.lane] = lane;
+              }
+            }
+          }
+          if (entry.type === 'DeentyStoryboard.Image') {
+            const images = (project.assets && project.assets.images) || [];
+            if (images.length > 0) fields.assetName = images[0];
+          }
+          const id = makeElementId(periodId || 'p0');
+          const op = { op: 'add', staffId: staff.id, element: { id, type, fields } };
+          if (period) op.periodId = period.id;
+          else op.element.start = targetTime;
+          session.edit([op]);
+          setSelection([id]);
+          setHiddenStaffs((current) => {
+            if (!current.has(staff.id)) return current;
+            const next = new Set(current);
+            next.delete(staff.id);
+            return next;
+          });
+          if (canvasApiRef.current) canvasApiRef.current.reveal(targetTime);
+          pushNotice({ kind: 'ok', text: t('createdElement') + ' · ' + (entry.label || shortType(type)) });
+        },
+        [activeStaff, catalog, project, session, snapOn, snapDiv, t, tempo, transport, pushNotice],
+      );
+
+      /** Append one audio period (乐段) from the left pane dialog. */
+      const addAudioPeriodFromDialog = useCallback(
+        (request) => {
+          if (!project || !request || typeof request.file !== 'string' || request.file.length === 0) return;
+          const audioStaff = (project.staffs || []).find((staff) => staff && staff.kind === 'audio') || null;
+          const staffId = typeof request.staffId === 'string' && request.staffId.length > 0 ? request.staffId : audioStaff ? audioStaff.id : '';
+          const op = {
+            op: 'addAudioPeriod',
+            file: request.file,
+            name: typeof request.name === 'string' ? request.name : '',
+            timeOffset: Number.isFinite(request.timeOffset) ? request.timeOffset : 0,
+          };
+          if (staffId) op.staffId = staffId;
+          session.edit([op]);
+          if (staffId) setActiveStaff(staffId);
+          if (canvasApiRef.current && Number.isFinite(request.timeOffset)) canvasApiRef.current.reveal(Math.max(0, request.timeOffset));
+          pushNotice({ kind: 'ok', text: t('audioCreated') + (request.name ? ' · ' + request.name : '') });
+        },
+        [project, session, t, pushNotice],
+      );
+
+      /** Remove one audio period (the audio file itself stays on disk). */
+      const deleteAudioPeriodFromDialog = useCallback(
+        (staffId, clip) => {
+          if (!staffId || !clip || !clip.id) return;
+          session.edit([{ op: 'removeAudioPeriod', staffId, audioPeriodId: clip.id }]);
+          pushNotice({ kind: 'ok', text: t('audioDeleted') + (clip.name ? ' · ' + clip.name : '') });
+        },
+        [session, t, pushNotice],
+      );
+
       // Keyboard shortcuts. The listener is registered once and dispatches to a
       // handler ref, so a transport tick (which re-renders the page ~60x/s)
       // cannot churn window listeners.
@@ -6493,232 +9368,73 @@ window.__ModuleLoader__.load({
         return () => window.removeEventListener('keydown', dispatch);
       }, []);
 
-      keyHandlerRef.current = (event) => {
-        const target = event.target;
-        if (preview) {
-          if (event.key === 'Escape') {
-            event.preventDefault();
-            closePreview();
-            return;
-          }
-          if (event.key === ' ') {
-            event.preventDefault();
-            if (transport.playing) transport.pause();
-            else transport.play();
-            return;
-          }
-          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-            event.preventDefault();
-            const step = event.shiftKey ? 5 : 1;
-            transport.seek(Math.max(0, transport.time + (event.key === 'ArrowRight' ? step : -step)));
-            return;
-          }
-          if (event.key === 'Home') {
-            event.preventDefault();
-            transport.seek(0);
-            return;
-          }
-          return;
-        }
-        const tag = target && target.tagName ? target.tagName.toUpperCase() : '';
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (target && target.isContentEditable)) return;
-        const mod = event.metaKey || event.ctrlKey;
-        if (mod && event.key.toLowerCase() === 'z') {
-          event.preventDefault();
-          if (event.shiftKey) session.redo();
-          else session.undo();
-          return;
-        }
-        if (mod && event.key.toLowerCase() === 'y') {
-          event.preventDefault();
-          session.redo();
-          return;
-        }
-        if (mod && event.key.toLowerCase() === 's') {
-          event.preventDefault();
-          session.save();
-          return;
-        }
-        if (mod && event.key.toLowerCase() === 'a') {
-          event.preventDefault();
-          setSelection(allElementIds.slice(0, 4000));
-          return;
-        }
-        if (mod && event.key.toLowerCase() === 'c') {
-          event.preventDefault();
-          copySelection();
-          return;
-        }
-        if (mod && event.key.toLowerCase() === 'v') {
-          event.preventDefault();
-          pasteClipboard();
-          return;
-        }
-        if (mod && event.key.toLowerCase() === 'd') {
-          event.preventDefault();
-          duplicateElements(selection);
-          return;
-        }
-        if (event.key === ' ') {
-          event.preventDefault();
-          if (transport.playing) transport.pause();
-          else transport.play();
-          return;
-        }
-        if (event.key === 'Home') {
-          event.preventDefault();
-          transport.seek(0);
-          if (canvasApiRef.current) canvasApiRef.current.reveal(0);
-          return;
-        }
-        if (event.key === 'Delete' || event.key === 'Backspace') {
-          event.preventDefault();
-          deleteElements(selection);
-          return;
-        }
-        if (event.key === 'Escape') {
-          if (selection.length > 0) setSelection([]);
-          else setTool('select');
-          return;
-        }
-        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-          event.preventDefault();
-          if (selection.length > 0) nudgeSelection(event.key === 'ArrowRight' ? 1 : -1);
-          else {
-            const step = (60 / ((tempo && tempo.bpm) || 120)) / (snapDiv || 4);
-            transport.seek(Math.max(0, transport.time + (event.key === 'ArrowRight' ? step : -step)));
-          }
-          return;
-        }
-        const key = event.key.toLowerCase();
-        if (key === 'q') setTool('tap');
-        else if (key === 'w') setTool('drag');
-        else if (key === 'e') setTool('hold');
-        else if (key === 't') setTool('lane');
-        else if (key === 'v') setTool('select');
-        else if (/^[1-8]$/.test(event.key)) setSnapDiv(SNAP_DIVISIONS[Number(event.key) - 1]);
-        else if (event.key === '=' || event.key === '+') {
-          if (canvasApiRef.current) canvasApiRef.current.zoomIn();
-        } else if (event.key === '-') {
-          if (canvasApiRef.current) canvasApiRef.current.zoomOut();
-        } else if (event.key === '0') {
-          if (canvasApiRef.current) canvasApiRef.current.fit();
-        }
-      };
+      keyHandlerRef.current = (event) =>
+        handleEditorKey(event, {
+          preview,
+          closePreview,
+          transport,
+          session,
+          selection,
+          allElementIds,
+          setSelection,
+          copySelection,
+          pasteClipboard,
+          duplicateElements,
+          deleteElements,
+          nudgeSelection,
+          setTool,
+          setSnapDiv,
+          tempo,
+          snapDiv,
+          canvasApiRef,
+        });
+
+      // The left pane is memoized and ignores callback props, so hand it stable
+      // refs whose `.current` always points at the latest handler.
+      const addStaffRef = useRef(null);
+      const addElementRef = useRef(null);
+      addStaffRef.current = addStaffFromDialog;
+      addElementRef.current = addElementFromDialog;
 
       const dirty = !!(state && state.dirty);
       const connection = session.connection;
       const phase = session.phase;
 
-      const tools = [
-        { id: 'select', icon: 'select', label: t('toolSelect'), key: 'V' },
-        { id: 'tap', icon: 'tap', label: t('toolTap'), key: 'Q' },
-        { id: 'drag', icon: 'drag', label: t('toolDrag'), key: 'W' },
-        { id: 'hold', icon: 'hold', label: t('toolHold'), key: 'E' },
-        { id: 'lane', icon: 'lane', label: t('toolLane'), key: 'T' },
-      ];
+      // The project picker shows the last-known list until `/projects` answers.
+      const dialogState = Object.assign({}, state || {}, {
+        projects: state && Array.isArray(state.projects) && state.projects.length > 0 ? state.projects : library,
+      });
 
       return h(
         'div',
         { className: 'dgc-root' },
         h(StyleSheet),
-        // Header.
-        h(
-          'div',
-          { className: 'dgc-header' },
-          h(
-            'div',
-            { className: 'dgc-title' },
-            h('strong', null, project ? project.title || t('title') : t('title')),
-            h('span', { className: 'dgc-mono' }, project ? project.dir : t('subtitle')),
-          ),
-          h('span', { className: 'dgc-badge ' + (dirty ? 'is-dirty' : 'is-clean') }, dirty ? t('unsaved') : t('clean')),
-          dirty ? h('span', { className: 'dgc-badge', title: t('dirtyDot') }, '●') : null,
-          connection === 'offline' ? h('span', { className: 'dgc-badge is-dirty dgc-offline' }, t('offline')) : null,
-          h('span', { className: 'dgc-spacer' }),
-          h(Button, { icon: 'folder', onClick: () => setOpenDialog(true) }, t('openProject')),
-          h(Button, { icon: 'preview', onClick: openPreview, disabled: !project || !hasPlayableContent, title: t('playbackOpen') }, t('playbackOpen')),
-          h(Button, { icon: 'reload', onClick: () => session.reload(), disabled: !project }, t('reload')),
-          h(Button, { icon: 'undo', onClick: () => session.undo(), disabled: !project }, t('undo')),
-          h(Button, { icon: 'redo', onClick: () => session.redo(), disabled: !project }, t('redo')),
-          h(
-            Button,
-            {
-              variant: 'primary',
-              icon: 'save',
-              disabled: !project || session.saving,
-              onClick: () => session.save(),
-            },
-            session.saving ? t('saving') : t('save'),
-          ),
-        ),
-        // Toolbar.
-        h(
-          'div',
-          { className: 'dgc-toolbar' },
-          h(
-            'div',
-            { className: 'dgc-toolgroup' },
-            tools.map((item) =>
-              h(
-                Button,
-                {
-                  key: item.id,
-                  icon: item.icon,
-                  active: tool === item.id,
-                  title: item.label + ' (' + item.key + ')',
-                  onClick: () => setTool(item.id),
-                },
-                item.label,
-              ),
-            ),
-          ),
-          h(
-            'div',
-            { className: 'dgc-toolgroup' },
-            h('label', null, h('span', null, t('snap'))),
-            h(
-              'select',
-              {
-                className: 'dgc-select',
-                value: snapOn ? String(snapDiv) : 'off',
-                onChange: (event) => {
-                  if (event.target.value === 'off') setSnapOn(false);
-                  else {
-                    setSnapOn(true);
-                    setSnapDiv(Number(event.target.value));
-                  }
-                },
-              },
-              h('option', { value: 'off' }, t('snapOff')),
-              SNAP_DIVISIONS.map((value) => h('option', { key: value, value: String(value) }, '1/' + value)),
-            ),
-          ),
-          h(
-            'div',
-            { className: 'dgc-toolgroup' },
-            h(Button, { variant: 'ghost', icon: 'zoomOut', title: t('zoomOut'), onClick: () => canvasApiRef.current && canvasApiRef.current.zoomOut() }),
-            h(Button, { variant: 'ghost', icon: 'zoomIn', title: t('zoomIn'), onClick: () => canvasApiRef.current && canvasApiRef.current.zoomIn() }),
-            h(Button, { variant: 'ghost', icon: 'fit', title: t('fitAll'), onClick: () => canvasApiRef.current && canvasApiRef.current.fit() }),
-          ),
-          h(
-            'div',
-            { className: 'dgc-toolgroup' },
-            h(Button, { variant: 'ghost', icon: 'duplicate', title: t('duplicate'), disabled: selection.length === 0, onClick: () => duplicateElements(selection) }),
-            h(Button, { variant: 'ghost', icon: 'trash', title: t('delete'), disabled: selection.length === 0, onClick: () => deleteElements(selection) }),
-          ),
-          h('span', { className: 'dgc-spacer' }),
-          h('label', null, h('span', null, t('tempo')), h(NumberField, {
-            value: tempo.bpm,
-            step: 1,
-            onCommit: (bpm) => session.edit([{ op: 'setMeta', tempo: { bpm } }]),
-          })),
-          h('label', null, h('span', null, t('offset')), h(NumberField, {
-            value: tempo.offset,
-            step: 0.05,
-            onCommit: (offset) => session.edit([{ op: 'setMeta', tempo: { offset } }]),
-          })),
-        ),
+        h(StudioHeader, {
+          t,
+          project,
+          dirty,
+          connection,
+          session,
+          hasPlayableContent,
+          onOpenProject: () => setOpenDialog(true),
+          onPreview: openPreview,
+        }),
+        h(StudioToolbar, {
+          t,
+          tool,
+          setTool,
+          snapOn,
+          snapDiv,
+          setSnapOn,
+          setSnapDiv,
+          canvasApiRef,
+          selection,
+          onDuplicate: duplicateElements,
+          onDelete: deleteElements,
+          tempo,
+          onEdit: session.edit,
+        }),
+
         // Body.
         h(
           'div',
@@ -6744,6 +9460,13 @@ window.__ModuleLoader__.load({
                   transport.seek(time);
                   if (canvasApiRef.current) canvasApiRef.current.reveal(time);
                 },
+                playheadRef: transport.timeRef,
+                addStaffRef,
+                addElementRef,
+                onRenameStaff: renameStaff,
+                onDeleteStaff: deleteStaff,
+                onAddAudioPeriod: addAudioPeriodFromDialog,
+                onDeleteAudioPeriod: deleteAudioPeriodFromDialog,
               })
             : null,
           h(
@@ -6767,9 +9490,9 @@ window.__ModuleLoader__.load({
               activeStaff,
               onEdit: session.edit,
               onNotice: pushNotice,
-              wave,
+              waves,
               waveStatus,
-              audioOffset,
+              audioClips,
               onReady: setCanvasApi,
             }),
             phase === 'error'
@@ -6812,6 +9535,9 @@ window.__ModuleLoader__.load({
                 lanes,
                 transport,
                 onEdit: session.edit,
+                onDetectBpm: detectProjectTempo,
+                bpmBusy,
+                bpmAvailable,
                 onDelete: deleteElements,
                 onDuplicate: (id) => duplicateElements([id]),
                 seek: (time) => {
@@ -6869,13 +9595,13 @@ window.__ModuleLoader__.load({
               notice.text,
             )
           : null,
-        openDialog ? h(OpenProjectDialog, { t, state: Object.assign({}, state || {}, { projects: (state && Array.isArray(state.projects) && state.projects.length > 0 ? state.projects : library) }), onOpen: session.openProject, onClose: () => setOpenDialog(false) }) : null,
+        openDialog ? h(OpenProjectDialog, { t, state: dialogState, onOpen: session.openProject, onClose: () => setOpenDialog(false) }) : null,
       );
     }
 
-    // =======================================================================
-    // Sidebar panel icon.
-    // =======================================================================
+    // ========================================================================
+    // 19 · Sidebar panel icon.
+    // ========================================================================
 
     /** 18px sidebar glyph: a branch lane with three notes on it. */
     function PanelIcon(props) {
@@ -6895,9 +9621,9 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // =======================================================================
-    // Client plugin entry.
-    // =======================================================================
+    // ========================================================================
+    // 20 · Client plugin entry.
+    // ========================================================================
 
     /**
      * Register the sidebar entry and the full-page studio panel. Theme token
@@ -6946,13 +9672,16 @@ window.__ModuleLoader__.load({
       colorCurveAt,
       evalAdd,
     });
+    const audioTestApi = Object.freeze({ audioClipsOf, clipActiveAt, spectrumFromSamples: computeSpectrum, wavPeaks, detectBpmFromSpectrum, detectBpmFromOnsets });
     const clientPlugin = {
       name: 'gorge-chart-studio-client',
       inject: ['slots', 'locale'],
       apply,
     };
-    // Test hook for tests/client-smoke.mjs: pure playback model/frame helpers.
+    // Test hooks for tests/client-smoke.mjs: pure playback model/frame helpers
+    // and the audio-clip window/legacy-fallback helpers.
     Object.defineProperty(clientPlugin, '__playback', { value: playbackTestApi, enumerable: false });
+    Object.defineProperty(clientPlugin, '__audio', { value: audioTestApi, enumerable: false });
     return clientPlugin;
   },
 });

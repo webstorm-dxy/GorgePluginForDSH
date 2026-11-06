@@ -23,6 +23,12 @@
  * staff     One `.g` file. `kind` is `audio` (`@AudioStaff` / `@Song`),
  *           `storyboard` (`form = "DeentyStoryboard"`), `chart`
  *           (`@ElementStaff` + `@Chart`) or `other`.
+ * audio period
+ *           One `@Song` method of an audio staff ("音频乐段"). Its
+ *           `PeriodConfig.timeOffset` is the chart time at which the clip
+ *           starts; the clip lasts its own audio duration. A staff/track may
+ *           declare several audio periods (`GetSong`, `GetSong1`, ...), which
+ *           the game plays as independent clips on the chart timeline.
  * period    One `@Chart` method of a staff. `PeriodConfig.timeOffset` is the
  *           slice start in *absolute* seconds; element times inside the slice
  *           are *relative*. Optional `minLength` bounds the slice length.
@@ -39,6 +45,7 @@
  *   staff.id   file basename, e.g. `"DremuStaff1.g"`
  *   period.id  `"p0"`, `"p1"`, ... scoped to the staff (wire order = sorted by
  *              `timeOffset`, NOT file order)
+ *   audioPeriod.id `"a0"`, `"a1"`, ... scoped to the audio staff (file order)
  *   element.id `"<staffId>:<periodId>:e<arrayIndex>"` e.g.
  *              `"DremuStaff1.g:p3:e7"`.
  *
@@ -72,6 +79,31 @@
  *   { op:'setStaffName', staffId, displayName }
  *   { op:'setPeriodConfig', periodId, staffId?, fields } (merged into the
  *         member's PeriodConfig attr; updates timeOffset/minLength)
+ *   { op:'addStaff',   kind?:'chart'|'storyboard'|'audio', form?, displayName?,
+ *         className?, fileName?, timeOffset?, minLength? }
+ *         Creates a new empty `.g` staff (header + one `@Chart` period, or an
+ *         `@AudioStaff` with no `@Song`). The caller may pin
+ *         `className`/`fileName`; otherwise unique names are generated. The
+ *         file is written on the next save. `created` reports
+ *         `{ staffId, kind:'staff' }`.
+ *   { op:'removeStaff', staffId, deleteFile?: boolean }
+ *         Removes a staff created by `addStaff` in the same session (undo);
+ *         its `.g` file and `.bak` are deleted. Removing a staff that came
+ *         from disk is rejected unless `deleteFile` is `true` (the editor's
+ *         right-click "删除谱表" confirmation): then the file and its `.bak`
+ *         are deleted too. Deletion is permanent; the caller owns the undo
+ *         policy.
+ *   { op:'addAudioPeriod', staffId?, file?, sourcePath?, name?, timeOffset?,
+ *         method? }
+ *         Appends one `@Song` member (an audio period / 音频乐段) to an audio
+ *         staff and returns the new period. `file` is a project-relative audio
+ *         path; `sourcePath` (or an absolute `file`) imports an external file
+ *         into the project directory first. When the project has no audio
+ *         staff, a minimal `Song.g` is created (reported in `created`).
+ *   { op:'patchAudioPeriod', staffId?, audioPeriodId, fields }
+ *         Edits `timeOffset` / `name` / `file` of one existing audio period.
+ *   { op:'removeAudioPeriod', staffId?, audioPeriodId }
+ *         Removes one `@Song` member (the audio file on disk is kept).
  * Ops apply in order. A failing op is reported in `errors` and skipped; the
  * successfully applied prefix is kept (`changed` is true if any op applied).
  * Unknown op keys are tolerated and reported in `errors`.
@@ -98,10 +130,11 @@
  *
  * For `Dremu.DremuHoldInnerNote` pass `{ parentStart }` (the absolute start of
  * the owning hold) as the 3rd argument: their `hitTime` is relative to the hold.
- * `project.audio.offset` is the audio staff's own `PeriodConfig.timeOffset`
- * (`Song.g`: 0.373): chart time = audio time + offset, the client transport
- * corrects for it, and `project.duration = max(element ends, audio duration +
- * audio offset)`.
+ * `project.audio` is the first audio period (legacy single-clip view):
+ * `project.audio.offset` is its `@Song` `PeriodConfig.timeOffset` (`Song.g`:
+ * 0.373), chart time = audio time + offset, and `project.audioPeriods` lists
+ * every `@Song` clip with `{ staffId, id, file, relativePath, offset, duration,
+ * missing }`. `project.duration = max(element ends, every clip end)`.
  *
  * ---------------------------------------------------------------------------
  * CURVES — `evaluateCurve(value, x)` (source of truth; the client preview is a
@@ -142,6 +175,15 @@
  * The `.g` format has NO tempo and no project metadata: `project.tempo`
  * (`{bpm:120, offset:0}`) and `project.title` are UI-only conveniences that the
  * Host persists in its recovery snapshot; `saveProject` writes `*.g` files only.
+ *
+ * Sections (search for "N. " at the start of a banner):
+ *   0 small utilities             7 wire state (projectToWire)
+ *   1 value-tree builders         8 mutations (applyOps)
+ *   2 CATALOG                     9 save (atomic .g writer + .bak)
+ *   3 curve evaluation           10 validation
+ *   4 timing + element building  11 audio probing (WAV/MP3 headers)
+ *   5 staff-file inspection      12 empty project creation
+ *   6 project load
  *
  * @module dremu-model
  */
@@ -235,6 +277,11 @@ function fieldString(fields, name) {
   return typeof fields[name] === 'string' ? fields[name] : null
 }
 
+/** Project-relative path with forward slashes (the `.g` writer's convention). */
+function toPosixPath(value) {
+  return String(value).split(path.sep).join('/')
+}
+
 // ---------------------------------------------------------------------------
 // Generic path helpers used by `patch` ops. They mirror the client's optimistic
 // `getAtPath`/`setAtPath`: plain objects by string key, arrays by index.
@@ -292,20 +339,6 @@ const constCurve = (value = 0) => ({ t: 'obj', type: G + 'ConstantFunctionCurve'
 
 /** `GorgeFramework.LinearFunctionCurve { k, b }` */
 const linearFn = (k = 1, b = 0) => ({ t: 'obj', type: G + 'LinearFunctionCurve', fields: { k, b } })
-
-/** `GorgeFramework.LinearCurve { timeStart, valueStart, timeEnd, valueEnd }` */
-const linearCurve = (timeStart = 0, valueStart = 0, timeEnd = 1, valueEnd = 0) => ({
-  t: 'obj',
-  type: G + 'LinearCurve',
-  fields: { timeStart, valueStart, timeEnd, valueEnd },
-})
-
-/** `GorgeFramework.CubicHermiteSpline { startPoint, endPoint, ... }` */
-const spline = (startX = 0, startY = 0, endX = 1, endY = 0, extra = {}) => ({
-  t: 'obj',
-  type: G + 'CubicHermiteSpline',
-  fields: Object.assign({ startPoint: vec2(startX, startY), endPoint: vec2(endX, endY) }, extra),
-})
 
 /** `GorgeFramework.LerpColorCurve { colorPoints }` */
 const lerpColor = (points, progressCurve = undefined) => {
@@ -785,12 +818,6 @@ function catalogEntry(type) {
   return CATALOG_BY_SHORT.get(shortType(type)) || null
 }
 
-/** Canonical element type for a catalog entry (qualified, e.g. `Dremu.DremuTap`). */
-function canonicalType(type) {
-  const entry = catalogEntry(type)
-  return entry ? entry.type : null
-}
-
 export const CATALOG = {
   version: 1,
   source: 'derived from the Gorge .g corpus (/Users/daxingyi/Music/DremuTest, /Users/daxingyi/Music/Chart/**)',
@@ -1196,14 +1223,39 @@ function readPeriodConfig(member) {
   return { timeOffset: timeOffset === null ? 0 : timeOffset, minLength }
 }
 
-/** Find the `@Song` member return value (audio asset) of an audio staff. */
-function songMember(staffFile) {
-  if (!staffFile || !Array.isArray(staffFile.members)) return null
-  for (const member of staffFile.members) {
-    if (!member || member.annotation !== 'Song') continue
-    if (member.returnValue && member.returnValue.t === 'obj') return member
+/** Every `@Song` member of an audio staff, in file order. */
+function songMembers(staffFile) {
+  if (!staffFile || !Array.isArray(staffFile.members)) return []
+  return staffFile.members.filter(
+    (member) => member && member.annotation === 'Song' && member.returnValue && member.returnValue.t === 'obj',
+  )
+}
+
+/**
+ * Build one internal audio-period descriptor ("乐段") from a `@Song` member.
+ *
+ * `duration` / `sampleRate` / `file` are filled by `refreshProjectAudio`; the
+ * descriptor keeps `_member` so `patchAudioPeriod` can rewrite the parsed tree.
+ */
+function readAudioPeriod(member, index) {
+  const asset = member && member.returnValue && member.returnValue.t === 'obj' ? member.returnValue : null
+  const assetFields = asset && isPlainObject(asset.fields) ? asset.fields : {}
+  const config = readPeriodConfig(member)
+  return {
+    id: 'a' + index,
+    method: typeof member.name === 'string' && member.name.length > 0 ? member.name : 'GetSong',
+    name: typeof assetFields.name === 'string' && assetFields.name.length > 0 ? assetFields.name : '',
+    assetType: asset && typeof asset.type === 'string' ? asset.type : '',
+    relativePath: findAudioFilePath(assetFields),
+    offset: config.timeOffset,
+    duration: null,
+    sampleRate: null,
+    channels: null,
+    format: null,
+    file: '',
+    missing: false,
+    _member: member,
   }
-  return null
 }
 
 /**
@@ -1229,6 +1281,83 @@ function normalizeElementType(rawType) {
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.svg', '.tga'])
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.ogg', '.m4a', '.aac', '.flac', '.opus'])
+/** Hard cap for one imported audio file (defensive; the HTTP layer enforces its own). */
+const MAX_IMPORT_AUDIO_BYTES = 256 * 1024 * 1024
+
+/** Sanitize an imported file's basename: keep letters/digits, dash, underscore, dot, space. */
+function sanitizeAudioFileName(fileName) {
+  const base = path.basename(String(fileName || ''))
+  const cleaned = base.replace(/[^\p{L}\p{N}._\- ]+/gu, '_').replace(/^\.+/, '').trim()
+  return cleaned.length > 0 ? cleaned : 'audio.wav'
+}
+
+/** Unique project-relative name for one imported audio file. */
+function uniqueAudioFileName(dir, fileName) {
+  const sanitized = sanitizeAudioFileName(fileName)
+  const extension = path.extname(sanitized)
+  const stem = sanitized.slice(0, sanitized.length - extension.length) || 'audio'
+  let candidate = sanitized
+  let index = 1
+  while (fs.existsSync(path.join(dir, candidate))) {
+    candidate = `${stem}_${index}${extension}`
+    index += 1
+  }
+  return candidate
+}
+
+/**
+ * Bring an audio file into a project directory (the editor's "从本机导入").
+ *
+ * A source already inside the project is reused as-is (`copied: false`); any
+ * other file is copied next to the staffs under a sanitized, collision-free
+ * name (`copied: true`). Only audio extensions are accepted. Throws a
+ * readable `Error` for a missing/oversized/unsupported source; the caller
+ * (op application or the HTTP import endpoint) turns that into `errors[]`.
+ *
+ * @param {string} projectDir absolute project directory.
+ * @param {string} sourcePath file on this machine (absolute or cwd-relative).
+ * @param {{maxBytes?:number}} [options]
+ * @returns {{file:string, absolute:string, copied:boolean, bytes:number}}
+ *          `file` is project-relative with forward slashes, ready for a
+ *          `wavFilePath` field.
+ */
+export function importAudioFile(projectDir, sourcePath, options = {}) {
+  const dir = path.resolve(String(projectDir || '.'))
+  const source = path.resolve(String(sourcePath || ''))
+  const extension = path.extname(source).toLowerCase()
+  if (!AUDIO_EXTENSIONS.has(extension)) {
+    throw new Error(`unsupported audio file type "${extension || '(none)'}" (expected ${[...AUDIO_EXTENSIONS].join(', ')})`)
+  }
+  let stats
+  try {
+    stats = fs.statSync(source)
+  } catch (error) {
+    throw new Error(`audio file not found: ${source}`)
+  }
+  if (!stats.isFile()) throw new Error(`not a file: ${source}`)
+  const maxBytes = Number.isFinite(options.maxBytes) ? options.maxBytes : MAX_IMPORT_AUDIO_BYTES
+  if (stats.size > maxBytes) throw new Error(`audio file is too large (${stats.size} bytes; max ${maxBytes})`)
+
+  if (isPathInside(source, dir)) {
+    return { file: toPosixPath(path.relative(dir, source)), absolute: source, copied: false, bytes: stats.size }
+  }
+  const fileName = uniqueAudioFileName(dir, path.basename(source))
+  const target = path.join(dir, fileName)
+  if (!isPathInside(target, dir)) throw new Error(`refusing to write outside the project directory: ${target}`)
+  const tmp = tempPathFor(target)
+  try {
+    fs.copyFileSync(source, tmp)
+    fs.renameSync(tmp, target)
+  } catch (error) {
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp)
+    } catch {
+      /* ignore cleanup failures */
+    }
+    throw new Error(`cannot import audio file: ${messageOf(error)}`)
+  }
+  return { file: toPosixPath(fileName), absolute: target, copied: true, bytes: stats.size }
+}
 
 /** Empty project shell used by loadProject/createEmptyProject. */
 function makeProjectShell(dir, title) {
@@ -1239,6 +1368,7 @@ function makeProjectShell(dir, title) {
     form: 'Dremu',
     tempo: { bpm: 120, offset: 0 },
     audio: null,
+    audioPeriods: [],
     assets: { images: [], audio: [] },
     staffs: [],
     warnings: [],
@@ -1274,21 +1404,14 @@ function buildStaff(project, dir, fileName, staffFile, originalText, warnings) {
     _staffFile: staffFile,
     _origText: originalText,
     _new: false,
+    /** True for staffs created by this session's `addStaff` (removable). */
+    _created: false,
   }
 
-  // Audio staffs expose their @Song asset; charts/storyboards expose periods.
-  const song = kind === 'audio' ? songMember(staffFile) : null
-  if (song) {
-    const asset = song.returnValue
-    const assetFields = isPlainObject(asset.fields) ? asset.fields : {}
-    const config = readPeriodConfig(song)
-    staff._song = {
-      name: typeof assetFields.name === 'string' && assetFields.name.length > 0 ? assetFields.name : staffFile.className,
-      assetType: asset.type,
-      offset: config.timeOffset,
-      relativePath: findAudioFilePath(assetFields),
-    }
-  }
+  // Audio staffs expose their @Song clips ("音频乐段"); charts/storyboards
+  // expose periods. An audio staff may declare several @Song methods, each an
+  // independent clip starting at its own PeriodConfig.timeOffset.
+  if (kind === 'audio') staff.audioPeriods = songMembers(staffFile).map(readAudioPeriod)
 
   // Periods: sorted by absolute start time (file order breaks ties).
   const unknownTypes = new Set()
@@ -1367,7 +1490,7 @@ function refreshElement(element, period) {
   return element
 }
 
-/** Recompute `project.duration` = max(last element end, audio duration + audio offset). */
+/** Recompute `project.duration` = max(last element end, every audio clip end). */
 function refreshDuration(project) {
   let lastEnd = 0
   for (const staff of project.staffs || []) {
@@ -1378,10 +1501,126 @@ function refreshDuration(project) {
       }
     }
   }
-  const audio = project.audio
-  const audioEnd = audio && typeof audio.duration === 'number' && Number.isFinite(audio.duration) ? audio.duration + (Number.isFinite(audio.offset) ? audio.offset : 0) : 0
-  project.duration = round6(Math.max(lastEnd, audioEnd, 0))
+  const clips =
+    Array.isArray(project.audioPeriods) && project.audioPeriods.length > 0
+      ? project.audioPeriods
+      : project.audio
+        ? [project.audio]
+        : []
+  for (const clip of clips) {
+    const offset = Number.isFinite(clip.offset) ? clip.offset : 0
+    const length = Number.isFinite(clip.duration) ? clip.duration : 0
+    const end = offset + length
+    if (Number.isFinite(end) && end > lastEnd) lastEnd = end
+  }
+  project.duration = round6(Math.max(lastEnd, 0))
   return project.duration
+}
+
+/** Plain wire-safe view of one internal audio period. */
+function audioPeriodView(period, staffId) {
+  return {
+    id: period.id,
+    staffId: staffId || period.staffId || '',
+    method: period.method,
+    name: period.name,
+    assetType: period.assetType,
+    relativePath: period.relativePath || '',
+    file: period.file || '',
+    offset: Number.isFinite(period.offset) ? round6(period.offset) : 0,
+    duration: period.duration === null || period.duration === undefined ? null : period.duration,
+    sampleRate: period.sampleRate === null || period.sampleRate === undefined ? null : period.sampleRate,
+    channels: period.channels === null || period.channels === undefined ? null : period.channels,
+    format: period.format === null || period.format === undefined ? null : period.format,
+    missing: period.missing === true,
+  }
+}
+
+/**
+ * Rebuild `project.audioPeriods` (and the legacy `project.audio`) from every
+ * `@Song` member of every audio staff.
+ *
+ * Each clip's relative `wavFilePath` is resolved against the project directory
+ * and probed once per file (duration/format hints for the editor). A clip whose
+ * file is missing stays listed with `missing: true` and a warning; the editor
+ * and validation surface that instead of silently dropping the segment.
+ * `warnings` is optional: when given (project load), it receives the diagnosis
+ * messages; op application refreshes without spamming the load warnings.
+ */
+function refreshProjectAudio(project, warnings) {
+  const report = Array.isArray(warnings) ? warnings : null
+  const absDir = path.resolve(project.dir || '.')
+  const probeCache = new Map()
+  const periods = []
+  for (const staff of project.staffs || []) {
+    if (!staff || staff.kind !== 'audio') continue
+    staff.audioPeriods = songMembers(staff._staffFile).map(readAudioPeriod)
+    for (const period of staff.audioPeriods) {
+      const relative = period.relativePath
+      let file = ''
+      let duration = null
+      let sampleRate = null
+      let channels = null
+      let format = null
+      period.missing = false
+      if (!relative) {
+        period.missing = true
+        if (report) report.push(`audio staff "${staff.id}" period "${period.method}" declares no audio file path`)
+      } else {
+        file = path.resolve(absDir, relative)
+        if (!isPathInside(file, absDir)) {
+          period.missing = true
+          if (report) report.push(`audio file "${relative}" is outside the project directory`)
+        } else if (!fs.existsSync(file)) {
+          period.missing = true
+          if (report) report.push(`audio file not found: ${relative}`)
+        } else {
+          let probe = probeCache.get(file)
+          if (!probe) {
+            probe = probeAudioFile(file)
+            probeCache.set(file, probe)
+          }
+          duration = probe.duration
+          sampleRate = probe.sampleRate
+          channels = probe.channels
+          format = probe.format
+          if (duration === null && report) report.push(`cannot read audio duration: ${relative}`)
+        }
+      }
+      period.file = file
+      period.duration = typeof duration === 'number' && Number.isFinite(duration) ? round6(duration) : null
+      period.sampleRate = sampleRate
+      period.channels = channels
+      period.format = format
+      periods.push(audioPeriodView(period, staff.id))
+    }
+  }
+  // Clips play in chart-time order; ties keep staff/method order for a stable wire.
+  periods.sort((a, b) => {
+    if (a.offset !== b.offset) return a.offset - b.offset
+    if (a.staffId !== b.staffId) return a.staffId < b.staffId ? -1 : 1
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+  })
+  project.audioPeriods = periods
+  const first = periods.length > 0 ? periods[0] : null
+  project.audio = first
+    ? {
+        file: first.file,
+        name: first.name,
+        duration: first.duration,
+        offset: Number.isFinite(first.offset) ? first.offset : 0,
+      }
+    : null
+  return project.audio
+}
+
+/** Recompute `project.form` from the staffs that are still present. */
+function refreshProjectForm(project) {
+  const staffs = project.staffs || []
+  const chartForm = staffs.find((staff) => (staff.kind === 'chart' || staff.kind === 'other') && staff.form) || null
+  const storyboardForm = staffs.find((staff) => staff.kind === 'storyboard' && staff.form) || null
+  project.form = (chartForm && chartForm.form) || (storyboardForm && storyboardForm.form) || project.form || 'Dremu'
+  return project.form
 }
 
 /**
@@ -1435,50 +1674,10 @@ export function loadProject(dir) {
   project.assets.audio.sort()
 
   // Audio staff -> project.audio.
-  const audioStaffs = project.staffs.filter((staff) => staff.kind === 'audio' && staff._song)
-  if (audioStaffs.length > 1) project.warnings.push(`multiple audio staffs found; using "${audioStaffs[0].id}"`)
-  const audioStaff = audioStaffs[0] || null
-  if (audioStaff) {
-    const song = audioStaff._song
-    let file = song.relativePath ? path.resolve(absDir, song.relativePath) : null
-    let duration = null
-    let sampleRate = null
-    let channels = null
-    let format = null
-    if (!file) {
-      project.warnings.push(`audio staff "${audioStaff.id}" declares no audio file path`)
-    } else if (!isPathInside(file, absDir)) {
-      // Keep the absolute path (the client can still ask for it), but warn.
-      project.warnings.push(`audio file "${song.relativePath}" is outside the project directory`)
-    }
-    if (file && !fs.existsSync(file)) {
-      project.warnings.push(`audio file not found: ${song.relativePath}`)
-    } else if (file) {
-      const probe = probeAudioFile(file)
-      duration = probe.duration
-      sampleRate = probe.sampleRate
-      channels = probe.channels
-      format = probe.format
-      if (duration === null) project.warnings.push(`cannot read audio duration: ${song.relativePath}`)
-    }
-    project.audio = {
-      file: file || '',
-      name: song.name,
-      duration: typeof duration === 'number' && Number.isFinite(duration) ? round6(duration) : null,
-      offset: Number.isFinite(song.offset) ? round6(song.offset) : 0,
-    }
-    if (sampleRate !== null || channels !== null || format !== null) {
-      // Extra hints for the UI (ignored by the wire consumers that only need file/name/duration/offset).
-      project.audio.sampleRate = sampleRate
-      project.audio.channels = channels
-      project.audio.format = format
-    }
-  }
+  refreshProjectAudio(project, project.warnings)
 
   // Project form: prefer a chart staff, then a storyboard, then Dremu.
-  const chartForm = project.staffs.find((staff) => (staff.kind === 'chart' || staff.kind === 'other') && staff.form) || null
-  const storyboardForm = project.staffs.find((staff) => staff.kind === 'storyboard' && staff.form) || null
-  project.form = (chartForm && chartForm.form) || (storyboardForm && storyboardForm.form) || 'Dremu'
+  refreshProjectForm(project)
   project.warnings = project.warnings.slice(0, 100)
   refreshDuration(project)
   return project
@@ -1524,9 +1723,14 @@ function wirePeriod(period) {
   }
 }
 
+/** One wire audio period ("乐段") — a `@Song` clip on the chart timeline. */
+function wireAudioPeriod(period) {
+  return audioPeriodView(period, period.staffId)
+}
+
 /** One wire staff. */
 function wireStaff(staff) {
-  return {
+  const wire = {
     id: staff.id,
     file: staff.file,
     kind: staff.kind,
@@ -1535,6 +1739,10 @@ function wireStaff(staff) {
     className: staff.className,
     periods: (staff.periods || []).map(wirePeriod),
   }
+  if (staff.kind === 'audio') {
+    wire.audioPeriods = (staff.audioPeriods || []).map((period) => audioPeriodView(period, staff.id))
+  }
+  return wire
 }
 
 /**
@@ -1577,6 +1785,7 @@ export function projectToWire(project, options = {}) {
     },
     duration: project.duration,
     audio,
+    audioPeriods: (project.audioPeriods || []).map(wireAudioPeriod),
     assets: {
       images: (project.assets && Array.isArray(project.assets.images) ? project.assets.images : []).slice(),
       audio: (project.assets && Array.isArray(project.assets.audio) ? project.assets.audio : []).slice(),
@@ -1686,6 +1895,580 @@ function allocatePeriod(index, project, staff, timeOffset) {
   return period
 }
 
+/** True when `value` is a usable C# class identifier for a staff. */
+function isStaffIdentifier(value) {
+  return typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(value)
+}
+
+/** Unique `ClassName` + `ClassName.g` for a new staff of `kind`. */
+function uniqueStaffName(project, kind) {
+  const base = kind === 'storyboard' ? 'Storyboard' : kind === 'audio' ? 'Song' : 'Staff'
+  const usedFiles = new Set()
+  const usedClasses = new Set()
+  for (const staff of project.staffs || []) {
+    usedFiles.add(String(staff.id).toLowerCase())
+    usedClasses.add(String(staff.className))
+  }
+  const dir = path.resolve(project.dir || '.')
+  let suffix = 1
+  let candidate = base
+  for (;;) {
+    const file = candidate + '.g'
+    if (!usedClasses.has(candidate) && !usedFiles.has(file.toLowerCase()) && !fs.existsSync(path.join(dir, file))) {
+      return { className: candidate, fileName: file }
+    }
+    suffix += 1
+    candidate = base + String(suffix)
+  }
+}
+
+/**
+ * Build the parsed-staff-file object for a brand-new empty staff: header, one
+ * `@Chart` period (timeOffset/minLength), and an empty chart array. Fully
+ * qualified types keep the file independent of `using` declarations.
+ */
+function makeStaffFile(options) {
+  const configFields = { timeOffset: round6(options.timeOffset) }
+  if (options.minLength !== null && options.minLength !== undefined) configFields.minLength = round6(options.minLength)
+  return {
+    usings: [],
+    header: [
+      { type: 'string', name: 'form', value: options.form },
+      { type: 'string', name: 'displayName', value: options.displayName },
+    ],
+    className: options.className,
+    annotations: ['ElementStaff'],
+    blankAfterUsings: 1,
+    eol: options.eol === '\r\n' ? '\r\n' : '\n',
+    members: [
+      {
+        attr: [
+          {
+            type: G + 'PeriodConfig^',
+            name: 'config',
+            value: { t: 'obj', type: G + 'PeriodConfig', fields: configFields },
+          },
+        ],
+        annotation: 'Chart',
+        retType: G + 'Element^[]',
+        name: 'Period',
+        chartArray: { elemType: G + 'Element', items: [] },
+        returnValue: null,
+      },
+    ],
+  }
+}
+
+/**
+ * Build the parsed-staff-file object for a brand-new empty audio staff
+ * (`@AudioStaff` + `displayName`, no `@Song` until an audio period is added).
+ */
+function makeAudioStaffFile(options) {
+  return {
+    usings: [],
+    header: [{ type: 'string', name: 'displayName', value: options.displayName }],
+    className: options.className,
+    annotations: ['AudioStaff'],
+    blankAfterUsings: 1,
+    eol: options.eol === '\r\n' ? '\r\n' : '\n',
+    members: [],
+  }
+}
+
+/** `addStaff` op implementation; returns the created descriptor or null. */
+function applyAddStaff(project, index, op, errors, label) {
+  const requestedKind = typeof op.kind === 'string' ? op.kind.trim().toLowerCase() : ''
+  if (requestedKind.length > 0 && requestedKind !== 'chart' && requestedKind !== 'storyboard' && requestedKind !== 'audio') {
+    errors.push(`${label}: addStaff kind must be "chart", "storyboard" or "audio"`)
+    return null
+  }
+  let form = typeof op.form === 'string' ? op.form.trim() : ''
+  let kind = requestedKind
+  if (kind === '' && form === 'DeentyStoryboard') kind = 'storyboard'
+  if (kind === '') kind = 'chart'
+  if (kind === 'audio') {
+    if (form !== '') {
+      errors.push(`${label}: an audio staff has no form`)
+      return null
+    }
+    form = ''
+  } else if (form === '') form = kind === 'storyboard' ? 'DeentyStoryboard' : 'Dremu'
+  if (kind === 'storyboard' && form !== 'DeentyStoryboard') {
+    errors.push(`${label}: a storyboard staff must use form "DeentyStoryboard"`)
+    return null
+  }
+
+  const fallbackName = kind === 'storyboard' ? '新剧情板' : kind === 'audio' ? '新音频' : '新谱表'
+  const requestedName = typeof op.displayName === 'string' ? op.displayName.trim() : ''
+  if (requestedName.length > 200) {
+    errors.push(`${label}: addStaff displayName is too long (max 200 characters)`)
+    return null
+  }
+  const displayName = requestedName.length > 0 ? requestedName : fallbackName
+
+  const timeOffset = op.timeOffset === undefined ? 0 : finiteNumber(op.timeOffset)
+  if (timeOffset === null) {
+    errors.push(`${label}: addStaff timeOffset must be a finite number`)
+    return null
+  }
+  let minLength = null
+  if (op.minLength !== undefined && op.minLength !== null) {
+    minLength = finiteNumber(op.minLength)
+    if (minLength === null || minLength < 0) {
+      errors.push(`${label}: addStaff minLength must be a finite number >= 0 or null`)
+      return null
+    }
+  }
+
+  const generated = uniqueStaffName(project, kind)
+  let className
+  if (op.className !== undefined) {
+    if (!isStaffIdentifier(op.className)) {
+      errors.push(`${label}: addStaff className must be a C# identifier`)
+      return null
+    }
+    className = op.className
+  } else if (typeof op.fileName === 'string' && /\.g$/i.test(op.fileName)) {
+    className = op.fileName.replace(/\.g$/i, '')
+    if (!isStaffIdentifier(className)) {
+      errors.push(`${label}: addStaff fileName must carry a valid class name (A-Z, a-z, 0-9, _)`)
+      return null
+    }
+  } else {
+    className = generated.className
+  }
+
+  let fileName
+  if (op.fileName !== undefined) {
+    if (typeof op.fileName !== 'string' || !/^[^\\/]+\.g$/i.test(op.fileName) || /^\.*$/.test(op.fileName.replace(/\.g$/i, ''))) {
+      errors.push(`${label}: addStaff fileName must be a plain "<Name>.g" file name`)
+      return null
+    }
+    fileName = op.fileName
+  } else {
+    fileName = className + '.g'
+  }
+
+  const lower = fileName.toLowerCase()
+  for (const staff of project.staffs || []) {
+    if (String(staff.id).toLowerCase() === lower) {
+      errors.push(`${label}: addStaff file "${fileName}" already exists in the project`)
+      return null
+    }
+    if (String(staff.className) === className) {
+      errors.push(`${label}: addStaff class "${className}" already exists in the project`)
+      return null
+    }
+  }
+  const projectDir = path.resolve(project.dir || '.')
+  const target = path.join(projectDir, fileName)
+  if (!isPathInside(target, projectDir)) {
+    errors.push(`${label}: addStaff file "${fileName}" escapes the project directory`)
+    return null
+  }
+  if (fs.existsSync(target)) {
+    errors.push(`${label}: addStaff file "${fileName}" already exists on disk`)
+    return null
+  }
+
+  // Keep the new file's line endings consistent with the project (DremuTest is
+  // CRLF; the demo project is LF) so a save does not mix styles.
+  const sampleStaff = (project.staffs || []).find((item) => item && item._staffFile && item._staffFile.eol === '\r\n')
+  const eol = sampleStaff ? '\r\n' : '\n'
+  const staffFile =
+    kind === 'audio'
+      ? makeAudioStaffFile({ className, displayName, eol })
+      : makeStaffFile({ form, className, displayName, timeOffset, minLength, eol })
+  const staff = buildStaff(project, projectDir, fileName, staffFile, null, project.warnings || [])
+  staff._new = true
+  staff._created = true
+  staff._origText = null
+  if (!Array.isArray(project.staffs)) project.staffs = []
+  project.staffs.push(staff)
+  if (!project.form && form) project.form = form
+  return { staffId: staff.id, kind: 'staff', staffKind: staff.kind }
+}
+
+/**
+ * Create a minimal empty audio staff (`@AudioStaff`, no `@Song` yet).
+ *
+ * Used by `addAudioPeriod` when the project has no audio staff at all, so
+ * "添加音频乐段" also works on a freshly created project. The staff is marked
+ * as created in this session (its `.g` is written by the next save and its
+ * removal is undoable).
+ */
+function createAudioStaff(project) {
+  const { className, fileName } = uniqueStaffName(project, 'audio')
+  const dir = path.resolve(project.dir || '.')
+  const crlf = (project.staffs || []).some((staff) => staff && staff._staffFile && staff._staffFile.eol === '\r\n')
+  const staffFile = makeAudioStaffFile({ className, displayName: '音频', eol: crlf ? '\r\n' : '\n' })
+  const staff = buildStaff(project, dir, fileName, staffFile, null, [])
+  staff.audioPeriods = []
+  staff._new = true
+  staff._created = true
+  staff._origText = null
+  if (!Array.isArray(project.staffs)) project.staffs = []
+  project.staffs.push(staff)
+  return staff
+}
+
+/** Allocate a unique method name for a new `@Song` (GetSong, GetSong1, ...). */
+function allocateAudioMethodName(staff, requested, errors, label) {
+  const members = staff && staff._staffFile && Array.isArray(staff._staffFile.members) ? staff._staffFile.members : []
+  const used = new Set(members.map((member) => member && member.name).filter((name) => typeof name === 'string' && name.length > 0))
+  if (requested !== undefined) {
+    if (!isStaffIdentifier(requested)) {
+      errors.push(`${label}: audio period method must be a C# identifier`)
+      return null
+    }
+    if (used.has(requested)) {
+      errors.push(`${label}: audio period method "${requested}" already exists in ${staff.id}`)
+      return null
+    }
+    return requested
+  }
+  const songs = members.filter((member) => member && member.annotation === 'Song').map((member) => String(member.name))
+  let base = 'GetSong'
+  if (songs.length > 0) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*?)(\d*)$/.exec(songs[0])
+    if (match && ['GetSong', 'Period', 'Song', 'Audio'].includes(match[1])) base = match[1]
+  }
+  if (!used.has(base)) return base
+  let index = 1
+  while (used.has(base + String(index))) index += 1
+  return base + String(index)
+}
+
+/** Build a parsed `@Song` member for one audio period. */
+function makeSongMember(staff, options) {
+  const configType = preferredTypeName(staff, G + 'PeriodConfig')
+  const audioType = preferredTypeName(staff, G + 'AudioAsset')
+  const existing = (staff.audioPeriods || [])[0]
+  const assetType = existing && existing.assetType ? existing.assetType : preferredTypeName(staff, G + 'WavAudioAsset')
+  return {
+    attr: [
+      {
+        type: configType + '^',
+        name: 'config',
+        value: { t: 'obj', type: configType, fields: { timeOffset: round6(options.timeOffset) } },
+      },
+    ],
+    annotation: 'Song',
+    retType: audioType + '^',
+    name: options.method,
+    chartArray: null,
+    returnValue: {
+      t: 'obj',
+      type: assetType,
+      fields: { name: options.assetName, wavFilePath: options.relativePath },
+    },
+  }
+}
+
+/**
+ * Resolve the audio file of an `addAudioPeriod` / `patchAudioPeriod` op.
+ * `sourcePath` or an absolute `file` imports an external file; a relative
+ * `file` must already live inside the project. Never mutates on failure.
+ */
+function resolveAudioFileArg(project, op, errors, label) {
+  const absDir = path.resolve(project.dir || '.')
+  const rawFile = typeof op.file === 'string' ? op.file.trim() : ''
+  const rawSource = typeof op.sourcePath === 'string' ? op.sourcePath.trim() : ''
+  if (!rawFile && !rawSource) {
+    errors.push(`${label}: audio period requires file (project-relative) or sourcePath (external import)`)
+    return null
+  }
+  try {
+    if (rawSource) return importAudioFile(absDir, path.isAbsolute(rawSource) ? rawSource : path.resolve(rawSource))
+    if (path.isAbsolute(rawFile)) return importAudioFile(absDir, rawFile)
+    const target = path.resolve(absDir, rawFile)
+    if (!isPathInside(target, absDir)) throw new Error(`audio file "${rawFile}" escapes the project directory`)
+    const extension = path.extname(target).toLowerCase()
+    if (!AUDIO_EXTENSIONS.has(extension)) throw new Error(`unsupported audio file type "${extension || '(none)'}"`)
+    if (!fs.existsSync(target)) throw new Error(`audio file not found: ${rawFile}`)
+    const stats = fs.statSync(target)
+    if (!stats.isFile()) throw new Error(`not a file: ${rawFile}`)
+    return { file: toPosixPath(path.relative(absDir, target)), absolute: target, copied: false, bytes: stats.size }
+  } catch (error) {
+    errors.push(`${label}: ${messageOf(error)}`)
+    return null
+  }
+}
+
+/** Find one audio period by id (or method) across audio staffs. */
+function findAudioPeriod(project, staffId, audioPeriodId) {
+  const wanted = typeof audioPeriodId === 'string' ? audioPeriodId : ''
+  if (!wanted) return { error: 'audioPeriodId is required' }
+  const staffs = []
+  for (const staff of project.staffs || []) {
+    if (staff && staff.kind === 'audio') staffs.push(staff)
+  }
+  if (typeof staffId === 'string' && staffId.length > 0) {
+    const staff = staffs.find((item) => item.id === staffId)
+    if (!staff) return { error: `unknown audio staff "${staffId}"` }
+    const period = (staff.audioPeriods || []).find((item) => item.id === wanted || item.method === wanted)
+    return period ? { staff, period } : { error: `unknown audio period "${wanted}" in staff "${staffId}"` }
+  }
+  const matches = []
+  for (const staff of staffs) {
+    for (const period of staff.audioPeriods || []) {
+      if (period.id === wanted || period.method === wanted) matches.push({ staff, period })
+    }
+  }
+  if (matches.length === 0) return { error: `unknown audio period "${wanted}"` }
+  if (matches.length > 1) return { error: `ambiguous audio period "${wanted}": pass staffId` }
+  return matches[0]
+}
+
+/** Replace (or append) the audio path field of one `@Song` asset value. */
+function writeAudioAssetPath(period, relativePath) {
+  const member = period._member
+  if (!member || !member.returnValue || member.returnValue.t !== 'obj') return false
+  const fields = isPlainObject(member.returnValue.fields) ? member.returnValue.fields : {}
+  member.returnValue.fields = fields
+  let key = Object.keys(fields).find((name) => /FilePath$/i.test(name) && typeof fields[name] === 'string')
+  if (!key) key = 'wavFilePath'
+  fields[key] = relativePath
+  period.relativePath = relativePath
+  return true
+}
+
+/** `addAudioPeriod` op implementation. */
+function applyAddAudioPeriod(project, index, op, errors, label) {
+  const requestedName = typeof op.name === 'string' ? op.name.trim() : ''
+  if (requestedName.length > 200) {
+    errors.push(`${label}: addAudioPeriod name is too long (max 200 characters)`)
+    return null
+  }
+  if (op.method !== undefined && !isStaffIdentifier(op.method)) {
+    errors.push(`${label}: audio period method must be a C# identifier`)
+    return null
+  }
+  let timeOffset = 0
+  if (op.timeOffset !== undefined && op.timeOffset !== null) {
+    timeOffset = finiteNumber(op.timeOffset)
+    if (timeOffset === null || timeOffset < 0) {
+      errors.push(`${label}: addAudioPeriod timeOffset must be a finite number >= 0`)
+      return null
+    }
+  }
+
+  let staff = null
+  if (typeof op.staffId === 'string' && op.staffId.length > 0) {
+    staff = index.staffById.get(op.staffId) || null
+    if (!staff) {
+      errors.push(`${label}: unknown staff "${op.staffId}"`)
+      return null
+    }
+    if (staff.kind !== 'audio') {
+      errors.push(`${label}: staff "${staff.id}" is not an audio staff`)
+      return null
+    }
+  } else {
+    staff = (project.staffs || []).find((item) => item && item.kind === 'audio') || null
+  }
+
+  // Validate the method against an existing staff before importing anything;
+  // a new staff has no names to collide with.
+  let method = null
+  if (staff) {
+    method = allocateAudioMethodName(staff, op.method, errors, label)
+    if (!method) return null
+  } else if (op.method !== undefined) {
+    method = op.method
+  }
+
+  // Resolve/import the file before creating anything so a failure leaves the
+  // project untouched apart from an already-copied audio asset.
+  const imported = resolveAudioFileArg(project, op, errors, label)
+  if (!imported) return null
+
+  let createdStaff = false
+  if (!staff) {
+    staff = createAudioStaff(project)
+    createdStaff = true
+    method = method || 'GetSong'
+  }
+
+  const extension = path.extname(imported.file)
+  const assetName = requestedName.length > 0 ? requestedName : path.basename(imported.file, extension) || staff.className
+  const member = makeSongMember(staff, {
+    method,
+    assetName,
+    relativePath: imported.file,
+    timeOffset,
+  })
+  staff._staffFile.members.push(member)
+  refreshProjectAudio(project)
+  refreshDuration(project)
+  if (!project.assets || !Array.isArray(project.assets.audio)) project.assets = Object.assign({ images: [], audio: [] }, project.assets)
+  if (project.assets.audio.indexOf(imported.file) === -1) {
+    project.assets.audio.push(imported.file)
+    project.assets.audio.sort()
+  }
+  const createdPeriod = (staff.audioPeriods || []).find((period) => period.method === method)
+  return {
+    createdStaff,
+    staffId: staff.id,
+    entry: {
+      staffId: staff.id,
+      kind: 'audioPeriod',
+      audioPeriodId: createdPeriod ? createdPeriod.id : null,
+      method,
+      file: imported.file,
+      name: assetName,
+      timeOffset: round6(timeOffset),
+      imported: imported.copied === true,
+    },
+  }
+}
+
+/** `patchAudioPeriod` op implementation. */
+function applyPatchAudioPeriod(project, index, op, errors, label) {
+  if (!isPlainObject(op.fields)) {
+    errors.push(`${label}: patchAudioPeriod requires a fields object`)
+    return false
+  }
+  const resolved = findAudioPeriod(project, op.staffId, op.audioPeriodId)
+  if (resolved.error) {
+    errors.push(`${label}: ${resolved.error}`)
+    return false
+  }
+  const known = new Set(['timeOffset', 'name', 'file', 'sourcePath'])
+  for (const key of Object.keys(op.fields)) {
+    if (!known.has(key)) errors.push(`${label}: unknown audio period field "${key}" (kept)`)
+  }
+  const fields = op.fields
+  const period = resolved.period
+  let timeOffset = null
+  if (fields.timeOffset !== undefined) {
+    timeOffset = finiteNumber(fields.timeOffset)
+    if (timeOffset === null || timeOffset < 0) {
+      errors.push(`${label}: audio period timeOffset must be a finite number >= 0`)
+      return false
+    }
+  }
+  let name = null
+  if (fields.name !== undefined) {
+    if (typeof fields.name !== 'string' || fields.name.trim().length === 0) {
+      errors.push(`${label}: audio period name must be a non-empty string`)
+      return false
+    }
+    name = fields.name.trim()
+    if (name.length > 200) {
+      errors.push(`${label}: audio period name is too long (max 200 characters)`)
+      return false
+    }
+  }
+  let imported = null
+  if (fields.file !== undefined || fields.sourcePath !== undefined) {
+    imported = resolveAudioFileArg(project, fields, errors, label)
+    if (!imported) return false
+  }
+
+  // All input validated: mutate now.
+  if (timeOffset !== null) {
+    const written = writeMemberPeriodConfig(resolved.staff, period._member, { timeOffset })
+    if (written.error) {
+      errors.push(`${label}: ${written.error}`)
+      return false
+    }
+    period.offset = timeOffset
+  }
+  if (name !== null) {
+    const asset = period._member && period._member.returnValue
+    if (asset && asset.t === 'obj') {
+      if (!isPlainObject(asset.fields)) asset.fields = {}
+      asset.fields.name = name
+    }
+    period.name = name
+  }
+  if (imported) {
+    writeAudioAssetPath(period, imported.file)
+    if (!Array.isArray(project.assets.audio)) project.assets.audio = []
+    if (project.assets.audio.indexOf(imported.file) === -1) {
+      project.assets.audio.push(imported.file)
+      project.assets.audio.sort()
+    }
+  }
+  refreshProjectAudio(project)
+  refreshDuration(project)
+  return true
+}
+
+/** `removeAudioPeriod` op implementation. */
+function applyRemoveAudioPeriod(project, index, op, errors, label) {
+  const resolved = findAudioPeriod(project, op.staffId, op.audioPeriodId)
+  if (resolved.error) {
+    errors.push(`${label}: ${resolved.error}`)
+    return false
+  }
+  const members = resolved.staff._staffFile && Array.isArray(resolved.staff._staffFile.members) ? resolved.staff._staffFile.members : []
+  const at = members.indexOf(resolved.period._member)
+  if (at === -1) {
+    errors.push(`${label}: audio period is not backed by a method anymore; reload the project`)
+    return false
+  }
+  members.splice(at, 1)
+  refreshProjectAudio(project)
+  refreshDuration(project)
+  return true
+}
+
+/**
+ * `removeStaff` op implementation.
+ *
+ * Staffs created by this session's `addStaff` are removable as the inverse of
+ * that op. A staff loaded from disk is only removed when the op explicitly
+ * passes `deleteFile: true` — the UI asks for confirmation first and then
+ * removes the `.g` (plus its `.bak`) for real.
+ */
+function applyRemoveStaff(project, index, op, errors, label) {
+  const staffId = typeof op.staffId === 'string' ? op.staffId : ''
+  if (!staffId) {
+    errors.push(`${label}: removeStaff requires staffId`)
+    return false
+  }
+  if (op.deleteFile !== undefined && typeof op.deleteFile !== 'boolean') {
+    errors.push(`${label}: removeStaff.deleteFile must be a boolean`)
+    return false
+  }
+  const staff = index.staffById.get(staffId)
+  if (!staff) {
+    errors.push(`${label}: unknown staff "${staffId}"`)
+    return false
+  }
+  if (staff._created !== true && op.deleteFile !== true) {
+    errors.push(
+      `${label}: cannot remove staff "${staffId}": only staffs created in this session can be removed (pass deleteFile:true to delete a staff file)`,
+    )
+    return false
+  }
+  const projectDir = path.resolve(project.dir || '.')
+  const target = path.resolve(staff.file || path.join(projectDir, staff.id))
+  if (!isPathInside(target, projectDir)) {
+    errors.push(`${label}: refusing to delete "${target}" outside the project directory`)
+    return false
+  }
+  // Delete the backup first and the staff file last: a failure then leaves the
+  // `.g` intact instead of a project entry whose file is already gone.
+  for (const file of [target + '.bak', target]) {
+    try {
+      if (fs.existsSync(file)) fs.unlinkSync(file)
+    } catch (error) {
+      errors.push(`${label}: cannot delete "${file}": ${messageOf(error)}`)
+      return false
+    }
+  }
+  const at = (project.staffs || []).indexOf(staff)
+  if (at !== -1) project.staffs.splice(at, 1)
+  // Removing the audio staff must not leave a dangling `project.audio`, and a
+  // removed chart/storyboard may have been the source of `project.form`.
+  if (staff.kind === 'audio') refreshProjectAudio(project)
+  refreshProjectForm(project)
+  return true
+}
+
 /** Resolve a period id, optionally scoped to one staff (period ids repeat per staff). */
 function findPeriod(project, index, periodId, staffId) {
   if (typeof staffId === 'string' && staffId.length > 0) {
@@ -1703,12 +2486,15 @@ function findPeriod(project, index, periodId, staffId) {
   return matches[0]
 }
 
-/** Merge a PeriodConfig attr block into a member's fields. */
-function mergePeriodConfig(staff, period, fields) {
-  const member = period._member
-  if (!member) return { error: 'period has no backing member' }
+/**
+ * Write `timeOffset` / `minLength` into one member's `PeriodConfig` attr block
+ * (shared by `@Chart` periods and `@Song` audio periods).
+ * Returns the written values, or `{ error }` without mutating on bad input.
+ */
+function writeMemberPeriodConfig(staff, member, fields) {
+  if (!member) return { error: 'member has no backing method' }
   if (!Array.isArray(member.attr)) member.attr = []
-  const qualified = (staff._staffFile && staff._staffFile.usings && staff._staffFile.usings.length > 0) ? '' : G
+  const qualified = staff && staff._staffFile && staff._staffFile.usings && staff._staffFile.usings.length > 0 ? '' : G
   const configType = qualified + 'PeriodConfig'
   let entry = member.attr.find((item) => item && typeof item.type === 'string' && bareTypeName(item.type) === 'PeriodConfig')
   if (!entry) {
@@ -1720,26 +2506,36 @@ function mergePeriodConfig(staff, period, fields) {
     entry.type = (entry.value.type ? entry.value.type : configType) + '^'
   }
   const target = entry.value.fields
+  const written = {}
   for (const key of Object.keys(fields)) {
     if (key === 'timeOffset') {
       const number = finiteNumber(fields[key])
       if (number === null) return { error: 'timeOffset must be a finite number' }
       target.timeOffset = round6(number)
-      period.timeOffset = round6(number)
+      written.timeOffset = round6(number)
     } else if (key === 'minLength') {
       if (fields[key] === null) {
         delete target.minLength
-        period.minLength = null
+        written.minLength = null
       } else {
         const number = finiteNumber(fields[key])
         if (number === null) return { error: 'minLength must be a finite number or null' }
         target.minLength = round6(number)
-        period.minLength = round6(number)
+        written.minLength = round6(number)
       }
     } else {
       target[key] = cloneValue(fields[key])
     }
   }
+  return { ok: true, written }
+}
+
+/** Merge a PeriodConfig attr block into a chart period's derived fields. */
+function mergePeriodConfig(staff, period, fields) {
+  const result = writeMemberPeriodConfig(staff, period._member, fields)
+  if (result.error) return result
+  if (result.written && Object.prototype.hasOwnProperty.call(result.written, 'timeOffset')) period.timeOffset = result.written.timeOffset
+  if (result.written && Object.prototype.hasOwnProperty.call(result.written, 'minLength')) period.minLength = result.written.minLength
   return { ok: true }
 }
 
@@ -1752,6 +2548,11 @@ const OP_KEYS = {
   setMeta: ['op', 'tempo', 'title'],
   setStaffName: ['op', 'staffId', 'displayName'],
   setPeriodConfig: ['op', 'periodId', 'staffId', 'fields'],
+  addStaff: ['op', 'kind', 'form', 'displayName', 'className', 'fileName', 'timeOffset', 'minLength'],
+  removeStaff: ['op', 'staffId', 'deleteFile'],
+  addAudioPeriod: ['op', 'staffId', 'file', 'sourcePath', 'name', 'timeOffset', 'method'],
+  patchAudioPeriod: ['op', 'staffId', 'audioPeriodId', 'fields'],
+  removeAudioPeriod: ['op', 'staffId', 'audioPeriodId'],
 }
 
 function reportUnknownKeys(opName, op, errors, label) {
@@ -2144,6 +2945,41 @@ export function applyOps(project, ops) {
           reportUnknownKeys(opName, op, errors, label)
           applied = applySetPeriodConfig(project, index, op, errors, label)
           break
+        case 'addStaff': {
+          reportUnknownKeys(opName, op, errors, label)
+          const made = applyAddStaff(project, index, op, errors, label)
+          if (made) {
+            created.push(made)
+            applied = true
+            structureDirty = true
+          }
+          break
+        }
+        case 'removeStaff':
+          reportUnknownKeys(opName, op, errors, label)
+          applied = applyRemoveStaff(project, index, op, errors, label)
+          if (applied) structureDirty = true
+          break
+        case 'addAudioPeriod': {
+          reportUnknownKeys(opName, op, errors, label)
+          const made = applyAddAudioPeriod(project, index, op, errors, label)
+          if (made) {
+            if (made.createdStaff) created.push({ staffId: made.staffId, kind: 'staff', staffKind: 'audio' })
+            created.push(made.entry)
+            applied = true
+            structureDirty = true
+          }
+          break
+        }
+        case 'patchAudioPeriod':
+          reportUnknownKeys(opName, op, errors, label)
+          applied = applyPatchAudioPeriod(project, index, op, errors, label)
+          break
+        case 'removeAudioPeriod':
+          reportUnknownKeys(opName, op, errors, label)
+          applied = applyRemoveAudioPeriod(project, index, op, errors, label)
+          if (applied) structureDirty = true
+          break
         default:
           errors.push(`${label}: unsupported op "${opName}"`)
           continue
@@ -2339,14 +3175,31 @@ export function validateProject(project) {
   const seenElementIds = new Set()
   const seenLaneNames = new Map()
 
-  if (project.audio && project.audio.file && !fs.existsSync(project.audio.file)) {
+  const audioClips = Array.isArray(project.audioPeriods) ? project.audioPeriods : []
+  if (audioClips.length === 0 && project.audio && project.audio.file && !fs.existsSync(project.audio.file)) {
     issue(issues, 'error', 'missing-audio', `audio file is missing: ${project.audio.file}`)
+  }
+  for (const clip of audioClips) {
+    const clipContext = { staffId: clip.staffId, audioPeriodId: clip.id }
+    if (!clip.relativePath) {
+      issue(issues, 'warning', 'audio-without-file', `${clip.staffId}/${clip.method}: audio period declares no file path`, clipContext)
+    } else if (clip.missing || !clip.file || !fs.existsSync(clip.file)) {
+      issue(issues, 'error', 'missing-audio', `${clip.staffId}/${clip.method}: audio file is missing: ${clip.relativePath}`, clipContext)
+    }
+    if (!Number.isFinite(clip.offset) || clip.offset < 0) {
+      issue(issues, 'error', 'bad-audio-offset', `${clip.staffId}/${clip.method}: invalid timeOffset`, clipContext)
+    }
+    if (clip.duration !== null && (!Number.isFinite(clip.duration) || clip.duration <= 0)) {
+      issue(issues, 'warning', 'bad-audio-duration', `${clip.staffId}/${clip.method}: cannot determine the clip duration`, clipContext)
+    }
   }
 
   for (const staff of project.staffs || []) {
     const staffContext = { staffId: staff.id }
     if (staff.kind === 'audio') {
-      if (!staff._song) issue(issues, 'warning', 'audio-without-song', `${staff.id}: audio staff declares no @Song asset`, staffContext)
+      if (!Array.isArray(staff.audioPeriods) || staff.audioPeriods.length === 0) {
+        issue(issues, 'warning', 'audio-without-song', `${staff.id}: audio staff declares no @Song asset`, staffContext)
+      }
       continue
     }
     const periods = staff.periods || []
@@ -2522,8 +3375,8 @@ function parseMp3FrameHeader(buffer, offset) {
   const sampleRate = sampleRates ? sampleRates[sampleRateIndex] : 0
   if (!bitrateKbps || !sampleRate) return null
   const bitrate = bitrateKbps * 1000
-  const samplesPerFrame =
-    layerKey === 1 ? 384 : layerKey === 2 ? 1152 : versionBits === 3 ? 1152 : 576
+  const frameSamples = MP3_SAMPLES_PER_FRAME[layerKey]
+  const samplesPerFrame = typeof frameSamples === 'number' ? frameSamples : frameSamples ? frameSamples[versionBits] : 0
   const frameLength = layerKey === 1
     ? Math.floor((12 * bitrate) / sampleRate + padding) * 4
     : Math.floor((samplesPerFrame / 8) * bitrate / sampleRate) + padding

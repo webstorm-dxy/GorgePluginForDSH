@@ -14,6 +14,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
+import { fileURLToPath } from 'node:url'
 
 import {
   Config,
@@ -24,6 +25,7 @@ import {
   createEventsHandler,
   createFileHandler,
   createHandlers,
+  createImportAudioHandler,
   createOpenHandler,
   createProjectsHandler,
   createReloadHandler,
@@ -51,6 +53,7 @@ const FIXTURE_SOURCE = '/Users/daxingyi/Music/DremuTest'
 const HOST = '127.0.0.1:58767'
 const SAME_ORIGIN_HEADERS = { host: HOST, origin: `http://${HOST}` }
 const SILENT_LOGGER = { warn() {} }
+const HERE = path.dirname(fileURLToPath(import.meta.url))
 
 const cleanups = []
 const tempDirectories = []
@@ -199,10 +202,11 @@ async function waitForEnd(res) {
 
 /** Fake Cordis host capturing tools, routes, prompt contexts, and disposers. */
 function createFakeHost(options = {}) {
-  const present = new Set(options.present || ['tools', 'webServer', 'systemPrompt', 'workingDirectory'])
+  const present = new Set(options.present || ['tools', 'webServer', 'systemPrompt', 'workingDirectory', 'skills'])
   const tools = new Map()
   const routes = new Map()
   const contexts = new Map()
+  const skillProviders = new Map()
   const disposers = []
 
   function makeContext() {
@@ -242,6 +246,14 @@ function createFakeHost(options = {}) {
               return options.workingDirectory || process.cwd()
             },
           }
+        } else if (names.includes('skills') && present.has('skills')) {
+          child.skills = {
+            registerProvider(create) {
+              const provider = create({ signal: new AbortController().signal, invalidate() {} })
+              skillProviders.set(provider.name, provider)
+              return () => skillProviders.delete(provider.name)
+            },
+          }
         } else {
           return
         }
@@ -255,6 +267,7 @@ function createFakeHost(options = {}) {
     tools,
     routes,
     contexts,
+    skillProviders,
     dispose() {
       for (const dispose of disposers.splice(0).reverse()) {
         try {
@@ -433,7 +446,7 @@ test('config: zero-config defaults and Standard Schema', () => {
 
 test('exports: inject declaration and endpoint table', () => {
   assert.deepEqual(pluginInject, ['tools'])
-  assert.deepEqual(Object.keys(ENDPOINTS).sort(), ['edit', 'events', 'file', 'open', 'projects', 'reload', 'save', 'state'])
+  assert.deepEqual(Object.keys(ENDPOINTS).sort(), ['edit', 'events', 'file', 'importAudio', 'open', 'projects', 'reload', 'save', 'state'])
   for (const routePath of Object.values(ENDPOINTS)) {
     assert.ok(routePath.startsWith('/plugins/gorge-chart/'), `${routePath} must live under /plugins/gorge-chart/`)
   }
@@ -686,6 +699,80 @@ test('store: setMeta and add/remove ops round-trip with created descriptors', ()
   assert.equal(removed.ok, true)
   assert.equal(removed.changed, true)
   assert.equal(findElementById(store.state(), created.elementId), null)
+})
+
+test('store: addStaff writes a new staff file and removeStaff deletes it', () => {
+  const copy = freshFixture()
+  const store = openedStore(copy)
+  const startRev = store.view().rev
+  const added = store.applyOps(store.view().rev, [
+    {
+      op: 'addStaff',
+      kind: 'chart',
+      displayName: 'Host Staff',
+      className: 'HostStaff',
+      fileName: 'HostStaff.g',
+    },
+    {
+      op: 'add',
+      staffId: 'HostStaff.g',
+      periodId: 'p0',
+      element: { id: 'host-note', type: 'Dremu.DremuTap', fields: { laneName: 'mainLine01', hitTime: 3 } },
+    },
+  ])
+  assert.equal(added.ok, true)
+  assert.equal(added.changed, true)
+  assert.deepEqual(added.created[0], { staffId: 'HostStaff.g', kind: 'staff', staffKind: 'chart' })
+  assert.equal(store.view().rev, startRev + 1)
+  const wireStaff = store.state().project.staffs.find((staff) => staff.id === 'HostStaff.g')
+  assert.ok(wireStaff, 'the new staff is in the wire state')
+  assert.equal(wireStaff.periods[0].elements[0].type, 'Dremu.DremuTap')
+
+  const saved = store.save()
+  assert.equal(saved.ok, true)
+  const createdFile = path.join(copy.project, 'HostStaff.g')
+  assert.ok(fs.existsSync(createdFile), 'addStaff is written by save')
+  assert.ok(saved.written.some((file) => file.endsWith('HostStaff.g')))
+  const text = fs.readFileSync(createdFile, 'utf8')
+  assert.ok(/class HostStaff/.test(text))
+  assert.ok(/DremuTap/.test(text))
+
+  const removed = store.applyOps(store.view().rev, [{ op: 'removeStaff', staffId: 'HostStaff.g' }])
+  assert.equal(removed.ok, true)
+  assert.equal(removed.changed, true)
+  assert.equal(store.state().project.staffs.some((staff) => staff.id === 'HostStaff.g'), false)
+  assert.ok(!fs.existsSync(createdFile), 'removeStaff deletes the file it created')
+  assert.equal(store.save().ok, true)
+
+  const reopened = openedStore(copy)
+  assert.equal(reopened.state().project.staffs.some((staff) => staff.id === 'HostStaff.g'), false)
+  assert.ok(!fs.existsSync(createdFile), 'reload does not resurrect the removed staff')
+})
+
+test('store: removeStaff deleteFile deletes a fixture staff from disk and survives reopen', () => {
+  const copy = freshFixture()
+  const store = openedStore(copy)
+  const target = 'DremuStaff1.g'
+  const file = path.join(copy.project, target)
+  assert.ok(fs.existsSync(file), 'fixture staff missing')
+  fs.writeFileSync(file + '.bak', 'previous bytes')
+
+  const refused = store.applyOps(store.view().rev, [{ op: 'removeStaff', staffId: target }])
+  assert.equal(refused.changed, false)
+  assert.ok(refused.errors.some((error) => /deleteFile:true/.test(error)))
+  assert.ok(fs.existsSync(file), 'a disk staff is not deleted without the explicit flag')
+
+  const removed = store.applyOps(store.view().rev, [{ op: 'removeStaff', staffId: target, deleteFile: true }])
+  assert.equal(removed.ok, true)
+  assert.equal(removed.changed, true)
+  assert.equal(store.state().project.staffs.some((staff) => staff.id === target), false)
+  assert.ok(!fs.existsSync(file), 'the staff file is deleted')
+  assert.ok(!fs.existsSync(file + '.bak'), 'the .bak backup is deleted too')
+  assert.equal(store.save().ok, true)
+
+  const reopened = openedStore(copy)
+  assert.equal(reopened.state().project.staffs.some((staff) => staff.id === target), false)
+  assert.ok(!fs.existsSync(file), 'reopening does not resurrect the deleted staff')
 })
 
 test('store: autoSave persists edits after the debounce and clears dirty', async () => {
@@ -1150,6 +1237,79 @@ test('handler file: serves project files with Range support and strict containme
   assert.equal(wrongMethod.statusCode, 405)
 })
 
+test('handler import-audio: copies a bounded upload into the project and reports metadata', async () => {
+  const copy = copyFixture()
+  const store = openedStore(copy)
+  const handler = createImportAudioHandler(store)
+  const bytes = fs.readFileSync(path.join(HERE, '..', 'demo', 'demo.wav'))
+  const upload = await callHandler(
+    handler,
+    localRequest({
+      method: 'POST',
+      url: ENDPOINTS.importAudio + '?name=' + encodeURIComponent('导入 音轨.wav'),
+      headers: { ...SAME_ORIGIN_HEADERS, 'content-type': 'audio/wav' },
+      body: bytes,
+    }),
+  )
+  assert.equal(upload.statusCode, 200)
+  const body = upload.json()
+  assert.equal(body.ok, true)
+  assert.equal(body.file, '导入 音轨.wav')
+  assert.ok(fs.existsSync(path.join(copy.project, body.file)), 'the upload lives inside the project')
+  assert.ok(body.duration > 0, 'the probe reports the uploaded clip duration')
+  assert.equal(typeof body.format, 'string')
+  assert.equal(body.bytes, bytes.length)
+
+  // A second upload of the same name gets a unique file.
+  const again = await callHandler(
+    handler,
+    localRequest({
+      method: 'POST',
+      url: ENDPOINTS.importAudio + '?name=' + encodeURIComponent('导入 音轨.wav'),
+      body: bytes,
+    }),
+  )
+  assert.equal(again.statusCode, 200)
+  assert.notEqual(again.json().file, body.file)
+
+  // Traversal is reduced to a basename inside the project.
+  const traversal = await callHandler(
+    handler,
+    localRequest({ method: 'POST', url: ENDPOINTS.importAudio + '?name=' + encodeURIComponent('../Escape.wav'), body: bytes }),
+  )
+  assert.equal(traversal.statusCode, 200)
+  assert.equal(traversal.json().file, 'Escape.wav')
+  assert.ok(fs.existsSync(path.join(copy.project, 'Escape.wav')))
+  assert.ok(!fs.existsSync(path.join(path.dirname(copy.project), 'Escape.wav')))
+
+  // Unsupported types and oversized bodies are refused.
+  const exe = await callHandler(
+    handler,
+    localRequest({ method: 'POST', url: ENDPOINTS.importAudio + '?name=evil.exe', body: Buffer.from('x') }),
+  )
+  assert.equal(exe.statusCode, 400)
+  const tiny = createImportAudioHandler(store, { maxAudioBytes: 16 })
+  const tooBig = await callHandler(
+    tiny,
+    localRequest({ method: 'POST', url: ENDPOINTS.importAudio + '?name=big.wav', body: bytes }),
+  )
+  assert.equal(tooBig.statusCode, 400)
+  assert.match(tooBig.json().error, /too large/)
+
+  // A non-local peer cannot write into the project.
+  const remote = await callHandler(
+    handler,
+    localRequest({
+      method: 'POST',
+      url: ENDPOINTS.importAudio + '?name=remote.wav',
+      remoteAddress: '203.0.113.9',
+      body: bytes,
+    }),
+  )
+  assert.equal(remote.statusCode, 403)
+  assert.ok(!fs.existsSync(path.join(copy.project, 'remote.wav')))
+})
+
 test('handler open/projects/save/reload: full project lifecycle over HTTP', async () => {
   const copy = freshFixture()
   const { store } = createTestStore({ projectRoot: copy.root })
@@ -1208,7 +1368,7 @@ test('handler open/projects/save/reload: full project lifecycle over HTTP', asyn
   const noProjectReload = await callHandler(createReloadHandler(noProjectStore), localRequest({ method: 'POST', url: ENDPOINTS.reload }))
   assert.equal(noProjectReload.statusCode, 400)
 
-  assert.equal(createHandlers(store).length, 8)
+  assert.equal(createHandlers(store).length, 9)
 })
 
 // ---------------------------------------------------------------------------
@@ -1274,6 +1434,34 @@ test('tools: real project data through gorge_project_list/get/edit/schema/valida
   if (summary.project.elementCount > 400) assert.equal(summary.truncated, true)
   const summaryStaff = summary.staffs.find((staff) => staff.kind === 'chart' && staff.periods.length > 0)
   assert.ok(summaryStaff, 'chart staff is present in the summary')
+  assert.ok(Array.isArray(summary.project.audioPeriods) && summary.project.audioPeriods.length >= 1)
+  const audioSummary = summary.staffs.find((staff) => staff.kind === 'audio')
+  assert.ok(audioSummary, 'audio staff is present in the summary')
+  assert.ok(Array.isArray(audioSummary.audioPeriods) && audioSummary.audioPeriods.length >= 1)
+  assert.equal(typeof audioSummary.audioPeriods[0].relativePath, 'string')
+
+  const added = await byName.get('gorge_chart_edit').execute({
+    ops: [{ op: 'addAudioPeriod', staffId: audioSummary.id, file: 'Song.wav', name: '第二乐段', timeOffset: 200 }],
+  })
+  assert.equal(added.ok, true)
+  assert.equal(added.changed, true)
+  const createdAudio = (added.created || []).find((entry) => entry.kind === 'audioPeriod')
+  assert.ok(createdAudio, 'addAudioPeriod reports the created period')
+  assert.equal(createdAudio.audioPeriodId, 'a1')
+  assert.equal(createdAudio.method, 'GetSong1')
+  const withAudio = await byName.get('gorge_chart_get').execute({})
+  assert.equal(withAudio.project.audioPeriods.length, summary.project.audioPeriods.length + 1)
+  assert.ok(withAudio.project.audioPeriods.some((clip) => clip.method === 'GetSong1' && clip.offset === 200))
+  const patchedAudio = await byName.get('gorge_chart_edit').execute({
+    ops: [{ op: 'patchAudioPeriod', staffId: audioSummary.id, audioPeriodId: createdAudio.audioPeriodId, fields: { timeOffset: 210 } }],
+  })
+  assert.equal(patchedAudio.ok, true)
+  assert.ok((await byName.get('gorge_chart_get').execute({})).project.audioPeriods.some((clip) => clip.offset === 210))
+  const removedAudio = await byName.get('gorge_chart_edit').execute({
+    ops: [{ op: 'removeAudioPeriod', staffId: audioSummary.id, audioPeriodId: createdAudio.audioPeriodId }],
+  })
+  assert.equal(removedAudio.ok, true)
+  assert.equal((await byName.get('gorge_chart_get').execute({})).project.audioPeriods.length, summary.project.audioPeriods.length)
 
   const typeEntry = summary.staffs
     .flatMap((staff) => staff.periods)
@@ -1287,6 +1475,7 @@ test('tools: real project data through gorge_project_list/get/edit/schema/valida
   assert.equal(typeof single.element.periodId, 'string')
   assert.ok(isPlainObject(single.element.fields))
 
+  const revBeforeElementEdit = (await byName.get('gorge_chart_get').execute({})).rev
   const patchTarget = [...wireElements(store.state())].find(
     (entry) => isPlainObject(entry.element.fields) && typeof entry.element.fields.hitTime === 'number',
   )
@@ -1297,7 +1486,7 @@ test('tools: real project data through gorge_project_list/get/edit/schema/valida
   })
   assert.equal(edited.ok, true)
   assert.equal(edited.changed, true)
-  assert.equal(edited.rev, summary.rev + 1)
+  assert.equal(edited.rev, revBeforeElementEdit + 1)
   assert.equal(edited.dirty, true)
   const reread = await byName.get('gorge_chart_get').execute({ elementId: patchTarget.element.id })
   assert.equal(reread.element.fields.hitTime, nextHitTime)
@@ -1377,7 +1566,7 @@ test('tools: save/open/errors with real data', async () => {
 // Plugin entry point: tools, routes, prompt context, cleanup
 // ---------------------------------------------------------------------------
 
-test('apply: registers seven tools, eight routes, and the prompt context', () => {
+test('apply: registers seven tools, nine routes, and the prompt context', () => {
   const copy = copyFixture()
   const stateDirectory = tempDir('gorge-chart-apply-')
   const host = createFakeHost()
@@ -1405,10 +1594,19 @@ test('apply: registers seven tools, eight routes, and the prompt context', () =>
   assert.equal(typeof context.text, 'function')
   assert.ok(context.text().includes('Dremu chart workspace'))
 
+  const skillProvider = host.skillProviders.get('gorge-chart')
+  assert.ok(skillProvider, 'bundled skill provider is registered')
+  const candidates = skillProvider.list()
+  assert.equal(candidates.length, 1)
+  assert.equal(candidates[0].name, 'dremu-chart-editing')
+  assert.equal(candidates[0].rank, 600)
+  assert.ok(candidates[0].description.includes('Dremu'))
+
   host.dispose()
   assert.equal(host.tools.size, 0, 'tool registrations are disposed')
   assert.equal(host.routes.size, 0, 'route registrations are disposed')
   assert.equal(host.contexts.size, 0, 'prompt context is disposed')
+  assert.equal(host.skillProviders.size, 0, 'skill provider registrations are disposed')
 })
 
 test('apply: tools load without a web server or system prompt', () => {
@@ -1423,6 +1621,7 @@ test('apply: tools load without a web server or system prompt', () => {
   assert.equal(host.tools.size, 7)
   assert.equal(host.routes.size, 0)
   assert.equal(host.contexts.size, 0)
+  assert.equal(host.skillProviders.size, 0, 'no skill registry in this composition')
   host.dispose()
 })
 
