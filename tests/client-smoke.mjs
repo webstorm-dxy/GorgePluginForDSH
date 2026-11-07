@@ -10,8 +10,9 @@
  *   2. the page renders in its loading, empty and project states without
  *      throwing,
  *   3. the timeline canvas paints through a stub 2D context,
- *   4. the inspector and curve dialog render a real element/catalog,
- *   5. a curve dialog Apply produces the expected value.
+ *   4. the inspector and the docked curve panel render a real element/catalog,
+ *   5. curve-panel Apply, segment creation/type change/delete and boundary
+ *      drags produce the expected patch values.
  *
  * Run: node tests/client-smoke.mjs
  */
@@ -20,6 +21,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { evaluateCurve } from '../dremu-model.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const clientPath = path.join(here, '..', 'client.js');
@@ -624,6 +626,14 @@ function findHostByText(tree, needle) {
 // Fixtures
 // ---------------------------------------------------------------------------
 
+const VARIABLE_FLOAT_VALUE_TYPE = {
+  label: 'VariableFloat',
+  fields: {
+    baseValue: { name: 'baseValue', type: 'number', default: 0, label: 'Base value' },
+    variationCurve: { name: 'variationCurve', type: 'curve', optional: true, label: 'Variation curve' },
+  },
+};
+
 const CATALOG = {
   version: 1,
   elements: [
@@ -650,7 +660,14 @@ const CATALOG = {
         { name: 'laneName', type: 'string', default: '' },
         { name: 'hitTime', type: 'number', default: 0 },
         { name: 'leadTime', type: 'number', default: 0.6 },
-        { name: 'position', type: 'VariableFloat', default: { t: 'obj', type: 'GorgeFramework.VariableFloat', fields: { baseValue: 0 } } },
+        {
+          name: 'position',
+          type: 'VariableFloat',
+          default: { t: 'obj', type: 'GorgeFramework.VariableFloat', fields: { baseValue: 0 } },
+          schema: VARIABLE_FLOAT_VALUE_TYPE,
+          fields: VARIABLE_FLOAT_VALUE_TYPE.fields,
+        },
+        { name: 'curves', type: 'array', label: 'Curves', itemSchema: { type: 'curve', label: 'Curve' }, default: [] },
       ],
     },
     {
@@ -664,6 +681,23 @@ const CATALOG = {
         { name: 'hitTime', type: 'number', default: 0 },
         { name: 'holdTime', type: 'number', default: 1 },
         { name: 'holdLine', type: 'curve', default: { t: 'obj', type: 'GorgeFramework.LinearCurve', fields: { timeStart: 0, valueStart: 0, timeEnd: 1, valueEnd: 1 } } },
+        {
+          name: 'color',
+          type: 'LerpColorCurve',
+          optional: true,
+          label: 'Color',
+          default: {
+            t: 'obj',
+            type: 'GorgeFramework.LerpColorCurve',
+            fields: {
+              colorPoints: {
+                t: 'arr',
+                type: 'GorgeFramework.ColorArgb',
+                items: [{ t: 'obj', type: 'GorgeFramework.ColorArgb', fields: { a: 1, r: 1, g: 1, b: 1 } }],
+              },
+            },
+          },
+        },
       ],
     },
     {
@@ -680,7 +714,7 @@ const CATALOG = {
       ],
     },
   ],
-  valueTypes: {},
+  valueTypes: { VariableFloat: VARIABLE_FLOAT_VALUE_TYPE },
   palettes: {},
 };
 
@@ -743,6 +777,11 @@ const PROJECT = {
                 hitTime: 2,
                 leadTime: 0.6,
                 position: { t: 'obj', type: 'GorgeFramework.VariableFloat', fields: { baseValue: -1 } },
+                curves: {
+                  t: 'arr',
+                  type: 'GorgeFramework.FunctionCurve',
+                  items: [{ t: 'obj', type: 'GorgeFramework.LinearCurve', fields: { timeStart: 0, valueStart: 0, timeEnd: 1, valueEnd: 0 } }],
+                },
               },
               start: 2,
               duration: null,
@@ -1068,6 +1107,278 @@ assert.deepEqual(clientPlugin.inject, ['slots', 'locale'], 'client plugin inject
   assert.equal(audio.detectBpmFromSpectrum(bpmSpectrum, 1), null, 'clips shorter than 3 s must not be analyzed');
 }
 
+
+// ---------------------------------------------------------------------------
+// Curve segment model + sampler parity (pure helpers, no DOM)
+// ---------------------------------------------------------------------------
+{
+  const curve = clientPlugin.__curve;
+  assert.ok(curve && typeof curve.readCurveDraft === 'function', 'client exposes no __curve test helpers');
+  for (const name of ['sampleCurve', 'readCurveDraft', 'buildCurveValue', 'normalizeSegments', 'setSegmentBoundary', 'splitCurveSegment', 'addCurveSegmentOutside', 'deleteCurveSegment', 'changeCurveSegmentType', 'defaultSegmentCurve', 'curveNaturalRange', 'curveInitialView', 'curveAlignedView', 'curveValueRange', 'curveParamHandles', 'curveBoundaryWarnings', 'snapCurveTime', 'curveLayout']) {
+    assert.equal(typeof curve[name], 'function', '__curve.' + name + ' is not a function');
+  }
+
+  const linear = { t: 'obj', type: 'GorgeFramework.LinearCurve', fields: { timeStart: 0, valueStart: 0, timeEnd: 2, valueEnd: 1 } };
+  const draft = curve.readCurveDraft(linear, { fallbackRange: [-1, 1] });
+  assert.equal(draft.rootKind, 'curve');
+  assert.equal(draft.segments.length, 1);
+  assert.equal(draft.segments[0].start, 0);
+  assert.equal(draft.segments[0].end, 2);
+  assert.deepEqual(curve.buildCurveValue(draft), linear, 'an untouched draft must round-trip the original value');
+
+  const constant = (value) => ({ t: 'obj', type: 'GorgeFramework.ConstantFunctionCurve', fields: { value } });
+  const piecewise = {
+    t: 'obj',
+    type: 'GorgeFramework.PiecewiseFunctionCurve',
+    fields: {
+      functionPieces: {
+        t: 'arr',
+        type: 'GorgeFramework.FunctionPiece',
+        items: [
+          { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: constant(1), startX: 0, endX: 1 } },
+          { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: constant(2), startX: 1, endX: 2 } },
+        ],
+      },
+    },
+  };
+  const axial = { t: 'obj', type: 'GorgeFramework.AxialSymmetricFunctionCurve', fields: { functionCurve: { t: 'obj', type: 'GorgeFramework.LinearFunctionCurve', fields: { k: 1, b: 0 } } } };
+  const periodic = { t: 'obj', type: 'GorgeFramework.PeriodicFunctionCurve', fields: { functionCurve: { t: 'obj', type: 'GorgeFramework.LinearFunctionCurve', fields: { k: 1, b: 0 } } } };
+  const addition = { t: 'obj', type: 'GorgeFramework.AdditionFunctionCurve', fields: { firstFunctionCurve: constant(3), secondFunctionCurve: constant(4) } };
+  const composite = {
+    t: 'obj',
+    type: 'GorgeFramework.CompositeFunctionCurve',
+    fields: {
+      outerFunctionCurve: { t: 'obj', type: 'GorgeFramework.LinearFunctionCurve', fields: { k: 2, b: 0 } },
+      innerFunctionCurve: { t: 'obj', type: 'GorgeFramework.LinearFunctionCurve', fields: { k: 1, b: 1 } },
+    },
+  };
+  const flatSpline = {
+    t: 'obj',
+    type: 'GorgeFramework.CubicHermiteSpline',
+    fields: {
+      startPoint: { t: 'obj', type: 'GorgeFramework.Vector2', fields: { x: 0, y: 0.5 } },
+      endPoint: { t: 'obj', type: 'GorgeFramework.Vector2', fields: { x: 1, y: 0.5 } },
+      startTangent: 3,
+      endTangent: -2,
+    },
+  };
+  const cases = [piecewise, axial, periodic, addition, composite, flatSpline];
+  const xs = [-0.5, 0, 0.25, 0.5, 0.999999, 1, 1.5, 2, 2.5];
+  for (const value of cases) {
+    for (const x of xs) {
+      const actual = curve.sampleCurve(value, x);
+      const expected = evaluateCurve(value, x);
+      if (expected === null) assert.equal(actual, null);
+      else {
+        assert.equal(typeof actual, 'number', 'sampleCurve returned a non-number for ' + value.type + ' at ' + x);
+        assert.ok(Math.abs(actual - expected) < 1e-6, 'sampleCurve drift for ' + value.type + ' at ' + x + ': ' + actual + ' vs ' + expected);
+      }
+    }
+  }
+  assert.equal(curve.sampleCurve(piecewise, 1), 0, 'piecewise boundaries are open by default');
+  assert.equal(curve.sampleCurve(axial, -1), 1, 'axial default keepLeft=false must mirror the right side');
+  assert.equal(curve.sampleCurve(addition, 0), 7, 'addition must use firstFunctionCurve/secondFunctionCurve');
+  assert.equal(curve.sampleCurve(composite, 2), 6, 'composite must evaluate outer(inner(x))');
+  assert.equal(curve.sampleCurve(flatSpline, 0.5), 0.5, 'flat spline must return the start value');
+
+  const view = { x0: -1, x1: 3 };
+  const split = curve.splitCurveSegment(draft, 0, 1, 'LinearCurve', { view });
+  assert.equal(split.draft.segments.length, 2);
+  assert.equal(split.draft.converted, true, 'splitting a plain curve must convert it');
+  assert.equal(split.draft.segments[0].end, split.draft.segments[1].start, 'segments must share their boundary');
+  const built = curve.buildCurveValue(split.draft);
+  assert.equal(built.type, 'GorgeFramework.PiecewiseFunctionCurve');
+  assert.equal(built.fields.functionPieces.items.length, 2);
+  assert.equal(built.fields.functionPieces.items[0].fields.endX, built.fields.functionPieces.items[1].fields.startX);
+  for (const x of [-0.5, 0, 0.5, 1, 1.5, 2]) {
+    assert.ok(Math.abs(curve.sampleCurve(built, x) - curve.sampleCurve(linear, x)) < 1e-6, 'a same-type split changed the function at ' + x);
+  }
+
+  const changed = curve.changeCurveSegmentType(draft, 0, 'ConstantFunctionCurve', { view });
+  assert.equal(changed.segments.length, 1);
+  assert.equal(curve.buildCurveValue(changed).type, 'GorgeFramework.ConstantFunctionCurve', 'single-segment type changes must not wrap in piecewise');
+  const retyped = curve.buildCurveValue(changed);
+  assert.equal(curve.sampleCurve(retyped, 1), 0, 'constant type change anchors to the segment start value');
+
+  const dragged = curve.setSegmentBoundary(draft, 1, 1.5, {});
+  assert.equal(dragged.converted, true, 'dragging a plain curve boundary must convert it');
+  assert.equal(dragged.segments[0].end, 1.5);
+  assert.equal(curve.buildCurveValue(dragged).type, 'GorgeFramework.PiecewiseFunctionCurve');
+
+  const outside = curve.addCurveSegmentOutside(split.draft, 3, 'LinearCurve', { view });
+  assert.equal(outside.draft.segments.length, 3);
+  assert.equal(outside.draft.segments[1].end, outside.draft.segments[2].start);
+  assert.equal(outside.draft.segments[2].end, 3);
+  const outsideLeft = curve.addCurveSegmentOutside(split.draft, -1, 'LinearCurve', { view });
+  assert.equal(outsideLeft.draft.segments.length, 3);
+  assert.equal(outsideLeft.draft.segments[0].start, -1);
+  assert.equal(outsideLeft.draft.segments[0].end, outsideLeft.draft.segments[1].start);
+
+  const three = curve.splitCurveSegment(split.draft, 1, 1.5, 'LinearCurve', { view }).draft;
+  assert.equal(three.segments.length, 3);
+  const deleted = curve.deleteCurveSegment(three, 1);
+  assert.equal(deleted.draft.segments.length, 2);
+  assert.equal(deleted.draft.segments[0].end, deleted.draft.segments[1].start, 'deleting a segment must keep the remainder contiguous');
+
+  const snapped = curve.snapCurveTime(0.42, { bpm: 120, offset: 0 }, 4, 1.25, true);
+  assert.ok(Math.abs(snapped - 0.375) < 1e-9, 'snapCurveTime did not snap to the 1/4 beat grid: ' + snapped);
+
+  const initial = curve.curveInitialView(draft, { bpm: 120, offset: 0 }, [-1, 1]);
+  assert.ok(initial.x1 > initial.x0);
+  const layout = curve.curveLayout(800, 420, { x0: initial.x0, x1: initial.x1, y0: -1, y1: 1 });
+  assert.ok(layout.toX(0) > layout.left && layout.toX(0) < layout.left + layout.plotW);
+  assert.ok(layout.toY(0) < layout.plotBottom && layout.toY(0) > layout.plotTop);
+
+  // The aligned view uses the main timeline's t0/pps so a beat line lands on
+  // the same screen x as the main ruler (GUTTER_W + (t - t0) * pps).
+  const mainView = { t0: 0, pps: 46 };
+  const alignedView = curve.curveAlignedView(6, mainView, 634);
+  assert.ok(alignedView, 'curveAlignedView returned null');
+  const alignedLayout = curve.curveLayout(800, 420, { x0: alignedView.x0, x1: alignedView.x1, y0: -1, y1: 1 });
+  assert.ok(Math.abs(alignedLayout.toX(0) - (148 + 6 * 46)) < 1e-9, 'aligned anchor x must match the main ruler');
+  assert.ok(Math.abs(alignedLayout.toX(1) - (148 + 7 * 46)) < 1e-9, 'aligned beat x must match the main ruler');
+
+  const handles = curve.curveParamHandles(linear, { start: 0, end: 2, view: { x0: -1, x1: 3 } });
+  assert.ok(handles.length >= 2, 'LinearCurve must expose two key handles');
+  const draggedHandle = handles[0];
+  const nextCurve = draggedHandle.drag(0.5, 0.7);
+  assert.ok(Math.abs(curve.sampleCurve(nextCurve, 0.5) - 0.7) < 1e-6, 'dragging a LinearCurve key did not move its value');
+
+  for (const type of ['ConstantFunctionCurve', 'LinearFunctionCurve', 'LinearCurve', 'CubicHermiteSpline', 'PeriodicFunctionCurve', 'AxialSymmetricFunctionCurve', 'AdditionFunctionCurve', 'CompositeFunctionCurve']) {
+    const curveValue = curve.defaultSegmentCurve(type, 0, 2, 1, 3);
+    const typeHandles = curve.curveParamHandles(curveValue, { start: 0, end: 2, view: { x0: -1, x1: 3 } });
+    if (type === 'CompositeFunctionCurve') assert.equal(typeHandles.length, 0, 'composite curves are numeric-only');
+    else {
+      assert.ok(typeHandles.length > 0, 'no draggable parameter handles for ' + type);
+      const movable = typeHandles.find((handle) => handle.yEditable);
+      if (movable) {
+        const after = movable.drag(movable.x, movable.y + 0.25);
+        assert.ok(after && typeof after === 'object', 'handle drag for ' + type + ' returned no curve');
+      }
+    }
+  }
+
+  const jumpDraft = curve.readCurveDraft(piecewise, { fallbackRange: [-1, 1] });
+  const jumps = curve.curveBoundaryWarnings(jumpDraft);
+  assert.equal(jumps.length, 1, 'a 1 -> 2 boundary must be reported as a jump');
+  assert.equal(jumps[0].left, 1);
+  assert.equal(jumps[0].right, 2);
+
+  // Walk every piecewise curve in the loaded project: the real corpus has
+  // infinite bounds, zero-length head pieces and omitted closed flags; an
+  // untouched read/build must round-trip all of them.
+  let piecewiseCount = 0;
+  const walkCurves = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const item of node) walkCurves(item);
+      return;
+    }
+    if (node.t === 'arr') {
+      for (const item of Array.isArray(node.items) ? node.items : []) walkCurves(item);
+      return;
+    }
+    if (node.t === 'expr' || node.t === 'ref') return;
+    if (node.t === 'obj') {
+      const type = curve.curveTypeOf(node);
+      if (type === 'PiecewiseFunctionCurve' || type === 'PiecewiseCurve') {
+        const model = curve.readCurveDraft(node, { fallbackRange: [-1, 1] });
+        assert.ok(model.segments.length >= 1, 'piecewise curve read with no segments');
+        assert.deepEqual(curve.buildCurveValue(model), node, 'an untouched piecewise read/build must round-trip');
+        model.edited = true;
+        const rebuilt = curve.buildCurveValue(model);
+        assert.equal(rebuilt.type, 'GorgeFramework.PiecewiseFunctionCurve');
+        const rebuiltItems = rebuilt.fields.functionPieces.items;
+        assert.equal(rebuiltItems.length, model.segments.length);
+        for (let index = 0; index < rebuiltItems.length; index += 1) {
+          assert.ok(rebuiltItems[index].fields.functionCurve && rebuiltItems[index].fields.functionCurve.t === 'obj', 'edited pieces must materialize a function curve');
+          if (index > 0) assert.deepEqual(rebuiltItems[index].fields.startX, rebuiltItems[index - 1].fields.endX, 'edited pieces must be contiguous');
+        }
+        for (const segment of model.segments) {
+          const segmentHandles = curve.curveParamHandles(segment.curve, {
+            start: segment.start,
+            end: segment.end,
+            view: { x0: -1, x1: 1, y0: -1, y1: 1 },
+          });
+          assert.ok(Array.isArray(segmentHandles), 'parameter handles failed for a corpus curve');
+        }
+        piecewiseCount += 1;
+      }
+      const fields = node.fields || {};
+      for (const name of Object.keys(fields)) walkCurves(fields[name]);
+      return;
+    }
+    // Plain project/staff/period/element/field objects.
+    for (const key of Object.keys(node)) walkCurves(node[key]);
+  };
+  walkCurves(stateResponse.project);
+  if (process.env.GORGE_SMOKE_REAL === '1') assert.ok(piecewiseCount > 0, 'the real corpus must contain piecewise curves');
+
+  // The real corpus has a zero-length `functionCurve : null` piece at the head
+  // of many holdLine curves; normalizing it must not shift the following piece.
+  const withEmptyHead = {
+    t: 'obj',
+    type: 'GorgeFramework.PiecewiseFunctionCurve',
+    fields: {
+      functionPieces: {
+        t: 'arr',
+        type: 'GorgeFramework.FunctionPiece',
+        items: [
+          { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: null, startX: 0, endX: 0 } },
+          { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: constant(5), startX: 0, endX: 2 } },
+        ],
+      },
+    },
+  };
+  const emptyDraft = curve.readCurveDraft(withEmptyHead, { fallbackRange: [-1, 1] });
+  assert.equal(emptyDraft.segments.length, 2);
+  assert.equal(emptyDraft.segments[0].start, 0);
+  assert.equal(emptyDraft.segments[0].end, 0);
+  assert.equal(emptyDraft.segments[1].start, 0, 'a zero-length head piece must not shift the next piece');
+  assert.equal(emptyDraft.segments[1].end, 2);
+  emptyDraft.edited = true;
+  const emptyBuilt = curve.buildCurveValue(emptyDraft);
+  assert.equal(emptyBuilt.fields.functionPieces.items[0].fields.endX, 0);
+  assert.equal(emptyBuilt.fields.functionPieces.items[1].fields.startX, 0);
+  assert.equal(curve.sampleCurve(emptyBuilt, 0.25), 5, 'the zero-length head must not shadow the following piece');
+
+  // Infinite outer bounds are preserved as the corpus' (-1.0/0.0) / (1.0/0.0)
+  // expressions until the user materializes them.
+  const infiniteValue = {
+    t: 'obj',
+    type: 'GorgeFramework.PiecewiseFunctionCurve',
+    fields: {
+      functionPieces: {
+        t: 'arr',
+        type: 'GorgeFramework.FunctionPiece',
+        items: [
+          {
+            t: 'obj',
+            type: 'GorgeFramework.FunctionPiece',
+            fields: {
+              functionCurve: constant(1),
+              startX: { t: 'expr', src: '(-1.0/0.0)', special: '-Infinity' },
+              endX: 0,
+            },
+          },
+          { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: constant(2), startX: 0, endX: { t: 'expr', src: '(1.0/0.0)', special: 'Infinity' } } },
+        ],
+      },
+    },
+  };
+  const infiniteDraft = curve.readCurveDraft(infiniteValue, { fallbackRange: [-1, 1] });
+  assert.equal(infiniteDraft.segments[0].start, -Infinity);
+  assert.equal(infiniteDraft.segments[1].end, Infinity);
+  infiniteDraft.edited = true;
+  const infiniteBuilt = curve.buildCurveValue(infiniteDraft);
+  assert.equal(infiniteBuilt.fields.functionPieces.items[0].fields.startX.special, '-Infinity');
+  assert.equal(infiniteBuilt.fields.functionPieces.items[1].fields.endX.special, 'Infinity');
+  const finiteStart = curve.setSegmentBoundary(infiniteDraft, 0, -2, {});
+  assert.equal(finiteStart.segments[0].start, -2);
+  const finiteStartBuilt = curve.buildCurveValue(finiteStart);
+  assert.equal(finiteStartBuilt.fields.functionPieces.items[0].fields.startX, -2);
+}
+
 // ---------------------------------------------------------------------------
 // Mount the page
 // ---------------------------------------------------------------------------
@@ -1150,6 +1461,9 @@ function assertCanvasTextLayout() {
   let totalRuns = 0;
   let checkedFrames = 0;
   for (const context of canvasContexts) {
+    // The curve panel has its own 56px gutter and plot-area labels; the
+    // timeline gutter rules below do not apply to its canvas.
+    if (context.__element && String(context.__element.className || '').split(/\s+/).indexOf('dgc-curveCanvas') !== -1) continue;
     const frame = context.drawn.slice();
     if (frame.length < 5) continue;
     checkedFrames += 1;
@@ -1225,7 +1539,7 @@ for (const expected of ['ChartStudioPage', 'LeftPane', 'TimelineCanvas', 'Inspec
 assert.ok(calls.some((url) => url.indexOf('/plugins/gorge-chart/state') !== -1), 'state endpoint not called');
 
 // ---------------------------------------------------------------------------
-// Inspector + curve dialog with a real selection
+// Inspector + docked curve panel with a real selection
 // ---------------------------------------------------------------------------
 
 /** First host node matching a predicate. */
@@ -1249,6 +1563,18 @@ function findClickableByText(tree, needle) {
   });
 }
 
+/** Optional-field checkbox identified by its data-field attribute. */
+function findOptionalToggle(tree, field) {
+  return findHost(
+    tree,
+    (host) =>
+      host.tagName === 'INPUT' &&
+      host.props &&
+      host.props.type === 'checkbox' &&
+      host.props['data-field'] === field,
+  );
+}
+
 // 1. Select the Hold element from the element list (the corpus and the
 // fixture both contain DremuHold elements).
 const holdRow = findClickableByText(tree, 'DremuHold');
@@ -1261,36 +1587,607 @@ assert.ok(inspectorText.includes('holdTime') || inspectorText.includes('长条')
 assert.ok(inspectorText.includes('laneName') || inspectorText.includes('轨道'), 'inspector did not render the lane field');
 assert.ok(/[:]p\d+:e\d+|p0:e/.test(inspectorText) || inspectorText.includes('play'), 'inspector did not show the element id');
 
-// 2. Open the curve dialog from the hold's curve field.
-const curveButton = findHost(tree, (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'curveEditor');
-assert.ok(curveButton, 'curve editor button not found for the curve field');
-curveButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: curveButton });
-tree = await settle();
+// 2. Open the docked curve panel from the hold's curve field.
+const curveApi = clientPlugin.__curve;
+const openCurvePanel = async () => {
+  const button = findHost(tree, (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'curveEditor');
+  assert.ok(button, 'curve editor button not found for the curve field');
+  button.props.onClick({ preventDefault() {}, stopPropagation() {}, target: button });
+  tree = await settle();
+  return findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  });
+};
+const curveCanvasHost = () => flattenHosts(tree, []).find((host) => host.tagName === 'CANVAS' && hasClassToken(host, 'dgc-curveCanvas'));
+const segmentRowHosts = () => flattenHosts(tree, []).filter((host) => hasClassToken(host, 'dgc-curveSeg'));
+const applyLastCurve = async (applyHost) => {
+  assert.ok(applyHost, 'curve panel apply button not found');
+  applyHost.props.onClick({ preventDefault() {}, stopPropagation() {}, target: applyHost });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return editBodies[editBodies.length - 1];
+};
 
-assert.ok(flattenText(tree, []).join(' ').includes('curveEditor'), 'curve dialog did not open');
+let curveApplyButton = await openCurvePanel();
+assert.ok(flattenText(tree, []).join(' ').includes('curveEditor'), 'curve panel did not open');
 const dialogCanvases = flattenHosts(tree, []).filter((host) => host.tagName === 'CANVAS');
-assert.ok(dialogCanvases.length >= 2, 'curve dialog did not render its plot canvas');
-assert.ok(flattenHosts(tree, []).some((host) => String(host.className).includes('dgc-modalBackdrop')), 'curve dialog backdrop missing');
-// The numeric tree must expose the LinearCurve fields.
-const dialogText = flattenText(tree, []).join(' ');
-for (const field of ['timeStart', 'valueStart', 'timeEnd', 'valueEnd']) {
-  assert.ok(dialogText.includes(field), 'curve dialog numeric tree missing ' + field);
-}
-
-// 3. Apply the dialog: one edit op must be queued to the Host.
-const editCallsBefore = calls.filter((url) => url.indexOf('/plugins/gorge-chart/edit') !== -1).length;
-const applyButton = findHost(tree, (host) => {
-  if (!host.props || typeof host.props.onClick !== 'function') return false;
-  const label = flattenText(host.rendered, []).join(' ');
-  return label.trim() === 'apply';
-});
-assert.ok(applyButton, 'curve dialog apply button not found');
-applyButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: applyButton });
+assert.ok(dialogCanvases.length >= 2, 'curve panel did not render its plot canvas');
+const centerHost = flattenHosts(tree, []).find((host) => hasClassToken(host, 'dgc-center'));
+assert.ok(centerHost, 'center pane missing');
+const centerHosts = flattenHosts(centerHost.rendered, []);
+const curveLayerHost = centerHosts.find((host) => hasClassToken(host, 'dgc-curveLayer'));
+assert.ok(curveLayerHost, 'curve panel is not docked inside the center pane');
+assert.ok(hasClassToken(centerHost, 'has-curve'), 'center pane did not enter the split layout');
+assert.ok(
+  !curveLayerHost.props.style || curveLayerHost.props.style.position !== 'absolute',
+  'curve layer must be a flow child under the timeline, not a full-pane overlay',
+);
+assert.ok(
+  centerHost.props.style && typeof centerHost.props.style['--dgc-timeline-h'] === 'string',
+  'center pane did not receive the timeline content height',
+);
+const timelineWrapHost = centerHosts.find((host) => hasClassToken(host, 'dgc-canvasWrap'));
+assert.ok(timelineWrapHost, 'timeline canvas wrap missing');
+const timelineWrapIndex = centerHosts.indexOf(timelineWrapHost);
+const curveLayerIndex = centerHosts.indexOf(curveLayerHost);
+assert.ok(timelineWrapIndex >= 0 && timelineWrapIndex < curveLayerIndex, 'curve layer must follow the timeline in the center column');
+const curveCanvas = curveCanvasHost();
+assert.ok(curveCanvas, 'curve canvas missing');
+const curveContext = canvasContexts.find((context) => context.__element && String(context.__element.className || '').split(/\s+/).indexOf('dgc-curveCanvas') !== -1);
+assert.ok(curveContext, 'curve canvas has no 2D context');
+const curveRuns = curveContext.drawn.map((item) => item.text).join(' | ');
+assert.ok(curveRuns.includes('♪'), 'curve panel did not paint beat labels');
+assert.ok(curveRuns.includes('LinearCurve'), 'curve panel did not paint the segment label');
+// The curve panel's x axis mirrors the main timeline: zooming the main
+// timeline must repaint the panel's beat grid at the new scale.
+const latestCurveContext = () => {
+  for (let index = canvasContexts.length - 1; index >= 0; index -= 1) {
+    const context = canvasContexts[index];
+    const cls = String((context.__element && context.__element.className) || '');
+    if (cls.split(/\s+/).indexOf('dgc-curveCanvas') !== -1) return context;
+  }
+  return curveContext;
+};
+const beatXs = () => latestCurveContext().drawn.filter((item) => /^♪/.test(item.text)).map((item) => item.x);
+const beatXsBeforeSync = beatXs();
+const mainZoomIn = findHost(tree, (host) => host.props && host.props.title === 'zoomIn' && typeof host.props.onClick === 'function');
+const mainZoomOut = findHost(tree, (host) => host.props && host.props.title === 'zoomOut' && typeof host.props.onClick === 'function');
+assert.ok(mainZoomIn && mainZoomOut, 'main timeline zoom buttons missing');
+mainZoomIn.props.onClick({ preventDefault() {}, stopPropagation() {}, target: mainZoomIn });
 tree = await settle();
-await new Promise((resolve) => setTimeout(resolve, 5));
+const beatXsAfterZoom = beatXs();
+assert.notDeepEqual(beatXsAfterZoom, beatXsBeforeSync, 'curve panel did not follow the main timeline zoom');
+mainZoomOut.props.onClick({ preventDefault() {}, stopPropagation() {}, target: mainZoomOut });
+tree = await settle();
+const beatXsAfterRestore = beatXs();
+assert.equal(beatXsAfterRestore.length, beatXsBeforeSync.length, 'curve panel beat label count changed after restoring zoom');
+for (let index = 0; index < beatXsAfterRestore.length; index += 1) {
+  assert.ok(Math.abs(beatXsAfterRestore[index] - beatXsBeforeSync[index]) < 0.51, 'curve panel did not restore its aligned beat grid');
+}
+// Scrolling the curve panel's plot must scroll the main timeline (and the
+// panel follows it), so the two views never drift apart horizontally.
+const scrollCurvePanel = (deltaX) => {
+  const host = curveCanvasHost();
+  assert.ok(host, 'curve canvas disappeared before the horizontal scroll check');
+  host.props.onWheel({
+    clientX: 320,
+    clientY: 220,
+    deltaX,
+    deltaY: 0,
+    shiftKey: false,
+    preventDefault() {},
+    stopPropagation() {},
+  });
+};
+const beatXsBeforeScroll = beatXs();
+scrollCurvePanel(80);
+tree = await settle();
+const beatXsAfterScroll = beatXs();
+assert.notDeepEqual(beatXsAfterScroll, beatXsBeforeScroll, 'scrolling the curve panel did not move the shared time view');
+scrollCurvePanel(-80);
+tree = await settle();
+const beatXsAfterScrollBack = beatXs();
+for (let index = 0; index < beatXsAfterScrollBack.length; index += 1) {
+  assert.ok(Math.abs(beatXsAfterScrollBack[index] - beatXsBeforeScroll[index]) < 0.51, 'curve panel did not restore its x view after scrolling back');
+}
+const dialogText = flattenText(tree, []).join(' ');
+assert.ok(dialogText.includes('curveSegments'), 'curve panel segment list missing');
+assert.ok(dialogText.includes('curveNewSegment'), 'curve panel new-segment action missing');
+assert.ok(dialogText.includes('curveFunctionType'), 'curve panel function-type selector missing');
+assert.ok(dialogText.includes('curveParams'), 'curve panel parameter editor missing');
+assert.ok(dialogText.includes('curveBeatGrid'), 'curve panel beat-grid hint missing');
+assert.ok(dialogText.includes('LinearCurve'), 'curve panel did not show the curve type');
+assert.equal(segmentRowHosts().length, 1, 'a plain LinearCurve must open as exactly one segment');
+// The numeric editor must expose the LinearCurve fields (raw names in the
+// fixture catalog; localized labels in the real catalog).
+assert.ok(dialogText.includes('timeStart') || dialogText.includes('开始时间'), 'curve panel time fields missing');
+assert.ok(dialogText.includes('curveWillConvert'), 'plain curves must advertise the conversion policy');
+const deleteSegmentButton = findHost(tree, (host) => host.props && host.props.title === 'curveDeleteSegment');
+assert.ok(deleteSegmentButton, 'curve panel delete-segment button missing');
+assert.equal(deleteSegmentButton.props.disabled, true, 'the only segment must not be deletable');
 
+// 3. Apply without edits: one edit op must be queued to the Host.
+const editCallsBefore = calls.filter((url) => url.indexOf('/plugins/gorge-chart/edit') !== -1).length;
+const firstApplied = await applyLastCurve(curveApplyButton);
 const editCallsAfter = calls.filter((url) => url.indexOf('/plugins/gorge-chart/edit') !== -1).length;
 assert.ok(editCallsAfter > editCallsBefore, 'applying the curve did not POST an edit');
+assert.ok(firstApplied && Array.isArray(firstApplied.ops), 'curve apply did not emit an op batch');
+assert.ok(!flattenHosts(tree, []).some((host) => hasClassToken(host, 'dgc-curveLayer')), 'curve panel did not close after apply');
+
+// 4. Changing the type of a single synthetic segment keeps the plain type.
+//    (Fixture mode only: this uses the holdLine curve geometry.)
+if (!isRealMode) {
+  const curveFallback = [-1, 1];
+  const curveTestPlotWidth = curveApi.curveLayout(800, 420, { x0: 0, x1: 1, y0: -1, y1: 1 }).plotW;
+  const curveTestMainView = { t0: 0, pps: 46 };
+  const fixtureHold = PROJECT.staffs[0].periods[0].elements.find((element) => element.type === 'Dremu.DremuHold');
+  const alignedCurveView = () =>
+    curveApi.curveAlignedView(fixtureHold.start, curveTestMainView, curveTestPlotWidth);
+  const geometryForValue = (value) => {
+    const model = curveApi.readCurveDraft(value, { fallbackRange: curveFallback });
+    const nextView = alignedCurveView() || curveApi.curveInitialView(model, { bpm: 120, offset: 0 }, curveFallback);
+    return curveApi.curveLayout(800, 420, { x0: nextView.x0, x1: nextView.x1, y0: -1, y1: 1 });
+  };
+  const holdLineValue = fixtureHold.fields.holdLine;
+  const baseDraft = curveApi.readCurveDraft(holdLineValue, { fallbackRange: curveFallback });
+  const baseView = alignedCurveView() || curveApi.curveInitialView(baseDraft, { bpm: 120, offset: 0 }, curveFallback);
+  const baseYRange = curveApi.curveValueRange(baseDraft, baseView);
+  const baseGeometry = curveApi.curveLayout(800, 420, { x0: baseView.x0, x1: baseView.x1, y0: baseYRange[0], y1: baseYRange[1] });
+
+  // 4a. Dragging a per-type parameter handle edits the plain curve in place.
+  curveApplyButton = await openCurvePanel();
+  const paramCanvas = curveCanvasHost();
+  paramCanvas.props.onPointerDown({
+    clientX: baseGeometry.toX(2),
+    clientY: baseGeometry.toY(1),
+    pointerId: 21,
+    button: 0,
+    preventDefault() {},
+    stopPropagation() {},
+    currentTarget: paramCanvas,
+  });
+  paramCanvas.props.onPointerMove({
+    clientX: baseGeometry.toX(2),
+    clientY: baseGeometry.toY(0.5),
+    pointerId: 21,
+    preventDefault() {},
+    stopPropagation() {},
+    currentTarget: paramCanvas,
+  });
+  paramCanvas.props.onPointerUp({
+    clientX: baseGeometry.toX(2),
+    clientY: baseGeometry.toY(0.5),
+    pointerId: 21,
+    preventDefault() {},
+    stopPropagation() {},
+    currentTarget: paramCanvas,
+  });
+  tree = await settle();
+  const paramApplied = await applyLastCurve(findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  }));
+  const paramOp = paramApplied.ops.find((op) => op.op === 'patch');
+  assert.ok(paramOp, 'parameter drag did not emit a patch op');
+  assert.equal(paramOp.value.type, 'GorgeFramework.LinearCurve', 'a parameter drag must not convert the curve');
+  assert.ok(Math.abs(paramOp.value.fields.valueEnd - 0.5) < 1e-6, 'parameter drag did not update valueEnd: ' + paramOp.value.fields.valueEnd);
+  assert.equal(paramOp.value.fields.valueStart, 0);
+
+  // 4a-bis. Every function type renders, paints and exposes an editor without
+  //        throwing; cancel discards the draft.
+  curveApplyButton = await openCurvePanel();
+  const allTypeSelect = findHost(tree, (host) => {
+    return host.tagName === 'SELECT' && host.props && host.props.value === 'LinearCurve' && typeof host.props.onChange === 'function';
+  });
+  assert.ok(allTypeSelect, 'function-type selector missing for the all-types pass');
+  for (const type of ['ConstantFunctionCurve', 'LinearFunctionCurve', 'LinearCurve', 'CubicHermiteSpline', 'PeriodicFunctionCurve', 'AxialSymmetricFunctionCurve', 'AdditionFunctionCurve', 'CompositeFunctionCurve']) {
+    allTypeSelect.props.onChange({ target: { value: type } });
+    tree = await settle();
+    assert.ok(flattenText(tree, []).join(' ').includes('curveParams'), 'type editor missing after switching to ' + type);
+  }
+  const resetCurve = findHost(tree, (host) => host.props && host.props.title === 'reset' && typeof host.props.onClick === 'function');
+  assert.ok(resetCurve, 'curve panel reset button missing');
+  resetCurve.props.onClick({ preventDefault() {}, stopPropagation() {}, target: resetCurve });
+  tree = await settle();
+  assert.ok(
+    findHost(tree, (host) => host.tagName === 'SELECT' && host.props && host.props.value === 'LinearCurve'),
+    'reset did not restore the original LinearCurve segment',
+  );
+  const cancelCurve = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'cancel';
+  });
+  assert.ok(cancelCurve, 'curve panel cancel button missing');
+  cancelCurve.props.onClick({ preventDefault() {}, stopPropagation() {}, target: cancelCurve });
+  tree = await settle();
+  assert.ok(!flattenHosts(tree, []).some((host) => hasClassToken(host, 'dgc-curveLayer')), 'cancel did not close the curve panel');
+
+  // 4b. Changing the type of a single synthetic segment keeps the plain type.
+  curveApplyButton = await openCurvePanel();
+  const typeSelect = findHost(tree, (host) => {
+    return host.tagName === 'SELECT' && host.props && host.props.value === 'LinearCurve' && typeof host.props.onChange === 'function';
+  });
+  assert.ok(typeSelect, 'function-type selector for the LinearCurve segment missing');
+  typeSelect.props.onChange({ target: { value: 'ConstantFunctionCurve' } });
+  tree = await settle();
+  const retypedApplied = await applyLastCurve(findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  }));
+  const retypedOp = retypedApplied.ops.find((op) => op.op === 'patch');
+  assert.ok(retypedOp, 'type change did not emit a patch op');
+  assert.deepEqual(retypedOp.path, ['holdLine']);
+  assert.equal(retypedOp.value.type, 'GorgeFramework.ConstantFunctionCurve', 'a single-segment type change must not wrap in piecewise');
+  assert.equal(retypedOp.value.fields.value, 0);
+
+  // 5. Dragging a segment boundary changes its time and converts a plain curve.
+  const typedGeometry = geometryForValue(retypedOp.value);
+  curveApplyButton = await openCurvePanel();
+  const canvas2 = curveCanvasHost();
+  const typedBandY = typedGeometry.bandTop + typedGeometry.bandH / 2;
+  canvas2.props.onPointerDown({
+    clientX: typedGeometry.toX(1),
+    clientY: typedBandY,
+    pointerId: 11,
+    button: 0,
+    preventDefault() {},
+    stopPropagation() {},
+    currentTarget: canvas2,
+  });
+  canvas2.props.onPointerMove({
+    clientX: typedGeometry.toX(1.5),
+    clientY: typedBandY,
+    pointerId: 11,
+    preventDefault() {},
+    stopPropagation() {},
+    currentTarget: canvas2,
+  });
+  canvas2.props.onPointerUp({
+    clientX: typedGeometry.toX(1.5),
+    clientY: typedBandY,
+    pointerId: 11,
+    preventDefault() {},
+    stopPropagation() {},
+    currentTarget: canvas2,
+  });
+  tree = await settle();
+  const draggedApplied = await applyLastCurve(findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  }));
+  const draggedOp = draggedApplied.ops.find((op) => op.op === 'patch');
+  assert.ok(draggedOp, 'boundary drag did not emit a patch op');
+  assert.equal(draggedOp.value.type, 'GorgeFramework.PiecewiseFunctionCurve', 'boundary drag on a plain curve must convert it');
+  const draggedPieces = draggedOp.value.fields.functionPieces.items;
+  assert.equal(draggedPieces.length, 1);
+  assert.ok(Math.abs(draggedPieces[0].fields.endX - 1.5) < 1e-6, 'boundary drag did not update the segment end: ' + draggedPieces[0].fields.endX);
+  assert.ok(Math.abs(draggedPieces[0].fields.startX + 1) < 1e-6, 'boundary drag changed the untouched start');
+
+  // 6. Right-click creates a second segment with a chosen function type.
+  const draggedGeometry = geometryForValue(draggedOp.value);
+  curveApplyButton = await openCurvePanel();
+  const canvas3 = curveCanvasHost();
+  canvas3.props.onContextMenu({
+    clientX: draggedGeometry.toX(0.25),
+    clientY: draggedGeometry.plotTop + draggedGeometry.plotH / 2,
+    preventDefault() {},
+    stopPropagation() {},
+    target: canvas3,
+  });
+  tree = await settle();
+  const menuText = flattenText(tree, []).join(' ');
+  assert.ok(menuText.includes('curveNewSegment'), 'right-click menu has no new-segment item');
+  assert.ok(menuText.includes('curveChangeType'), 'right-click menu has no change-type item');
+  assert.ok(menuText.includes('curveDeleteSegment'), 'right-click menu has no delete item');
+  const newItem = findHost(tree, (host) => {
+    if (!host.props || host.props.role !== 'menuitem' || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').includes('curveNewSegment');
+  });
+  assert.ok(newItem, 'new-segment menu item missing');
+  newItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: newItem });
+  tree = await settle();
+  const typeItem = findHost(tree, (host) => {
+    if (!host.props || host.props.role !== 'menuitemradio' || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').includes('ConstantFunctionCurve');
+  });
+  assert.ok(typeItem, 'the new-segment type list has no ConstantFunctionCurve item');
+  typeItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: typeItem });
+  tree = await settle();
+  assert.equal(segmentRowHosts().length, 2, 'right-click did not create a second segment');
+  const splitApplied = await applyLastCurve(findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  }));
+  const splitOp = splitApplied.ops.find((op) => op.op === 'patch');
+  assert.ok(splitOp, 'segment creation did not emit a patch op');
+  assert.deepEqual(splitOp.path, ['holdLine']);
+  assert.equal(splitOp.value.type, 'GorgeFramework.PiecewiseFunctionCurve');
+  const splitPieces = splitOp.value.fields.functionPieces.items;
+  assert.equal(splitPieces.length, 2);
+  assert.equal(splitPieces[0].fields.endX, splitPieces[1].fields.startX, 'created pieces must share their boundary');
+  assert.ok(Math.abs(splitPieces[0].fields.endX - 0.25) < 1e-6, 'right-click split did not land on the snapped time: ' + splitPieces[0].fields.endX);
+  assert.equal(curveApi.curveTypeOf(splitPieces[1].fields.functionCurve), 'ConstantFunctionCurve');
+
+  // 7. Right-click -> change type on an existing segment.
+  const splitGeometry = geometryForValue(splitOp.value);
+  curveApplyButton = await openCurvePanel();
+  const canvas4 = curveCanvasHost();
+  canvas4.props.onContextMenu({
+    clientX: splitGeometry.toX(0.75),
+    clientY: splitGeometry.plotTop + splitGeometry.plotH / 2,
+    preventDefault() {},
+    stopPropagation() {},
+    target: canvas4,
+  });
+  tree = await settle();
+  const changeItem = findHost(tree, (host) => {
+    if (!host.props || host.props.role !== 'menuitem' || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').includes('curveChangeType');
+  });
+  assert.ok(changeItem, 'change-type menu item missing');
+  changeItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: changeItem });
+  tree = await settle();
+  const linearItem = findHost(tree, (host) => {
+    if (!host.props || host.props.role !== 'menuitemradio' || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'LinearCurve';
+  });
+  assert.ok(linearItem, 'change-type list has no LinearCurve item');
+  linearItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: linearItem });
+  tree = await settle();
+  const changedApplied = await applyLastCurve(findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  }));
+  const changedOp = changedApplied.ops.find((op) => op.op === 'patch');
+  assert.ok(changedOp, 'menu type change did not emit a patch op');
+  const changedPieces = changedOp.value.fields.functionPieces.items;
+  assert.equal(changedPieces.length, 2);
+  assert.equal(curveApi.curveTypeOf(changedPieces[1].fields.functionCurve), 'LinearCurve');
+  assert.equal(changedPieces[0].fields.endX, changedPieces[1].fields.startX);
+
+  // 8. Right-click -> delete a segment; the remaining segment stays continuous.
+  const changedGeometry = geometryForValue(changedOp.value);
+  curveApplyButton = await openCurvePanel();
+  const canvas5 = curveCanvasHost();
+  canvas5.props.onContextMenu({
+    clientX: changedGeometry.toX(-0.5),
+    clientY: changedGeometry.plotTop + changedGeometry.plotH / 2,
+    preventDefault() {},
+    stopPropagation() {},
+    target: canvas5,
+  });
+  tree = await settle();
+  const deleteItem = findHost(tree, (host) => {
+    if (!host.props || host.props.role !== 'menuitem' || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').includes('curveDeleteSegment');
+  });
+  assert.ok(deleteItem, 'delete menu item missing');
+  assert.ok(!deleteItem.props.disabled, 'delete must be enabled with two segments');
+  deleteItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: deleteItem });
+  tree = await settle();
+  assert.equal(segmentRowHosts().length, 1, 'delete did not remove the segment');
+  const deletedApplied = await applyLastCurve(findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  }));
+  const deletedOp = deletedApplied.ops.find((op) => op.op === 'patch');
+  assert.ok(deletedOp, 'segment delete did not emit a patch op');
+  assert.equal(deletedOp.value.type, 'GorgeFramework.PiecewiseFunctionCurve', 'a piecewise root must stay piecewise after deleting a segment');
+  const deletedPieces = deletedOp.value.fields.functionPieces.items;
+  assert.equal(deletedPieces.length, 1);
+  assert.ok(Math.abs(deletedPieces[0].fields.startX + 1) < 1e-6, 'delete did not transfer the absorbed start');
+  assert.ok(Math.abs(deletedPieces[0].fields.endX - 1.5) < 1e-6, 'delete did not keep the remaining end');
+
+  // 9. Right-click outside the covered range appends an adjacent segment.
+  const deletedGeometry = geometryForValue(deletedOp.value);
+  curveApplyButton = await openCurvePanel();
+  const canvas6 = curveCanvasHost();
+  canvas6.props.onContextMenu({
+    clientX: deletedGeometry.toX(1.75),
+    clientY: deletedGeometry.plotTop + deletedGeometry.plotH / 2,
+    preventDefault() {},
+    stopPropagation() {},
+    target: canvas6,
+  });
+  tree = await settle();
+  const outsideText = flattenText(tree, []).join(' ');
+  assert.ok(outsideText.includes('curveNewSegmentAt'), 'outside right-click must offer an adjacent new segment');
+  const outsideNewItem = findHost(tree, (host) => {
+    if (!host.props || host.props.role !== 'menuitem' || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').includes('curveNewSegment');
+  });
+  assert.ok(outsideNewItem, 'outside new-segment item missing');
+  outsideNewItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: outsideNewItem });
+  tree = await settle();
+  const outsideTypeItem = findHost(tree, (host) => {
+    if (!host.props || host.props.role !== 'menuitemradio' || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'ConstantFunctionCurve';
+  });
+  assert.ok(outsideTypeItem, 'outside type list has no ConstantFunctionCurve item');
+  outsideTypeItem.props.onClick({ preventDefault() {}, stopPropagation() {}, target: outsideTypeItem });
+  tree = await settle();
+  const outsideApplied = await applyLastCurve(findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  }));
+  const outsideOp = outsideApplied.ops.find((op) => op.op === 'patch');
+  assert.ok(outsideOp, 'outside segment creation did not emit a patch op');
+  const outsidePieces = outsideOp.value.fields.functionPieces.items;
+  assert.equal(outsidePieces.length, 2);
+  assert.equal(outsidePieces[0].fields.endX, outsidePieces[1].fields.startX);
+  assert.ok(Math.abs(outsidePieces[1].fields.endX - 1.75) < 1e-6, 'outside segment did not reach the clicked time');
+}
+
+// 5a. Optional schema fields are switched on/off with checkboxes. Checking a
+// missing field materialises a sensible default; unchecking removes the key
+// again (a nested field disappears from its parent object, and a top-level
+// field is removed through a whole-fields patch).
+const colorToggle = findOptionalToggle(tree, 'color');
+assert.ok(colorToggle, 'optional colour checkbox missing from the inspector');
+if (isRealMode) {
+  assert.equal(typeof colorToggle.props.checked, 'boolean', 'real optional colour checkbox has no state');
+  // The real lane shows the same nested optional field the screenshot asks
+  // for: VariableFloat.variationCurve gets a checkbox in its object editor.
+  const laneRow = findClickableByText(tree, 'DremuMainLane');
+  assert.ok(laneRow, 'real lane row not found');
+  laneRow.props.onClick({ target: laneRow, stopPropagation() {}, preventDefault() {}, shiftKey: false, metaKey: false, ctrlKey: false });
+  tree = await settle();
+  const realVariationToggle = findOptionalToggle(tree, 'variationCurve');
+  assert.ok(realVariationToggle, 'real lane variationCurve checkbox missing');
+  assert.equal(typeof realVariationToggle.props.checked, 'boolean', 'real variationCurve checkbox has no state');
+} else {
+  assert.equal(colorToggle.props.checked, false, 'the fixture hold should start without a colour');
+  colorToggle.props.onChange({ target: { checked: true } });
+  tree = await settle();
+  const colorBatch = editBodies[editBodies.length - 1];
+  const colorOp = colorBatch && colorBatch.ops && colorBatch.ops.find((op) => op.op === 'patch');
+  assert.ok(colorOp, 'checking the optional colour did not patch the element');
+  assert.equal(colorOp.path[0], 'color', 'optional colour patch path');
+  assert.equal(colorOp.value.type, 'GorgeFramework.LerpColorCurve', 'optional colour default type');
+  assert.ok(
+    colorOp.value.fields && colorOp.value.fields.colorPoints && colorOp.value.fields.colorPoints.items.length === 1,
+    'optional colour default should contain one colour point',
+  );
+  const checkedColorToggle = findOptionalToggle(tree, 'color');
+  assert.equal(checkedColorToggle.props.checked, true, 'optional colour checkbox did not turn on');
+  checkedColorToggle.props.onChange({ target: { checked: false } });
+  tree = await settle();
+  const removeColorBatch = editBodies[editBodies.length - 1];
+  const removeColorOp = removeColorBatch && removeColorBatch.ops && removeColorBatch.ops.find((op) => op.op === 'patch');
+  assert.ok(removeColorOp, 'unchecking the optional colour did not patch the element');
+  assert.equal(removeColorOp.path.length, 0, 'removing a top-level optional field should replace the fields map');
+  assert.ok(!Object.prototype.hasOwnProperty.call(removeColorOp.value, 'color'), 'optional colour was not removed');
+  const uncheckedColorToggle = findOptionalToggle(tree, 'color');
+  assert.equal(uncheckedColorToggle.props.checked, false, 'optional colour checkbox did not turn off');
+
+  // Nested optional field: VariableFloat.variationCurve on a tap's position.
+  const tapRow = findClickableByText(tree, 'DremuTap');
+  assert.ok(tapRow, 'DremuTap row not found');
+  tapRow.props.onClick({ target: tapRow, stopPropagation() {}, preventDefault() {}, shiftKey: false, metaKey: false, ctrlKey: false });
+  tree = await settle();
+  assert.ok(
+    findHost(
+      tree,
+      (host) =>
+        hasClassToken(host, 'dgc-field') &&
+        host.props &&
+        host.props.style &&
+        host.props.style.gridTemplateColumns === '72px minmax(0,1fr)',
+    ),
+    'nested object rows should use the compact 72px label column so their inputs stay usable',
+  );
+  const variationToggle = findOptionalToggle(tree, 'variationCurve');
+  assert.ok(variationToggle, 'nested variationCurve checkbox missing');
+  assert.equal(variationToggle.props.checked, false, 'the tap variationCurve should start unused');
+  variationToggle.props.onChange({ target: { checked: true } });
+  tree = await settle();
+  const variationBatch = editBodies[editBodies.length - 1];
+  const variationOp = variationBatch && variationBatch.ops && variationBatch.ops.find((op) => op.op === 'patch');
+  assert.ok(variationOp, 'checking the nested variationCurve did not patch the element');
+  assert.equal(variationOp.path[0], 'position', 'nested variationCurve patch path');
+  const variationValue = variationOp.value.fields.variationCurve;
+  assert.equal(variationValue.type, 'GorgeFramework.LinearCurve', 'variationCurve default type');
+  assert.equal(variationValue.fields.valueStart, 0, 'variationCurve should start at zero');
+  assert.equal(variationValue.fields.valueEnd, 0, 'variationCurve should stay flat at zero');
+  assert.equal(variationOp.value.fields.baseValue, -1, 'adding variationCurve must preserve baseValue');
+  const checkedVariationToggle = findOptionalToggle(tree, 'variationCurve');
+  assert.equal(checkedVariationToggle.props.checked, true, 'nested variationCurve checkbox did not turn on');
+  const nestedCurveButton = findHost(
+    tree,
+    (host) => host.props && host.props.title === 'curveEditor' && typeof host.props.onClick === 'function',
+  );
+  assert.ok(nestedCurveButton, 'nested variationCurve has no curve-editor button');
+  nestedCurveButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: nestedCurveButton });
+  tree = await settle();
+  // Change valueEnd in the sidebar: the nested apply must persist the value,
+  // not a stray property beside the typed object's `fields` map.
+  const valueEndRow = findHost(
+    tree,
+    (host) =>
+      hasClassToken(host, 'dgc-field') &&
+      flattenText(host.rendered, []).join(' ').indexOf('valueEnd') !== -1,
+  );
+  assert.ok(valueEndRow, 'curve panel has no valueEnd row');
+  const valueEndInput = flattenHosts(valueEndRow.rendered, []).find((host) => host.tagName === 'INPUT');
+  assert.ok(valueEndInput, 'curve panel valueEnd input missing');
+  valueEndInput.props.onChange({ target: { value: '0.5' } });
+  valueEndInput.props.onBlur({ target: { value: '0.5' }, currentTarget: valueEndInput });
+  tree = await settle();
+  const nestedApplyButton = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  });
+  const nestedApplyBatch = await applyLastCurve(nestedApplyButton);
+  const nestedApplyOp = nestedApplyBatch && nestedApplyBatch.ops && nestedApplyBatch.ops.find((op) => op.op === 'patch');
+  assert.ok(nestedApplyOp, 'applying a nested curve did not patch the element');
+  assert.deepEqual(
+    nestedApplyOp.path,
+    ['position', 'fields', 'variationCurve'],
+    'nested curve apply must patch its exact fields path',
+  );
+  assert.equal(nestedApplyOp.value.type, 'GorgeFramework.LinearCurve', 'nested curve apply value type');
+  assert.equal(nestedApplyOp.value.fields.valueEnd, 0.5, 'nested curve edit was not in the patch value');
+  const afterNestedApplyToggle = findOptionalToggle(tree, 'variationCurve');
+  assert.equal(afterNestedApplyToggle.props.checked, true, 'nested variationCurve vanished after its panel applied');
+  // Reopen the panel: it must read the edited value from the parent object.
+  const reopenCurveButton = findHost(
+    tree,
+    (host) => host.props && host.props.title === 'curveEditor' && typeof host.props.onClick === 'function',
+  );
+  assert.ok(reopenCurveButton, 'nested curve button missing after apply');
+  reopenCurveButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: reopenCurveButton });
+  tree = await settle();
+  const reopenedEndRow = findHost(
+    tree,
+    (host) =>
+      hasClassToken(host, 'dgc-field') &&
+      flattenText(host.rendered, []).join(' ').indexOf('valueEnd') !== -1,
+  );
+  assert.ok(reopenedEndRow, 'reopened curve panel has no valueEnd row');
+  const reopenedEndInput = flattenHosts(reopenedEndRow.rendered, []).find((host) => host.tagName === 'INPUT');
+  assert.ok(reopenedEndInput, 'reopened curve panel valueEnd input missing');
+  assert.ok(Math.abs(Number(reopenedEndInput.props.value) - 0.5) < 1e-9, 'reopened curve lost the applied value');
+  const cancelReopenedCurve = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'cancel';
+  });
+  assert.ok(cancelReopenedCurve, 'reopened curve panel has no cancel button');
+  cancelReopenedCurve.props.onClick({ preventDefault() {}, stopPropagation() {}, target: cancelReopenedCurve });
+  tree = await settle();
+  const afterReopenToggle = findOptionalToggle(tree, 'variationCurve');
+  assert.equal(afterReopenToggle.props.checked, true, 'variationCurve checkbox changed after reopen/cancel');
+  afterReopenToggle.props.onChange({ target: { checked: false } });
+  tree = await settle();
+  const removeVariationBatch = editBodies[editBodies.length - 1];
+  const removeVariationOp = removeVariationBatch && removeVariationBatch.ops && removeVariationBatch.ops.find((op) => op.op === 'patch');
+  assert.ok(removeVariationOp, 'unchecking the nested variationCurve did not patch the element');
+  assert.equal(removeVariationOp.path[0], 'position', 'nested variationCurve removal path');
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(removeVariationOp.value.fields, 'variationCurve'),
+    'nested variationCurve was not removed',
+  );
+  assert.equal(removeVariationOp.value.fields.baseValue, -1, 'removing variationCurve must preserve baseValue');
+  assert.equal(findOptionalToggle(tree, 'variationCurve').props.checked, false, 'nested variationCurve checkbox did not turn off');
+  // Curves inside arrays (laneLines and friends) are editable too: the item
+  // card is not collapsed and its curve button patches the array item path.
+  const arrayCurveButton = findHost(
+    tree,
+    (host) => host.props && host.props.title === 'curveEditor' && typeof host.props.onClick === 'function',
+  );
+  assert.ok(arrayCurveButton, 'curve inside an array has no curve button');
+  arrayCurveButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: arrayCurveButton });
+  tree = await settle();
+  const arrayApplyButton = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  });
+  const arrayApplyBatch = await applyLastCurve(arrayApplyButton);
+  const arrayApplyOp = arrayApplyBatch && arrayApplyBatch.ops && arrayApplyBatch.ops.find((op) => op.op === 'patch');
+  assert.ok(arrayApplyOp, 'array curve apply did not patch the element');
+  assert.deepEqual(arrayApplyOp.path, ['curves', 'items', 0], 'array curve apply must patch the item path');
+  assert.equal(arrayApplyOp.value.type, 'GorgeFramework.LinearCurve', 'array curve apply value type');
+}
 
 // (Undo/redo are exercised by the timeline drag below, through the real buttons.)
 
@@ -2113,7 +3010,9 @@ console.log(
 console.log('  canvas text layout: ' + canvasTextRuns + ' runs, no overlap, nothing outside the gutter column');
 console.log('  slots: sidebar.panellist#gorge-chart + main#gorge-chart');
 console.log('  verified: page chrome, project/lane/element data, timeline paint, element selection,');
-console.log('            inspector fields, curve dialog (plot canvas + numeric tree), apply/undo/save round trips,');
+console.log('            inspector fields, docked curve panel (beat grid + segments + type/parameter editors),');
+console.log('            curve Apply / right-click segment creation / type change / delete / boundary drag,');
+console.log('            apply/undo/save round trips,');
 console.log('            note drag -> patch(hitTime), undo -> inverse patch, redo, tap placement -> add op,');
 console.log('            addStaff dialog -> addStaff op (chart + storyboard), the element palette -> add op,');
 console.log('            the staff right-click menu -> setStaffName / removeStaff(deleteFile) ops,');

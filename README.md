@@ -6,9 +6,9 @@ read, edit, and generate the same chart.
 
 Editing logic and layout follow [rpe-next](https://github.com/kclg-YSJ/rpe-next)
 (Re:PhiEdit Next, a Phigros chart editor): a horizontal time axis with a snapping
-beat grid, direct manipulation, an inspector with per-field editors and a curve
-editor, undo/redo, and audio playback. The chart format is the Gorge framework
-declarative `.g` format used by the Dremu chart projects on this machine
+beat grid, direct manipulation, an inspector with per-field editors and a docked,
+beat-aligned curve panel, undo/redo, and audio playback. The chart format is the
+Gorge framework declarative `.g` format used by the Dremu chart projects on this machine
 (`~/Music/DremuTest`, `~/Music/Chart/**`).
 
 > 界面语言：中文（可在插件配置里切换到 English）。
@@ -61,10 +61,47 @@ declarative `.g` format used by the Dremu chart projects on this machine
   (numbers, strings, booleans, enums, `VariableFloat`, `Vector2`, `ColorArgb`,
   function curves, arrays of `FunctionPiece`, and a raw "other fields" section
   for anything the catalog does not describe).
-* **Curve editor** — plots `LinearCurve`, `CubicHermiteSpline`,
-  `ConstantFunctionCurve`, `LinearFunctionCurve`, `PiecewiseFunctionCurve`,
-  `VariableFloat` variation curves …; drag the control points on the plot or type
-  the numbers on the side; one Apply = one undo step.
+* **Nested values** — object cards inside the inspector/curve sidebar use a
+  compact 72px label column (the outer element rows stay 104px) so a `Vector2`
+  or `ColorArgb` nested two or three levels deep still has usable number/colour
+  inputs instead of being squeezed to a sliver.
+* **Optional fields** — every optional catalog field has a checkbox: the
+  `variationCurve` of a `VariableFloat` (位置 X/Y, 旋转 Z, draw ranges, …), the
+  `color` / `respondHintColor1/2` of notes and lanes, `LerpColorCurve.colorPoints`
+  and `progressCurve`, and an optional `FunctionPiece.functionCurve`. Checking
+  adds the catalog default (a new curve is a flat zero `LinearCurve`), unchecking
+  removes the field again — nested fields disappear from their parent object and
+  top-level fields from the element's field map, so the `.g` file goes back to
+  the omitted form.
+* **Docked curve panel** — the inspector's curve button opens a full-size
+  segment editor in the center pane (the timeline area, while the header,
+  toolbars, side panes and transport stay reachable). X is the curve's own
+  relative time in seconds; beat ticks and snapping follow the main timeline's
+  BPM/offset and the toolbar's snap division, anchored at the selected element's
+  start time. The panel docks **under the timeline's content** in the lower part
+  of the center pane: the ruler/rows/waveform stay visible above, the curve
+  editor fills the remaining height (the timeline gets its measured content
+  height, capped at 58%, so the editor keeps at least 42%). The x view is
+  **live-synced** with the main timeline: it uses the main timeline's current
+  `t0`/pixels-per-second and the same 148px time gutter, so beat lines line up
+  vertically with the main ruler visible above; scrolling or zooming the main
+  timeline moves the panel, and horizontal wheel/pan/zoom on the panel drives the
+  main timeline, so both stay on the same `t0`/pps. The panel's time labels stay
+  relative to the element; its **fit** button fits the project's timeline (both
+  views), while reset only resets the curve. Curves stored in arrays
+  (`laneLines`, etc.) get the same curve button, not only top-level fields.
+  A plain function curve opens as **one synthetic segment** and keeps
+  its type; adding a second segment or dragging a segment boundary converts it to
+  `PiecewiseFunctionCurve`. Right-click the plot for **新建段 / 修改函数类型 /
+  删除段** (the type is chosen from the function list); segment boundaries can be
+  dragged (they stay shared, so there are no gaps/overlaps), and the selected
+  segment exposes draggable per-type parameters — constant value, `kx+b` handles,
+  `LinearCurve` keys, spline endpoints/tangents, periodic/axial guides and inner
+  curves. The panel is stacked: the plot/ruler/segment band occupy the full-width
+  top, and the **properties** area below holds the segment list, type selector,
+  boundary/flags, complete numeric editor and value-jump warnings (it scrolls if
+  tall). One Apply = one undo step;
+  an untouched Apply writes the original value back unchanged.
 * **Auto BPM** — the inspector's BPM row has a **自动 BPM** button. It derives a
   low-band-weighted spectral-flux onset envelope from the cached spectrogram,
   runs a Goertzel tempogram over 60–200 BPM (harmonic support + a mild tempo
@@ -134,8 +171,10 @@ main panel.
    playhead; the left list updates immediately.
 3. Pick tools in the toolbar (or `V` select, `Q` tap, `W` drag, `E` hold,
    `T` lane), set the snap division, and double-click the timeline to place.
-4. Select something and edit it in the right-hand inspector; curves open their
-   own plot dialog.
+4. Select something and edit it in the right-hand inspector; optional fields
+   (for example a `VariableFloat`'s `variationCurve`) are enabled with their
+   checkbox, and a curve field's curve button opens the docked curve panel in
+   the center pane (apply/cancel returns to the timeline).
 5. `Ctrl/Cmd+S` saves. Autosave is on by default (`autoSave` in the plugin
    config) and debounces to the same atomic writer.
 6. Click **播放预览 / Play preview** in the header: the Autoplay playfield
@@ -270,9 +309,11 @@ node tests/fixtures/review-undo-repro.mjs
 The client harness is a deliberately small React-compatible runtime (function
 components, hooks with real dependency memoisation, refs, host elements) plus the
 browser globals the bundle touches. It asserts the page renders, the timeline
-paints, selecting an element fills the inspector, the curve dialog opens and
-applies, dragging a note emits `patch(hitTime)`, undo emits the inverse patch,
-redo restores it, and placing a Tap emits an `add` op with the row's lane.
+paints, selecting an element fills the inspector, the docked curve panel opens and
+applies, right-click segment creation/type change/delete and boundary drags emit
+the expected piecewise patches, the client curve sampler matches the Host
+`evaluateCurve`, dragging a note emits `patch(hitTime)`, undo emits the inverse
+patch, redo restores it, and placing a Tap emits an `add` op with the row's lane.
 
 ## Verification status
 
@@ -324,6 +365,30 @@ redo restores it, and placing a Tap emits an `add` op with the row's lane.
 * **Hit sound** is the form's `RespondEffect.wav` (played once per hit while
   playing, muted with the song); headless Chrome counted the `Audio.play()`
   calls (`13` hit sounds over 4.5 s of a dense section).
+* **Docked curve panel is covered by the client smoke suite**: the panel renders
+  inside `.dgc-center`; a plain curve shows one synthetic segment and an untouched
+  Apply round-trips the value; right-click + type choice creates a contiguous
+  second segment; the sidebar type selector keeps a single segment's plain type;
+  dragging a boundary changes its time and converts a plain curve; deleting a
+  segment transfers its span to a neighbor; the pure helpers (`__curve`) are
+  asserted against the Host `evaluateCurve` for piecewise open bounds,
+  axial/periodic defaults, addition field names, flat splines and composite
+  evaluation. Both fixture and `GORGE_SMOKE_REAL=1` modes pass.
+* **Optional fields are covered**: checking a missing optional colour adds the
+  catalog default, unchecking it removes the field through a whole-fields patch;
+  checking a tap's `VariableFloat.variationCurve` adds a flat-zero `LinearCurve`,
+  preserves `baseValue`, exposes the curve button, and applying an edit
+  (`valueEnd` 0.5) patches exactly `[position, fields, variationCurve]` and is
+  still 0.5 when the panel is reopened; a real `DremuTest` lane exposes its
+  nested `variationCurve` checkbox too. The suite also asserts that the curve
+  center enters the split layout (`has-curve`), the curve layer is a flow child
+  after the timeline (not an absolute overlay), the timeline content height is
+  passed into `--dgc-timeline-h`, the aligned view puts relative x=0 and x=1 at
+  the main ruler's x positions for a 148px gutter / 46px-per-second view, zooming
+  the main toolbar repaints the panel's beat grid and restoring it returns the
+  grid, scrolling the panel's plot changes the shared view and scrolling back
+  restores it, and a curve inside an array opens with an item path
+  (`['curves','items',0]`).
 * **Editor page** is still exercised structurally by `tests/client-smoke.mjs`;
   refresh the Web UI and open the sidebar glyph to confirm layout/theming.
 
@@ -348,10 +413,19 @@ and dark themes.
   curves are still edited as data and previewed as plots.
 * Only the element fields present in the catalog get friendly labels; other
   fields are editable in the "其它字段" section but shown by their raw names.
+* The curve panel's X axis is the curve's own relative seconds, not absolute
+  chart time. Beat ticks use the selected element's start as the origin, which is
+  exact for note `hitTime` / lane `generateTime` curves but approximate for
+  release-relative curves (a hold's `endDistance` is relative to release time).
+* Segment **time** continuity is enforced (shared boundaries, no gaps/overlaps);
+  **value** jumps are only marked (`!` on the plot + sidebar list), never smoothed
+  automatically. Composite curves are edited numerically (their outer input is
+  the inner output, so there is no direct time handle).
 * `.g.bak` backups are written next to the staff files (once per session per
   file). They are plain copies; the editor does not prune them.
-* The page re-renders on the transport clock while playing (the left list and the
-  inspector are memoised, the timeline paints through its own rAF loop).
+* The page re-renders on the transport clock while playing (the left list, the
+  inspector and the docked curve panel are memoised, the timeline paints through
+  its own rAF loop).
 * A Host refresh (agent edit, reload, conflict) replaces the local document and
   clears the client-side undo stack: the document on disk is the source of truth.
   Audio-period edits refetch the canonical clip metadata after the batch while

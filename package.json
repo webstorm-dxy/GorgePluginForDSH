@@ -2,7 +2,7 @@
   "name": "@local/gorge-chart-studio",
   "version": "0.1.0",
   "private": true,
-  "description": "Dremu 谱面编辑器 — a full-page chart studio for Gorge/Dremu .g chart projects in the DeepSeek Harness Web UI: timeline editing, inspector, curve editors, multi-clip audio periods (乐段), playback, and agent tools.",
+  "description": "Dremu 谱面编辑器 — a full-page chart studio for Gorge/Dremu .g chart projects in the DeepSeek Harness Web UI: timeline editing, inspector, a docked beat-aligned curve panel, multi-clip audio periods (乐段), playback, and agent tools.",
   "type": "module",
   "exports": {
     ".": "./index.js",

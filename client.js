@@ -7,7 +7,7 @@
  *
  * Editing model follows rpe-next (Re:PhiEdit Next): horizontal time axis with a
  * snapping beat grid, multi-select, a property inspector with per-field editors
- * and a curve editor, undo/redo, and audio playback.
+ * and a docked, beat-aligned curve panel, undo/redo, and audio playback.
  *
  * The Host half owns the project (parsing/serializing `.g`, saving to disk,
  * revisions, agent tools). This half mirrors it over
@@ -31,8 +31,8 @@
  *   06 host bridge (HTTP + SSE)   16 open-project dialog
  *   07 audio (waveforms + clips)  17 playback scene
  *   08 UI primitives              18 page assembly
- *   09 generic value editor       19 sidebar panel icon
- *   10 curve editor dialog        20 client plugin entry
+ *   09 generic value editor         19 sidebar panel icon
+ *   10 curve editor panel          20 client plugin entry
  */
 window.__ModuleLoader__.load({
   id: '@local/gorge-chart-studio',
@@ -182,12 +182,55 @@ window.__ModuleLoader__.load({
       field: '字段',
       value: '值',
       addField: '添加字段',
+      fieldUnused: '未使用',
       type: '类型',
       typeUnknown: '未知类型',
       curveEditor: '曲线编辑器',
       curveOf: '曲线：{name}',
       addPoint: '添加控制点',
       removePoint: '删除控制点',
+      curveSegments: '分段',
+      curveSegment: '段',
+      curveSegmentCount: '{count} 段',
+      curveNewSegment: '新建段',
+      curveNewSegmentAt: '在 {time} 新建段',
+      curveChooseType: '选择新段的函数类型',
+      curveChangeType: '修改函数类型',
+      curveDeleteSegment: '删除该段',
+      curveOnlySegment: '至少保留一个段',
+      curveStart: '开始',
+      curveEnd: '结束',
+      curveLength: '长度',
+      curveMakeFinite: '设为有限',
+      curveFunctionType: '函数类型',
+      curveParams: '函数参数',
+      curveWillConvert: '新建段或拖动段边界后会转换为分段函数；段外返回 0。',
+      curveConverted: '分段函数：段外返回 0。',
+      curveValueJump: '段边界数值不连续',
+      curveValueJumpAt: '{time}s 处：左 {left} / 右 {right}',
+      curveNoJump: '段边界数值连续',
+      curveElementOrigin: '元素时间',
+      curveBeatGrid: '节拍刻度对齐主时间线',
+      curveTimeAxis: '时间 / 秒',
+      curveEdited: '已修改',
+      curveOutside: '段外 = 0',
+      curvePanelHint: '拖动段边界调整时间与长度；右键新建、修改类型或删除段；拖动控制点调整函数参数。',
+      curveAddAtPlayhead: '在播放头/段中点新建段',
+      curveFit: '适应视图',
+      curveNoSegments: '暂无分段：右键新建一个段',
+      curveOpenBusy: '请先应用或取消当前曲线编辑',
+      curvePreviewBusy: '曲线编辑中，请先应用或取消',
+      curveLeftClosed: '左闭',
+      curveRightClosed: '右闭',
+      curveCompositeHint: '复合函数的外函数输入是内函数输出，请用数值编辑参数。',
+      curveTypeConstant: '常量',
+      curveTypeLinearFunction: '线性函数 kx+b',
+      curveTypeLinear: '线性关键点',
+      curveTypeCubic: '三次样条',
+      curveTypePeriodic: '周期函数',
+      curveTypeAxial: '轴对称',
+      curveTypeAddition: '相加',
+      curveTypeComposite: '复合',
       preview: '预览',
       numeric: '数值',
       asText: '文本',
@@ -409,12 +452,55 @@ window.__ModuleLoader__.load({
       field: 'Field',
       value: 'Value',
       addField: 'Add field',
+      fieldUnused: 'Not used',
       type: 'Type',
       typeUnknown: 'Unknown type',
       curveEditor: 'Curve editor',
       curveOf: 'Curve: {name}',
       addPoint: 'Add point',
       removePoint: 'Remove point',
+      curveSegments: 'Segments',
+      curveSegment: 'Segment',
+      curveSegmentCount: '{count} segments',
+      curveNewSegment: 'New segment',
+      curveNewSegmentAt: 'New segment at {time}',
+      curveChooseType: 'Choose the new segment function type',
+      curveChangeType: 'Change function type',
+      curveDeleteSegment: 'Delete this segment',
+      curveOnlySegment: 'Keep at least one segment',
+      curveStart: 'Start',
+      curveEnd: 'End',
+      curveLength: 'Length',
+      curveMakeFinite: 'Make finite',
+      curveFunctionType: 'Function type',
+      curveParams: 'Function parameters',
+      curveWillConvert: 'Adding a segment or moving a boundary converts this curve to a piecewise function (0 outside its pieces).',
+      curveConverted: 'Piecewise function: 0 outside its pieces.',
+      curveValueJump: 'Value jump at a segment boundary',
+      curveValueJumpAt: 'at {time}s: left {left} / right {right}',
+      curveNoJump: 'Boundary values are continuous',
+      curveElementOrigin: 'Element time',
+      curveBeatGrid: 'Beat grid follows the main timeline',
+      curveTimeAxis: 'Time / s',
+      curveEdited: 'Modified',
+      curveOutside: 'outside = 0',
+      curvePanelHint: 'Drag segment boundaries to change time/length; right-click to add, retype or delete a segment; drag handles to edit function parameters.',
+      curveAddAtPlayhead: 'New segment at the playhead/midpoint',
+      curveFit: 'Fit view',
+      curveNoSegments: 'No segments yet — right-click to add one',
+      curveOpenBusy: 'Apply or cancel the current curve edit first',
+      curvePreviewBusy: 'Finish the curve edit first',
+      curveLeftClosed: 'Left closed',
+      curveRightClosed: 'Right closed',
+      curveCompositeHint: 'A composite curve feeds the inner result into the outer curve; edit its parameters numerically.',
+      curveTypeConstant: 'Constant',
+      curveTypeLinearFunction: 'Linear function kx+b',
+      curveTypeLinear: 'Linear keys',
+      curveTypeCubic: 'Cubic spline',
+      curveTypePeriodic: 'Periodic',
+      curveTypeAxial: 'Axial symmetric',
+      curveTypeAddition: 'Addition',
+      curveTypeComposite: 'Composite',
       preview: 'Preview',
       numeric: 'Numbers',
       asText: 'Text',
@@ -785,11 +871,14 @@ window.__ModuleLoader__.load({
           const fromY = y1 === null ? 0 : y1;
           const toX = x2 === null ? 1 : x2;
           const toY = y2 === null ? 1 : y2;
-          if (x <= fromX) return fromY;
-          if (x >= toX) return toY;
+          // Host `evaluateCurve` uses strict bounds and treats a degenerate
+          // axis/span as the corresponding endpoint (see dremu-model.js).
+          if (x < fromX) return fromY;
+          if (x > toX) return toY;
           const dx = toX - fromX;
-          if (!(dx > 0)) return fromY;
+          if (dx === 0) return toY;
           const dy = toY - fromY;
+          if (dy === 0) return fromY;
           const clampWeight = (value, fallback) => {
             const weight = Number.isFinite(value) ? value : fallback;
             return Math.max(0, Math.min(1, weight));
@@ -822,10 +911,6 @@ window.__ModuleLoader__.load({
             }
           }
           const tt = 1 - t;
-          const eps = 2.23e-16;
-          if (Math.abs(dy) < 2 * eps) {
-            return fromY + 3 * tt * tt * t * wt1 * tangent1 * dx + 3 * tt * t * t * wt2 * tangent2 * dx;
-          }
           const yp1dy = (tangent1 * dx) / dy;
           const yp2dy = (tangent2 * dx) / dy;
           const y = 3 * tt * tt * t * wt1 * yp1dy + 3 * tt * t * t * (1 - wt2 * yp2dy) + t * t * t;
@@ -840,11 +925,12 @@ window.__ModuleLoader__.load({
             const pieceFields = item.fields || {};
             const startX = valueAsNumber(pieceFields.startX);
             const endX = valueAsNumber(pieceFields.endX);
-            if (startX === null || endX === null) continue;
-            const leftClosed = pieceFields.leftClosed === undefined ? true : pieceFields.leftClosed !== false;
-            const rightClosed = pieceFields.rightClosed === undefined ? true : pieceFields.rightClosed !== false;
-            const afterLeft = leftClosed ? x >= startX : x > startX;
-            const beforeRight = rightClosed ? x <= endX : x < endX;
+            // Host: a missing bound is unbounded; bounds are open unless the
+            // corresponding flag is exactly true.
+            const leftClosed = pieceFields.leftClosed === true;
+            const rightClosed = pieceFields.rightClosed === true;
+            const afterLeft = startX === null ? true : leftClosed ? x >= startX : x > startX;
+            const beforeRight = endX === null ? true : rightClosed ? x <= endX : x < endX;
             if (afterLeft && beforeRight) {
               const inner = sampleCurve(pieceFields.functionCurve, x);
               return inner === null ? 0 : inner;
@@ -855,31 +941,35 @@ window.__ModuleLoader__.load({
         case 'AxialSymmetricFunctionCurve': {
           const inner = fields.functionCurve;
           const axis = num('axis', 0);
-          const keepLeft = fields.keepLeft === undefined ? true : fields.keepLeft !== false;
+          const keepLeft = fields.keepLeft === true;
           const mirrored = keepLeft ? (x <= axis ? x : 2 * axis - x) : x >= axis ? x : 2 * axis - x;
           const value = sampleCurve(inner, mirrored);
           return value === null ? 0 : value;
         }
         case 'PeriodicFunctionCurve': {
           const startX = num('startX', 0);
-          const endX = num('endX', 1);
+          const endX = num('endX', 0);
           const period = endX - startX;
-          const wrapped = period === 0 ? x : ((((x - startX) % period) + period) % period) + startX;
-          const value = sampleCurve(fields.functionCurve, wrapped);
+          if (!(period > 0)) {
+            const value = sampleCurve(fields.functionCurve, x);
+            return value === null ? 0 : value;
+          }
+          let phase = startX + ((((x - startX) % period) + period) % period);
+          if (phase === startX && fields.leftClosed !== true) phase = endX - 1e-9;
+          const value = sampleCurve(fields.functionCurve, phase);
           return value === null ? 0 : value;
         }
         case 'AdditionFunctionCurve': {
-          const first = fields.f1 !== undefined ? fields.f1 : fields.functionCurve1;
-          const second = fields.f2 !== undefined ? fields.f2 : fields.functionCurve2;
+          const first = fields.firstFunctionCurve;
+          const second = fields.secondFunctionCurve;
           const a = sampleCurve(first, x);
           const b = sampleCurve(second, x);
           return (a === null ? 0 : a) + (b === null ? 0 : b);
         }
         case 'CompositeFunctionCurve': {
-          const outer = sampleCurve(fields.outerFunctionCurve, x);
           const inner = sampleCurve(fields.innerFunctionCurve, x);
           const nested = sampleCurve(fields.outerFunctionCurve, inner === null ? 0 : inner);
-          return outer === null && nested === null ? 0 : nested === null ? 0 : nested;
+          return nested === null ? 0 : nested;
         }
         case 'VariableFloat': {
           const base = num('baseValue', 0);
@@ -893,39 +983,38 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Sample a curve into `count` evenly spaced [x, y] pairs across [x0, x1]. */
-    function sampleCurveSeries(value, x0, x1, count) {
-      const points = [];
-      const total = Math.max(2, count || 96);
-      for (let i = 0; i < total; i += 1) {
-        const x = x0 + ((x1 - x0) * i) / (total - 1);
-        const y = sampleCurve(value, x);
-        if (y !== null && Number.isFinite(y)) points.push([x, y]);
-      }
-      return points;
-    }
+    /** Numeric curve types the piecewise segment editor can create/draw. */
+    const CURVE_FN_TYPE_ORDER = [
+      'ConstantFunctionCurve',
+      'LinearFunctionCurve',
+      'LinearCurve',
+      'CubicHermiteSpline',
+      'PeriodicFunctionCurve',
+      'AxialSymmetricFunctionCurve',
+      'AdditionFunctionCurve',
+      'CompositeFunctionCurve',
+    ];
 
-    /** True when the value is a curve the editor can draw. */
-    function isDrawableCurve(value) {
+    /** Locale key for one segment function type (fallback: the bare type name). */
+    const CURVE_FN_TYPE_KEYS = {
+      ConstantFunctionCurve: 'curveTypeConstant',
+      LinearFunctionCurve: 'curveTypeLinearFunction',
+      LinearCurve: 'curveTypeLinear',
+      CubicHermiteSpline: 'curveTypeCubic',
+      PeriodicFunctionCurve: 'curveTypePeriodic',
+      AxialSymmetricFunctionCurve: 'curveTypeAxial',
+      AdditionFunctionCurve: 'curveTypeAddition',
+      CompositeFunctionCurve: 'curveTypeComposite',
+    };
+
+    /** Legacy type spellings accepted by the curve editor. */
+    const CURVE_FN_TYPE_ALIASES = ['ConstantCurve', 'HermiteSpline', 'PiecewiseCurve'];
+
+    /** True when one typed value is a curve the segment editor can edit. */
+    function isCurveEditorValue(value) {
       if (!isTypedValue(value) || value.t !== 'obj') return false;
       const type = stripNamespace(value.type);
-      return (
-        [
-          'ConstantFunctionCurve',
-          'ConstantCurve',
-          'LinearFunctionCurve',
-          'LinearCurve',
-          'CubicHermiteSpline',
-          'HermiteSpline',
-          'PiecewiseFunctionCurve',
-          'PiecewiseCurve',
-          'AxialSymmetricFunctionCurve',
-          'PeriodicFunctionCurve',
-          'AdditionFunctionCurve',
-          'CompositeFunctionCurve',
-          'VariableFloat',
-        ].indexOf(type) !== -1
-      );
+      return CURVE_FN_TYPE_ORDER.indexOf(type) !== -1 || CURVE_FN_TYPE_ALIASES.indexOf(type) !== -1 || type === 'PiecewiseFunctionCurve';
     }
 
     // ========================================================================
@@ -1512,6 +1601,9 @@ window.__ModuleLoader__.load({
       '.dgc-field{display:grid;grid-template-columns:104px minmax(0,1fr);gap:8px;align-items:center;padding:2px 0}',
       '.dgc-fieldLabel{font-size:12px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dgc-fieldBody{display:flex;align-items:center;gap:5px;min-width:0}',
+      '.dgc-fieldControl{flex:1 1 auto;min-width:0}',
+      '.dgc-optionalCheck{width:13px;height:13px;margin:0;flex:0 0 auto;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}',
+      '.dgc-optionalHint{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.dgc-fieldBody .dgc-input{height:24px;font-size:12px}',
       '.dgc-numWrap{position:relative;flex:1 1 auto;min-width:0}',
       '.dgc-tree{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:6px 8px;margin:4px 0 6px;background:var(--dsw-alias-bg-layer-2)}',
@@ -1583,6 +1675,30 @@ window.__ModuleLoader__.load({
       '.dgc-playerLabel{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:rgba(232,238,249,.72);white-space:nowrap}',
       '.dgc-playerLabel .dgc-select{background:rgba(255,255,255,.08);color:#e8eef9;border-color:rgba(255,255,255,.18)}',
       '.dgc-playerCheck{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:rgba(232,238,249,.72);white-space:nowrap}',
+      '.dgc-curveLayer{position:relative;flex:1 1 auto;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);min-height:0;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-center.has-curve .dgc-canvasWrap{flex:0 0 auto;height:var(--dgc-timeline-h,38%);min-height:120px;max-height:58%;border-bottom:1px solid var(--dsw-alias-border-l1)}',
+      '.dgc-curveHead{display:flex;align-items:center;gap:8px;padding:8px 12px;flex:0 0 auto;flex-wrap:wrap;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
+      '.dgc-curveTitle{display:flex;flex-direction:column;min-width:0;margin-right:4px;flex:0 1 auto}',
+      '.dgc-curveTitle strong{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}',
+      '.dgc-curveTitle span{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px}',
+      '.dgc-curveBody{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}',
+      '.dgc-curvePlot{flex:1 1 auto;min-width:0;min-height:120px;position:relative;background:var(--dsw-alias-bg-base)}',
+      '.dgc-curveCanvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:default}',
+      '.dgc-curveSide{flex:0 1 auto;width:100%;min-width:0;min-height:0;max-height:46%;display:flex;flex-direction:column;border-left:none;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
+      '.dgc-curveSideBody{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 12px 18px}',
+      '.dgc-curveSegList{display:flex;flex-direction:column;gap:2px;margin:0 0 6px;max-height:190px;overflow:auto}',
+      '.dgc-curveSeg{display:flex;align-items:center;gap:6px;padding:5px 7px;border-radius:6px;cursor:pointer;border:1px solid transparent;min-width:0}',
+      '.dgc-curveSeg:hover{background:var(--dsw-alias-bg-layer-2)}',
+      '.dgc-curveSeg.is-active{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary) 13%, transparent)}',
+      '.dgc-curveSegColor{width:8px;height:8px;border-radius:2px;flex:0 0 auto}',
+      '.dgc-curveSegLabel{flex:1 1 auto;min-width:0;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.dgc-curveSegMeta{flex:0 1 auto;font-size:10.5px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}',
+      '.dgc-curveWarn{border:1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent);background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 9%, transparent);border-radius:8px;padding:6px 8px;margin:6px 0;font-size:11px;line-height:16px;color:var(--dsw-alias-label-primary)}',
+      '.dgc-curveWarn strong{display:block;font-weight:600;margin-bottom:2px}',
+      '.dgc-curveWarnRow{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
+      '.dgc-curveNote{margin:8px 0 2px;padding:6px 8px;border-radius:7px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
+      '.dgc-curveFoot{display:flex;align-items:center;gap:10px;padding:6px 12px;flex:0 0 auto;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);font-size:11.5px;color:var(--dsw-alias-label-secondary);min-width:0}',
+      '.dgc-curveHint{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
     ].join('\n');
 
     /** Stylesheet element rendered by the page (removed with the page). */
@@ -2874,13 +2990,44 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** Checkbox that switches an optional schema field on or off. */
+    function OptionalFieldToggle(props) {
+      return h('input', {
+        type: 'checkbox',
+        className: 'dgc-optionalCheck',
+        checked: props.checked === true,
+        title: props.title,
+        'aria-label': props.title,
+        'data-field': props.name,
+        onChange: (event) => {
+          if (typeof props.onChange === 'function') {
+            props.onChange(!!(event && event.target && event.target.checked));
+          }
+        },
+      });
+    }
+
     /** Label + control row used by the inspector. */
     function FieldRow(props) {
+      const optional = props.optional || null;
+      const bodyStyle = props.wide ? { display: 'block' } : undefined;
       return h(
         'div',
         { className: 'dgc-field' },
         h('span', { className: 'dgc-fieldLabel', title: props.title || props.label }, props.label),
-        h('span', { className: 'dgc-fieldBody', style: props.wide ? { display: 'block' } : undefined }, props.children),
+        optional
+          ? h(
+              'span',
+              { className: 'dgc-fieldBody', style: bodyStyle },
+              h(OptionalFieldToggle, {
+                name: optional.name,
+                checked: optional.checked,
+                title: optional.title || props.title || props.label,
+                onChange: optional.onChange,
+              }),
+              h('span', { className: 'dgc-fieldControl' }, props.children),
+            )
+          : h('span', { className: 'dgc-fieldBody', style: bodyStyle }, props.children),
       );
     }
 
@@ -3123,7 +3270,10 @@ window.__ModuleLoader__.load({
                 title: t('addPoint'),
                 disabled,
                 onClick: () => {
-                  const blank = itemSchema && itemSchema.defaultValue !== undefined ? deepClone(itemSchema.defaultValue) : makeBlankValue(itemSchema);
+                  const blank =
+                    itemSchema && itemSchema.defaultValue !== undefined
+                      ? deepClone(itemSchema.defaultValue)
+                      : makeBlankValue(itemSchema, value.type);
                   onChange({ t: 'arr', type: value.type, items: items.concat([blank]) });
                 },
               }),
@@ -3139,6 +3289,9 @@ window.__ModuleLoader__.load({
                   t,
                   depth: level + 1,
                   disabled,
+                  path: (Array.isArray(props.path) ? props.path : []).concat('items', index),
+                  collapsible: !isCurveEditorValue(item),
+                  onEditCurve: props.onEditCurve,
                   onChange: (next) => {
                     const copy = items.slice();
                     copy[index] = next;
@@ -3164,46 +3317,79 @@ window.__ModuleLoader__.load({
         const fields = value.fields || {};
         const known = schema && schema.fields ? Object.keys(schema.fields) : [];
         const names = Object.keys(fields);
-        const ordered = known.filter((name) => names.indexOf(name) !== -1).concat(names.filter((name) => known.indexOf(name) === -1));
+        const optionalMissing = known.filter(
+          (name) =>
+            names.indexOf(name) === -1 &&
+            schema.fields[name] &&
+            schema.fields[name].optional === true,
+        );
+        const ordered = known
+          .filter((name) => names.indexOf(name) !== -1 || optionalMissing.indexOf(name) !== -1)
+          .concat(names.filter((name) => known.indexOf(name) === -1));
+        const fieldCount = names.length;
         const collapsed = level > 0 && props.collapsible !== false;
         const header = h(
           'div',
           { className: 'dgc-treeHead' },
           h('span', { className: 'dgc-tag' }, stripNamespace(value.type) || 'object'),
-          h('span', { className: 'dgc-listRowSlim' }, String(ordered.length) + ' 字段'),
-          props.onEditCurve
+          h('span', { className: 'dgc-listRowSlim' }, String(fieldCount) + ' 字段'),
+          props.onEditCurve && isCurveEditorValue(value)
             ? h(Button, {
                 variant: 'ghost',
                 icon: 'curve',
                 title: t('curveEditor'),
-                onClick: () => props.onEditCurve(value, onChange),
+                onClick: () => props.onEditCurve(value, onChange, Array.isArray(props.path) ? props.path : []),
               })
             : null,
         );
         const body = ordered.map((name) => {
           const childSchema = fieldSchema(schema, name);
-          const child = fields[name];
-          const rowKey = name;
-          const content = h(ValueEditor, {
-            value: child,
-            schema: childSchema,
-            t,
-            depth: level + 1,
-            disabled,
-            collapsible: false,
-            onEditCurve: props.onEditCurve,
-            onChange: (next) => {
-              const copy = deepClone(value);
-              copy.fields = copy.fields || {};
-              copy.fields[name] = next;
-              onChange(copy);
-            },
-          });
+          const present = names.indexOf(name) !== -1;
+          const child = present ? fields[name] : undefined;
+          const optional = !!(childSchema && childSchema.optional === true);
+          const unused = optional && (child === null || child === undefined);
+          const content = unused
+            ? h('span', { className: 'dgc-optionalHint' }, t('fieldUnused'))
+            : h(ValueEditor, {
+                value: child,
+                schema: childSchema,
+                t,
+                depth: level + 1,
+                disabled,
+                collapsible: false,
+                path: (Array.isArray(props.path) ? props.path : []).concat('fields', name),
+                onEditCurve: props.onEditCurve,
+                onChange: (next) => {
+                  const copy = deepClone(value);
+                  copy.fields = copy.fields || {};
+                  copy.fields[name] = next;
+                  onChange(copy);
+                },
+              });
+          const toggle = optional
+            ? h(OptionalFieldToggle, {
+                name,
+                checked: !unused,
+                title: (childSchema && childSchema.label) || name,
+                onChange: (checked) => {
+                  const copy = deepClone(value);
+                  copy.fields = copy.fields && typeof copy.fields === 'object' ? copy.fields : {};
+                  if (checked) copy.fields[name] = defaultValueForSchema(childSchema);
+                  else delete copy.fields[name];
+                  onChange(copy);
+                },
+              })
+            : null;
           return h(
             'div',
-            { key: rowKey, className: 'dgc-field', style: { gridTemplateColumns: '112px minmax(0,1fr)' } },
+            { key: name, className: 'dgc-field is-nested', style: { gridTemplateColumns: '72px minmax(0,1fr)' } },
             h('span', { className: 'dgc-fieldLabel', title: (childSchema && childSchema.label) || name }, (childSchema && childSchema.label) || name),
-            h('span', { className: 'dgc-fieldBody' }, content),
+            h(
+              'span',
+              { className: 'dgc-fieldBody' },
+              toggle,
+              optional ? h('span', { className: 'dgc-fieldControl' }, content) : content,
+            ),
           );
         });
         if (!collapsed) {
@@ -3213,7 +3399,7 @@ window.__ModuleLoader__.load({
         return h(
           'details',
           { className: 'dgc-tree', open: level <= 1 },
-          h('summary', { className: 'dgc-treeHead', style: { cursor: 'pointer' } }, h(Icon, { name: 'chevron', size: 13 }), h('span', { className: 'dgc-tag' }, stripNamespace(value.type) || 'object'), h('span', { className: 'dgc-listRowSlim' }, String(ordered.length))),
+          h('summary', { className: 'dgc-treeHead', style: { cursor: 'pointer' } }, h(Icon, { name: 'chevron', size: 13 }), h('span', { className: 'dgc-tag' }, stripNamespace(value.type) || 'object'), h('span', { className: 'dgc-listRowSlim' }, String(fieldCount))),
           body,
         );
       }
@@ -3237,12 +3423,76 @@ window.__ModuleLoader__.load({
       return h('span', { className: 'dgc-listRowSlim' }, describeValue(value));
     }
 
+    /** Default value used when an optional field is switched on or a missing
+     * curve field is materialized. Curve fields start flat at zero so a new
+     * variation/hold-line/progress curve does not add an unintended ramp. */
+    function zeroLinearCurveValue() {
+      return {
+        t: 'obj',
+        type: 'GorgeFramework.LinearCurve',
+        fields: { timeStart: 0, valueStart: 0, timeEnd: 1, valueEnd: 0 },
+      };
+    }
+
+    /** Opaque white used for a fresh ColorArgb / colour point. */
+    function defaultColorArgbValue() {
+      return { t: 'obj', type: 'GorgeFramework.ColorArgb', fields: { a: 1, r: 1, g: 1, b: 1 } };
+    }
+
+    /** A LerpColorCurve with a single opaque white stop. */
+    function defaultLerpColorCurveValue() {
+      return {
+        t: 'obj',
+        type: 'GorgeFramework.LerpColorCurve',
+        fields: {
+          colorPoints: { t: 'arr', type: 'GorgeFramework.ColorArgb', items: [defaultColorArgbValue()] },
+        },
+      };
+    }
+
+    /** A usable one-piece default (zero curve, finite closed range). */
+    function defaultFunctionPieceValue() {
+      return {
+        t: 'obj',
+        type: 'GorgeFramework.FunctionPiece',
+        fields: {
+          functionCurve: zeroLinearCurveValue(),
+          startX: 0,
+          endX: 1,
+          leftClosed: true,
+          rightClosed: true,
+        },
+      };
+    }
+
+    /** Build the default fields of a composite value from its descriptors. */
+    function defaultFieldsForSchema(schema) {
+      const fields = {};
+      const descriptors = schema && schema.fields ? schema.fields : null;
+      if (!descriptors) return fields;
+      for (const name of Object.keys(descriptors)) {
+        const descriptor = descriptors[name];
+        if (!descriptor || descriptor.optional === true) continue;
+        if (descriptor.default !== undefined) {
+          fields[name] = deepClone(descriptor.default);
+        } else if (descriptor.type === 'number' || descriptor.type === 'int' || descriptor.type === 'float') {
+          fields[name] = 0;
+        } else if (descriptor.type === 'boolean' || descriptor.type === 'bool') {
+          fields[name] = false;
+        } else if (descriptor.type === 'string') {
+          fields[name] = '';
+        }
+      }
+      return fields;
+    }
+
     /**
      * Value to materialise for a catalog field that the parsed element omits
      * (its injector default). Patching it creates the field in the `.g` object.
      */
     function defaultValueForSchema(schema) {
       if (!schema) return 0;
+      if (schema.defaultValue !== undefined) return deepClone(schema.defaultValue);
       if (schema.default !== undefined) return deepClone(schema.default);
       switch (schema.type) {
         case 'int':
@@ -3255,535 +3505,2285 @@ window.__ModuleLoader__.load({
         case 'bool':
           return false;
         case 'color':
-          return { t: 'obj', type: 'GorgeFramework.ColorArgb', fields: {} };
+        case 'ColorArgb':
+          return defaultColorArgbValue();
         case 'curve':
-          return { t: 'obj', type: 'GorgeFramework.LinearCurve', fields: {} };
+          return zeroLinearCurveValue();
         case 'vector2':
+        case 'Vector2':
           return { t: 'obj', type: 'GorgeFramework.Vector2', fields: { x: 0, y: 0 } };
+        case 'array': {
+          const elem = schema.elem || (schema.name === 'colorPoints' ? 'GorgeFramework.ColorArgb' : '');
+          return {
+            t: 'arr',
+            type: elem,
+            items: schema.name === 'colorPoints' ? [defaultColorArgbValue()] : [],
+          };
+        }
+        case 'LerpColorCurve':
+          return defaultLerpColorCurveValue();
+        case 'VariableFloat':
+          return { t: 'obj', type: 'GorgeFramework.VariableFloat', fields: { baseValue: 0 } };
+        case 'FunctionPiece':
+          return defaultFunctionPieceValue();
         default:
+          if (schema.type) {
+            return makeBlankValue(
+              schema,
+              schema.type.indexOf('.') === -1 ? 'GorgeFramework.' + schema.type : schema.type,
+            );
+          }
           return makeBlankValue(schema);
       }
     }
 
     /** Blank value for a new array item when the schema has no default. */
-    function makeBlankValue(schema) {
-      if (!schema) return { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { startX: 0, endX: 0 } };
+    function makeBlankValue(schema, itemType) {
+      const type = typeof itemType === 'string' && itemType ? itemType : '';
+      if (!schema) {
+        const shortType = stripNamespace(type);
+        if (shortType === 'FunctionCurve' || shortType === 'curve') return zeroLinearCurveValue();
+        if (shortType === 'ColorCurve') return defaultLerpColorCurveValue();
+        if (type) return { t: 'obj', type, fields: {} };
+        return {
+          t: 'obj',
+          type: 'GorgeFramework.FunctionPiece',
+          fields: { startX: 0, endX: 1, leftClosed: true, rightClosed: true },
+        };
+      }
       if (schema.defaultValue !== undefined) return deepClone(schema.defaultValue);
-      if (schema.kind === 'curve' || schema.type === 'curve') {
-        return { t: 'obj', type: 'GorgeFramework.LinearCurve', fields: { timeStart: 0, valueStart: 0, timeEnd: 1, valueEnd: 0 } };
-      }
-      if (schema.type === 'number') return 0;
+      if (schema.default !== undefined) return deepClone(schema.default);
+      if (schema.kind === 'curve' || schema.type === 'curve') return zeroLinearCurveValue();
+      if (schema.type === 'number' || schema.type === 'int' || schema.type === 'float') return 0;
       if (schema.type === 'string') return '';
-      if (schema.type === 'boolean') return false;
-      return { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: {} };
+      if (schema.type === 'boolean' || schema.type === 'bool') return false;
+      if (schema.type === 'array') return defaultValueForSchema(schema);
+      const resolved =
+        type ||
+        (schema.type && schema.type.indexOf('.') === -1 && /^[A-Z]/.test(schema.type)
+          ? 'GorgeFramework.' + schema.type
+          : schema.type) ||
+        '';
+      if (!resolved) return { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: {} };
+      const short = stripNamespace(resolved);
+      if (short === 'FunctionPiece') return defaultFunctionPieceValue();
+      if (short === 'ColorArgb') return defaultColorArgbValue();
+      if (short === 'LerpColorCurve') return defaultLerpColorCurveValue();
+      if (short === 'Vector2') return { t: 'obj', type: resolved, fields: { x: 0, y: 0 } };
+      if (short === 'VariableFloat') return { t: 'obj', type: resolved, fields: { baseValue: 0 } };
+      if (short === 'FunctionCurve') return zeroLinearCurveValue();
+      if (short === 'ColorCurve') return defaultLerpColorCurveValue();
+      return { t: 'obj', type: resolved, fields: defaultFieldsForSchema(schema) };
     }
 
     // ========================================================================
-    // 10 · Curve editor dialog — plot, drag handles, and numeric tree in one modal.
+    // 10 · Curve editor panel — a docked, beat-aligned piecewise editor.
+    //
+    // The editor always works on a segment list. A plain function curve opens
+    // as one synthetic segment and keeps its type; adding a second segment or
+    // moving a segment boundary converts the draft to a PiecewiseFunctionCurve
+    // on Apply. Segments share their boundaries (time continuity); value jumps
+    // are marked, never smoothed automatically.
     // ========================================================================
 
-    /** Walk a value tree and collect draggable handles (as root-relative paths). */
-    function collectHandles(value) {
-      const handles = [];
+    const CURVE_SEGMENT_COLORS = ['#38e8c4', '#7c8cff', '#ffd166', '#ff7ab6', '#8bd450', '#f4845f', '#a78bfa', '#4dd0e1'];
+    const CURVE_MIN_SEGMENT = 0.001;
+    const CURVE_LAYOUT = Object.freeze({ left: GUTTER_W, right: 18, top: 56, bottom: 28, rulerH: 22, bandH: 24, bandGap: 4 });
+    const CURVE_NS = 'GorgeFramework.';
 
-      /** Recurse with a path prefix relative to the root value. */
-      const walk = (node, path, parentType) => {
-        if (!isTypedValue(node)) return;
-        if (node.t === 'arr') {
-          (node.items || []).forEach((item, index) => walk(item, path.concat(['items', index]), parentType));
-          return;
-        }
-        if (node.t !== 'obj') return;
-        const type = stripNamespace(node.type);
-        const fields = node.fields || {};
-        const fieldPath = (name) => path.concat(['fields', name]);
-
-        if (type === 'Vector2' || type === 'Vector2Int' || type === 'Vector') {
-          if (typeof fields.x === 'number' && typeof fields.y === 'number') {
-            handles.push({ kind: 'point', label: pathLabel(path, parentType), xPath: fieldPath('x'), yPath: fieldPath('y') });
-            return;
-          }
-        }
-        if (type === 'LinearCurve') {
-          handles.push({
-            kind: 'point',
-            label: 'start',
-            xPath: fieldPath('timeStart'),
-            yPath: fieldPath('valueStart'),
-          });
-          handles.push({
-            kind: 'point',
-            label: 'end',
-            xPath: fieldPath('timeEnd'),
-            yPath: fieldPath('valueEnd'),
-          });
-        } else if (type === 'CubicHermiteSpline' || type === 'HermiteSpline') {
-          // The endpoints are nested Vector2s, collected by the generic walk.
-        } else if (type === 'ConstantFunctionCurve' || type === 'ConstantCurve') {
-          if (typeof fields.value === 'number') handles.push({ kind: 'y', label: 'value', yPath: fieldPath('value') });
-        } else if (type === 'FunctionPiece') {
-          if (typeof fields.startX === 'number') handles.push({ kind: 'x', label: 'startX', xPath: fieldPath('startX') });
-          if (typeof fields.endX === 'number') handles.push({ kind: 'x', label: 'endX', xPath: fieldPath('endX') });
-        } else if (type === 'LinearFunctionCurve') {
-          if (typeof fields.k === 'number') handles.push({ kind: 'none', label: 'k=' + formatNum(fields.k) });
-        }
-
-        for (const key of Object.keys(fields)) walk(fields[key], fieldPath(key), type);
-      };
-
-      walk(value, [], 'root');
-      return handles;
+    /** Typed scalar/expression for a function-bound field. */
+    function curveNumberValue(value) {
+      if (Number.isFinite(value)) return value;
+      if (value === Infinity) return { t: 'expr', src: '(1.0/0.0)', special: 'Infinity' };
+      if (value === -Infinity) return { t: 'expr', src: '(-1.0/0.0)', special: '-Infinity' };
+      return 0;
     }
 
-    /** Short label for a nested path (last meaningful segment). */
-    function pathLabel(path, parentType) {
-      for (let i = path.length - 1; i >= 0; i -= 1) {
-        const segment = path[i];
-        if (typeof segment === 'string' && segment !== 'fields' && segment !== 'items') return segment;
+    /** Bare type name of a curve value ('' when not a typed object). */
+    function curveTypeOf(value) {
+      return isTypedValue(value) && value.t === 'obj' ? stripNamespace(value.type) : '';
+    }
+
+    /** Human label of one segment function type (locale key, else bare name). */
+    function curveTypeLabel(t, type) {
+      const key = CURVE_FN_TYPE_KEYS[type];
+      if (key && typeof t === 'function') {
+        const text = t(key);
+        if (text && text !== key) return text;
       }
-      return parentType || 'value';
+      return shortType(type) || String(type || '');
     }
 
-    /** Read the current [x, y] of a point handle. */
-    function handlePoint(root, handle) {
-      const x = valueAsNumber(getAtPath(root, handle.xPath));
-      const y = valueAsNumber(getAtPath(root, handle.yPath));
-      if (x === null && y === null) return null;
-      return [x === null ? 0 : x, y === null ? 0 : y];
+    /** Curve type choices for the type menu; unknown current types stay listed. */
+    function curveTypeChoices(currentType) {
+      const list = CURVE_FN_TYPE_ORDER.slice();
+      if (currentType && list.indexOf(currentType) === -1) list.unshift(currentType);
+      return list;
     }
 
-    /** Apply a drag to a handle, returning the new root value. */
-    function moveHandle(root, handle, x, y) {
-      let next = root;
-      if (handle.xPath && x !== null) next = setAtPath(next, handle.xPath, round(x, 6));
-      if (handle.yPath && y !== null) next = setAtPath(next, handle.yPath, round(y, 6));
+    /** Catalog value-type schema for a curve (for the generic numeric editor). */
+    function curveValueSchema(catalog, curve) {
+      const type = curveTypeOf(curve);
+      const valueTypes = catalog && catalog.valueTypes ? catalog.valueTypes : null;
+      const entry = valueTypes && type ? valueTypes[type] : null;
+      if (!entry || !entry.fields) return null;
+      return { type, label: entry.label || type, fields: entry.fields };
+    }
+
+    /** Typed value object helper. */
+    function curveObject(type, fields) {
+      return { t: 'obj', type: CURVE_NS + type, fields };
+    }
+
+    /** Vector2 value helper. */
+    function curveVector2(x, y) {
+      return curveObject('Vector2', { x: round(x, 6), y: round(y, 6) });
+    }
+
+    /** Read a finite numeric field from a typed value. */
+    function curveFieldNumber(curve, name, fallback) {
+      const fields = curve && isTypedValue(curve) && curve.t === 'obj' ? curve.fields || {} : {};
+      const raw = valueAsNumber(fields[name]);
+      return raw === null || !Number.isFinite(raw) ? fallback : raw;
+    }
+
+    /** Immutably set one field of a typed object. */
+    function curveSetField(curve, name, value) {
+      const copy = deepClone(curve);
+      copy.fields = copy.fields && typeof copy.fields === 'object' ? copy.fields : {};
+      copy.fields[name] = value;
+      return copy;
+    }
+
+    /** Immutably set one numeric field (rounded, finite). */
+    function curveSetNumericField(curve, name, value) {
+      return curveSetField(curve, name, round(Number.isFinite(value) ? value : 0, 6));
+    }
+
+    /** Immutably set several numeric fields at once. */
+    function curveSetNumericFields(curve, values) {
+      let next = curve;
+      for (const name of Object.keys(values)) next = curveSetNumericField(next, name, values[name]);
       return next;
     }
 
-    /** Auto x-range for a curve: union of handles and nested time fields. */
-    function curveRange(value) {
-      const xs = [];
-      const push = (node) => {
-        if (!isTypedValue(node)) return;
-        if (node.t === 'arr') {
-          (node.items || []).forEach(push);
-          return;
-        }
-        if (node.t !== 'obj') return;
-        const fields = node.fields || {};
-        for (const key of ['timeStart', 'timeEnd', 'startX', 'endX']) {
-          const raw = valueAsNumber(fields[key]);
-          if (raw !== null && Number.isFinite(raw)) xs.push(raw);
-        }
-        const pointX = (point) => {
-          if (isTypedValue(point) && point.fields) {
-            const raw = valueAsNumber(point.fields.x);
-            if (raw !== null && Number.isFinite(raw)) xs.push(raw);
-          }
-        };
-        pointX(fields.startPoint);
-        pointX(fields.endPoint);
-        for (const key of Object.keys(fields)) push(fields[key]);
+    /** Immutably set a Vector2 field. */
+    function curveSetPoint(curve, name, x, y) {
+      return curveSetField(curve, name, curveVector2(x, y));
+    }
+
+    /** Read a Vector2 field into `{ x, y }` with fallbacks. */
+    function curvePointOf(curve, name, x, y) {
+      const fields = curve && curve.fields ? curve.fields : {};
+      const point = fields[name];
+      const pointFields = point && isTypedValue(point) && point.t === 'obj' ? point.fields || {} : {};
+      const px = valueAsNumber(pointFields.x);
+      const py = valueAsNumber(pointFields.y);
+      return {
+        x: px === null || !Number.isFinite(px) ? x : px,
+        y: py === null || !Number.isFinite(py) ? y : py,
       };
-      push(value);
-      if (xs.length === 0) return [-1, 1];
-      let lo = Math.min.apply(null, xs);
-      let hi = Math.max.apply(null, xs);
-      if (hi - lo < 1e-6) {
-        lo -= 0.5;
-        hi += 0.5;
-      }
-      const pad = (hi - lo) * 0.12;
-      return [lo - pad, hi + pad];
     }
 
-    /** Auto y-range from samples plus handle y values. */
-    function curveValueRange(value, x0, x1) {
-      const ys = [];
-      const series = sampleCurveSeries(value, x0, x1, 120);
-      for (const pair of series) ys.push(pair[1]);
-      for (const handle of collectHandles(value)) {
-        if (handle.yPath) {
-          const raw = valueAsNumber(getAtPath(value, handle.yPath));
-          if (raw !== null && Number.isFinite(raw)) ys.push(raw);
+    /** Finite `[lo, hi]` of a curve's own x domain, else the fallback range. */
+    function curveNaturalRange(curve, fallback) {
+      const range = Array.isArray(fallback) && fallback.length === 2 && Number.isFinite(fallback[0]) && Number.isFinite(fallback[1]) ? fallback.slice() : [-1, 1];
+      const type = curveTypeOf(curve);
+      const fields = curve && isTypedValue(curve) && curve.t === 'obj' ? curve.fields || {} : {};
+      const pair = (a, b) => {
+        const lo = valueAsNumber(a);
+        const hi = valueAsNumber(b);
+        if (lo === null || hi === null || !Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+        if (lo === hi) return null;
+        return [Math.min(lo, hi), Math.max(lo, hi)];
+      };
+      switch (type) {
+        case 'LinearCurve':
+          return pair(fields.timeStart, fields.timeEnd) || range;
+        case 'CubicHermiteSpline':
+        case 'HermiteSpline': {
+          const start = fields.startPoint && fields.startPoint.fields ? fields.startPoint.fields : {};
+          const end = fields.endPoint && fields.endPoint.fields ? fields.endPoint.fields : {};
+          return pair(start.x, end.x) || range;
         }
+        case 'PeriodicFunctionCurve':
+          return pair(fields.startX, fields.endX) || range;
+        case 'AxialSymmetricFunctionCurve': {
+          const axis = valueAsNumber(fields.axis);
+          if (axis === null || !Number.isFinite(axis)) return range;
+          const span = Math.max(Math.abs(range[1] - range[0]), 1) / 2;
+          return [axis - span, axis + span];
+        }
+        case 'PiecewiseFunctionCurve':
+        case 'PiecewiseCurve': {
+          const xs = [];
+          const list = fields.functionPieces;
+          const items = list && isTypedValue(list) && Array.isArray(list.items) ? list.items : [];
+          for (const item of items) {
+            if (!isTypedValue(item) || item.t !== 'obj') continue;
+            const pieceFields = item.fields || {};
+            const start = valueAsNumber(pieceFields.startX);
+            const end = valueAsNumber(pieceFields.endX);
+            if (start !== null && Number.isFinite(start)) xs.push(start);
+            if (end !== null && Number.isFinite(end)) xs.push(end);
+            const inner = curveNaturalRange(pieceFields.functionCurve, range);
+            xs.push(inner[0], inner[1]);
+          }
+          if (!xs.length) return range;
+          const lo = Math.min.apply(null, xs);
+          const hi = Math.max.apply(null, xs);
+          return hi > lo ? [lo, hi] : range;
+        }
+        case 'AdditionFunctionCurve': {
+          const first = curveNaturalRange(fields.firstFunctionCurve, range);
+          const second = curveNaturalRange(fields.secondFunctionCurve, range);
+          return [Math.min(first[0], second[0]), Math.max(first[1], second[1])];
+        }
+        case 'CompositeFunctionCurve':
+          return curveNaturalRange(fields.innerFunctionCurve, range);
+        default:
+          return range;
       }
-      if (ys.length === 0) return [-1, 1];
-      let lo = Math.min.apply(null, ys);
-      let hi = Math.max.apply(null, ys);
-      if (hi - lo < 1e-6) {
-        lo -= 1;
-        hi += 1;
-      }
-      const pad = (hi - lo) * 0.18;
-      return [lo - pad, hi + pad];
     }
 
-    /** Padding around a curve plot: room for the axis labels. */
-    const CURVE_PLOT_PADDING = Object.freeze({ left: 46, right: 16, top: 16, bottom: 26 });
+    /** One synthetic/default segment (all editor-local ids are `sN`). */
+    function curveMakeSegment(id, start, end, curve, flags) {
+      const options = flags || {};
+      return {
+        id,
+        start,
+        end,
+        curve,
+        leftClosed: options.leftClosed === undefined ? true : !!options.leftClosed,
+        rightClosed: options.rightClosed === undefined ? true : !!options.rightClosed,
+        hasLeftClosed: !!options.hasLeftClosed,
+        hasRightClosed: !!options.hasRightClosed,
+      };
+    }
+
+    /** Deep-copy a draft (source stays shared; every segment/curve is copied). */
+    function cloneCurveDraft(draft) {
+      return {
+        source: draft.source,
+        rootKind: draft.rootKind,
+        segments: (draft.segments || []).map((segment) =>
+          Object.assign({}, segment, { curve: deepClone(segment.curve) }),
+        ),
+        edited: draft.edited === true,
+        converted: draft.converted === true,
+        nextId: draft.nextId,
+        normalized: draft.normalized === true,
+      };
+    }
 
     /**
-     * Pixel <-> data mapping of one curve plot.
-     *
-     * @param {number} width  canvas CSS width
-     * @param {number} height canvas CSS height
-     * @param {{x0:number,x1:number,y0:number,y1:number}} bounds data window
-     * @returns {{pad: object, plotW: number, plotH: number, toX: Function, toY: Function}}
+     * Sort segments by start and make every adjacent pair share a boundary.
+     * The first segment may start at -Infinity and the last may end at
+     * +Infinity; every other bound is finite and strictly ordered.
      */
-    function curvePlotGeometry(width, height, bounds) {
-      const pad = CURVE_PLOT_PADDING;
-      const plotW = Math.max(10, width - pad.left - pad.right);
-      const plotH = Math.max(10, height - pad.top - pad.bottom);
+    function normalizeSegments(input) {
+      const list = (Array.isArray(input) ? input : []).map((segment) => Object.assign({}, segment, { curve: segment.curve }));
+      if (!list.length) return list;
+      list.sort((a, b) => (a.start === b.start ? 0 : a.start < b.start ? -1 : 1));
+      for (let i = 0; i < list.length; i += 1) {
+        const segment = list[i];
+        const last = i === list.length - 1;
+        if (i > 0 && !Number.isFinite(segment.start)) segment.start = -Infinity;
+        if (!last && !Number.isFinite(segment.end)) {
+          const nextStart = list[i + 1] ? list[i + 1].start : null;
+          segment.end = Number.isFinite(nextStart) ? nextStart : Number.isFinite(segment.start) ? segment.start + 1 : 0;
+        }
+        if (segment.start === Infinity) segment.start = Number.isFinite(segment.end) ? segment.end - 1 : 0;
+        if (segment.end === -Infinity) segment.end = Number.isFinite(segment.start) ? segment.start + CURVE_MIN_SEGMENT : 0;
+        if (!last || segment.end !== Infinity) {
+          // Keep zero-length pieces as-is (the corpus uses an empty 0..0
+          // FunctionPiece as a no-op); only repair inverted ranges.
+          if (segment.end < segment.start) segment.end = Number.isFinite(segment.start) ? segment.start + CURVE_MIN_SEGMENT : 0;
+        }
+      }
+      for (let i = 1; i < list.length; i += 1) {
+        const previous = list[i - 1];
+        if (!Number.isFinite(previous.end)) previous.end = Number.isFinite(list[i].start) ? list[i].start : (Number.isFinite(previous.start) ? previous.start + 1 : 0);
+        list[i].start = previous.end;
+        if (list[i].end < list[i].start) list[i].end = list[i].start + CURVE_MIN_SEGMENT;
+      }
+      return list;
+    }
+
+    /** Read any curve value into the segment draft used by the panel. */
+    function readCurveDraft(value, options) {
+      const opts = options || {};
+      const fallback = Array.isArray(opts.fallbackRange) && opts.fallbackRange.length === 2 ? opts.fallbackRange.slice() : [-1, 1];
+      const source = deepClone(value);
+      const type = curveTypeOf(source);
+      const draft = {
+        source,
+        rootKind: type === 'PiecewiseFunctionCurve' || type === 'PiecewiseCurve' ? 'piecewise' : 'curve',
+        segments: [],
+        edited: false,
+        converted: false,
+        nextId: 1,
+        normalized: false,
+      };
+      if (draft.rootKind === 'piecewise') {
+        const list = source.fields && source.fields.functionPieces;
+        const items = list && isTypedValue(list) && Array.isArray(list.items) ? list.items : [];
+        for (const item of items) {
+          if (!isTypedValue(item) || item.t !== 'obj') continue;
+          const fields = item.fields || {};
+          const readBound = (raw, fallbackBound) => {
+            const numeric = valueAsNumber(raw);
+            if (numeric === null) return fallbackBound;
+            if (Number.isFinite(numeric)) return numeric;
+            if (numeric === Infinity || numeric === -Infinity) return numeric;
+            return fallbackBound;
+          };
+          let start = readBound(fields.startX, -Infinity);
+          let end = readBound(fields.endX, Infinity);
+          if (start > end) {
+            const swap = start;
+            start = end;
+            end = swap;
+            draft.normalized = true;
+          }
+          const rawCurve = fields.functionCurve;
+          // Preserve any typed function curve (including types the segment
+          // editor does not offer); only null/missing values become a zero
+          // constant, matching the engine's null-piece behaviour.
+          const hasCurve = isTypedValue(rawCurve) && rawCurve.t === 'obj';
+          const inner = hasCurve ? rawCurve : curveObject('ConstantFunctionCurve', { value: 0 });
+          if (!hasCurve) draft.normalized = true;
+          const hasLeftClosed = Object.prototype.hasOwnProperty.call(fields, 'leftClosed');
+          const hasRightClosed = Object.prototype.hasOwnProperty.call(fields, 'rightClosed');
+          draft.segments.push(curveMakeSegment('s' + draft.nextId, start, end, inner, {
+            leftClosed: fields.leftClosed === true,
+            rightClosed: fields.rightClosed === true,
+            hasLeftClosed,
+            hasRightClosed,
+          }));
+          draft.nextId += 1;
+        }
+        if (!draft.segments.length) {
+          draft.segments.push(curveMakeSegment('s' + draft.nextId, fallback[0], fallback[1], curveObject('ConstantFunctionCurve', { value: 0 }), {}));
+          draft.nextId += 1;
+          draft.normalized = true;
+        }
+        const normalized = normalizeSegments(draft.segments);
+        if (
+          normalized.length !== draft.segments.length ||
+          normalized.some((segment, index) => segment.start !== draft.segments[index].start || segment.end !== draft.segments[index].end)
+        ) {
+          draft.normalized = true;
+        }
+        draft.segments = normalized.map((segment, index) => Object.assign({}, segment, { id: 's' + (index + 1) }));
+        draft.nextId = draft.segments.length + 1;
+      } else {
+        const span = curveNaturalRange(source, fallback);
+        const curve = isCurveEditorValue(source) ? source : curveObject('ConstantFunctionCurve', { value: 0 });
+        draft.segments.push(curveMakeSegment('s1', span[0], span[1], curve, { leftClosed: true, rightClosed: true }));
+        draft.nextId = 2;
+      }
+      return draft;
+    }
+
+    /** True when a draft's output is a piecewise curve. */
+    function curveDraftIsPiecewise(draft) {
+      return draft.rootKind === 'piecewise' || draft.converted === true;
+    }
+
+    /** Build the value that Apply writes back. */
+    function buildCurveValue(draft) {
+      if (!draft) return null;
+      if (draft.edited !== true) return deepClone(draft.source);
+      if (!draft.segments.length) return deepClone(draft.source);
+      if (curveDraftIsPiecewise(draft)) {
+        const items = draft.segments.map((segment) => {
+          const fields = { functionCurve: deepClone(segment.curve) };
+          fields.startX = curveNumberValue(segment.start);
+          fields.endX = curveNumberValue(segment.end);
+          if (segment.hasLeftClosed) fields.leftClosed = segment.leftClosed === true;
+          if (segment.hasRightClosed) fields.rightClosed = segment.rightClosed === true;
+          return { t: 'obj', type: CURVE_NS + 'FunctionPiece', fields };
+        });
+        return {
+          t: 'obj',
+          type: CURVE_NS + 'PiecewiseFunctionCurve',
+          fields: { functionPieces: { t: 'arr', type: CURVE_NS + 'FunctionPiece', items } },
+        };
+      }
+      return deepClone(draft.segments[0].curve);
+    }
+
+    /** Boundary values of a draft: `[start0, end0 === start1, ..., endN]`. */
+    function curveBoundaries(draft) {
+      const out = [];
+      for (let i = 0; i < draft.segments.length; i += 1) {
+        out.push(draft.segments[i].start);
+        if (i === draft.segments.length - 1) out.push(draft.segments[i].end);
+      }
+      return out;
+    }
+
+    /** Default selection: the first non-empty segment (corpus data can start with a 0..0 piece). */
+    function firstCurveSegmentId(draft) {
+      const list = draft && Array.isArray(draft.segments) ? draft.segments : [];
+      const segment = list.find((item) => item.end > item.start) || list[0];
+      return segment ? segment.id : null;
+    }
+
+    /** Materialize flags when a synthetic single segment becomes piecewise. */
+    function curveConvertDraft(draft) {
+      draft.converted = true;
+      for (const segment of draft.segments) {
+        if (!segment.hasLeftClosed) {
+          segment.hasLeftClosed = true;
+          segment.leftClosed = true;
+        }
+        if (!segment.hasRightClosed) {
+          segment.hasRightClosed = true;
+          segment.rightClosed = true;
+        }
+      }
+    }
+
+    /** Snap a curve-relative x to the main timeline beat division. */
+    function snapCurveTime(x, tempo, snapDiv, anchorTime, enabled) {
+      if (!enabled || !snapDiv || !Number.isFinite(x)) return round(x, 6);
+      const anchor = Number.isFinite(anchorTime) ? anchorTime : 0;
+      return round(snapTime(anchor + x, tempo, snapDiv, true) - anchor, 6);
+    }
+
+    /** Move one shared boundary (0..n) and keep the segments contiguous. */
+    function setSegmentBoundary(draft, index, x, options) {
+      const opts = options || {};
+      if (!draft.segments.length) return draft;
+      const count = draft.segments.length;
+      if (!(index >= 0 && index <= count)) return draft;
+      let value = Number.isFinite(x) ? x : NaN;
+      if (!Number.isFinite(value)) return draft;
+      if (opts.snap) value = snapCurveTime(value, opts.tempo, opts.snapDiv, opts.anchorTime, true);
+      value = round(value, 6);
+      const boundaries = curveBoundaries(draft);
+      if (index > 0 && Number.isFinite(boundaries[index - 1])) value = Math.max(value, boundaries[index - 1] + CURVE_MIN_SEGMENT);
+      if (index < count && Number.isFinite(boundaries[index + 1])) value = Math.min(value, boundaries[index + 1] - CURVE_MIN_SEGMENT);
+      if (!Number.isFinite(value)) return draft;
+      if (Math.abs(value - boundaries[index]) < 1e-9) return draft;
+      const next = cloneCurveDraft(draft);
+      if (index === 0) next.segments[0].start = value;
+      else if (index === count) next.segments[count - 1].end = value;
+      else {
+        next.segments[index - 1].end = value;
+        next.segments[index].start = value;
+      }
+      if (next.rootKind !== 'piecewise' && !next.converted) curveConvertDraft(next);
+      next.edited = true;
+      return next;
+    }
+
+    /** Replace one segment's inner function curve. */
+    function updateSegmentCurve(draft, id, curve) {
+      const index = draft.segments.findIndex((segment) => segment.id === id);
+      if (index < 0) return draft;
+      if (JSON.stringify(draft.segments[index].curve) === JSON.stringify(curve)) return draft;
+      const next = cloneCurveDraft(draft);
+      next.segments[index].curve = deepClone(curve);
+      next.edited = true;
+      return next;
+    }
+
+    /** Update the closed flags of one segment. */
+    function setSegmentFlags(draft, id, flags) {
+      const index = draft.segments.findIndex((segment) => segment.id === id);
+      if (index < 0) return draft;
+      const next = cloneCurveDraft(draft);
+      const segment = next.segments[index];
+      if (Object.prototype.hasOwnProperty.call(flags, 'leftClosed')) {
+        segment.leftClosed = flags.leftClosed === true;
+        segment.hasLeftClosed = true;
+      }
+      if (Object.prototype.hasOwnProperty.call(flags, 'rightClosed')) {
+        segment.rightClosed = flags.rightClosed === true;
+        segment.hasRightClosed = true;
+      }
+      next.edited = true;
+      return next;
+    }
+
+    /** Immutable finite span of a segment for parameter-handle placement. */
+    function curveHandleSpan(start, end, view) {
+      let lo = Number.isFinite(start) ? start : view && Number.isFinite(view.x0) ? view.x0 : 0;
+      let hi = Number.isFinite(end) ? end : view && Number.isFinite(view.x1) ? view.x1 : lo + 1;
+      if (!(hi > lo)) {
+        lo = view && Number.isFinite(view.x0) ? view.x0 : lo - 0.5;
+        hi = view && Number.isFinite(view.x1) ? view.x1 : lo + 1;
+      }
+      return { lo, hi };
+    }
+
+    /** Default function curve of `type` anchored to the given boundary values. */
+    function defaultSegmentCurve(type, start, end, valueStart, valueEnd) {
+      const s = Number.isFinite(start) ? start : 0;
+      const e = Number.isFinite(end) && end > s ? end : s + 1;
+      const v0 = Number.isFinite(valueStart) ? valueStart : 0;
+      const v1 = Number.isFinite(valueEnd) ? valueEnd : v0;
+      switch (type) {
+        case 'LinearFunctionCurve': {
+          const k = e > s ? (v1 - v0) / (e - s) : 0;
+          return curveObject('LinearFunctionCurve', { k: round(k, 6), b: round(v0 - k * s, 6) });
+        }
+        case 'LinearCurve':
+          return curveObject('LinearCurve', { timeStart: round(s, 6), valueStart: round(v0, 6), timeEnd: round(e, 6), valueEnd: round(v1, 6) });
+        case 'CubicHermiteSpline':
+          return curveObject('CubicHermiteSpline', {
+            startPoint: curveVector2(s, v0),
+            startTangent: 0,
+            startWeight: 0.33333,
+            endPoint: curveVector2(e, v1),
+            endTangent: 0,
+            endWeight: 0.33333,
+          });
+        case 'PeriodicFunctionCurve':
+          return curveObject('PeriodicFunctionCurve', {
+            functionCurve: curveObject('LinearCurve', { timeStart: round(s, 6), valueStart: round(v0, 6), timeEnd: round(e, 6), valueEnd: round(v1, 6) }),
+            startX: round(s, 6),
+            endX: round(e, 6),
+            leftClosed: true,
+          });
+        case 'AxialSymmetricFunctionCurve':
+          return curveObject('AxialSymmetricFunctionCurve', {
+            functionCurve: curveObject('LinearCurve', { timeStart: round(s, 6), valueStart: round(v0, 6), timeEnd: round(e, 6), valueEnd: round(v1, 6) }),
+            axis: round(s, 6),
+            keepLeft: false,
+          });
+        case 'AdditionFunctionCurve':
+          return curveObject('AdditionFunctionCurve', {
+            firstFunctionCurve: curveObject('ConstantFunctionCurve', { value: round(v0, 6) }),
+            secondFunctionCurve: curveObject('ConstantFunctionCurve', { value: 0 }),
+          });
+        case 'CompositeFunctionCurve':
+          return curveObject('CompositeFunctionCurve', {
+            outerFunctionCurve: curveObject('ConstantFunctionCurve', { value: round(v0, 6) }),
+            innerFunctionCurve: curveObject('ConstantFunctionCurve', { value: 0 }),
+          });
+        case 'ConstantFunctionCurve':
+        default:
+          return curveObject('ConstantFunctionCurve', { value: round(v0, 6) });
+      }
+    }
+
+    /** Split segment `index` at `x`; the new right part uses `type`. */
+    function splitCurveSegment(draft, index, x, type, options) {
+      const opts = options || {};
+      const segment = draft.segments[index];
+      if (!segment) return { draft, segmentId: null };
+      let cut = Number.isFinite(x) ? x : curveHandleSpan(segment.start, segment.end, opts.view).lo;
+      if (Number.isFinite(segment.start)) cut = Math.max(cut, segment.start + CURVE_MIN_SEGMENT);
+      if (Number.isFinite(segment.end)) cut = Math.min(cut, segment.end - CURVE_MIN_SEGMENT);
+      cut = round(cut, 6);
+      if (!(cut > segment.start && cut < segment.end)) return { draft, segmentId: null };
+      const next = cloneCurveDraft(draft);
+      const target = next.segments[index];
+      const sourceCurve = target.curve;
+      const sourceType = curveTypeOf(sourceCurve);
+      const nextType = type && type !== sourceType ? type : sourceType || 'ConstantFunctionCurve';
+      const cutValue = sampleCurve(sourceCurve, cut);
+      const finiteEnd = Number.isFinite(target.end) ? target.end : curveHandleSpan(target.start, target.end, opts.view).hi;
+      const endValue = sampleCurve(sourceCurve, finiteEnd);
+      const newCurve =
+        nextType === sourceType
+          ? deepClone(sourceCurve)
+          : defaultSegmentCurve(
+              nextType,
+              cut,
+              finiteEnd,
+              cutValue === null ? 0 : cutValue,
+              endValue === null ? (cutValue === null ? 0 : cutValue) : endValue,
+            );
+      target.end = cut;
+      const right = curveMakeSegment('s' + next.nextId, cut, segment.end, newCurve, {
+        leftClosed: true,
+        rightClosed: target.rightClosed,
+        hasLeftClosed: true,
+        hasRightClosed: target.hasRightClosed,
+      });
+      next.nextId += 1;
+      next.segments.splice(index + 1, 0, right);
+      if (next.rootKind !== 'piecewise' && !next.converted) curveConvertDraft(next);
+      next.edited = true;
+      next.segments = normalizeSegments(next.segments);
+      return { draft: next, segmentId: right.id };
+    }
+
+    /** Add a segment outside the currently covered time range. */
+    function addCurveSegmentOutside(draft, x, type, options) {
+      const opts = options || {};
+      if (!draft.segments.length) return { draft, segmentId: null };
+      const first = draft.segments[0];
+      const last = draft.segments[draft.segments.length - 1];
+      const value = round(Number.isFinite(x) ? x : curveHandleSpan(first.start, last.end, opts.view).hi, 6);
+      const next = cloneCurveDraft(draft);
+      let added = null;
+      if (Number.isFinite(first.start) && value < first.start) {
+        const end = first.start;
+        const share = sampleCurve(first.curve, end);
+        const shared = share === null ? 0 : share;
+        const start = Math.min(value, end - CURVE_MIN_SEGMENT);
+        added = curveMakeSegment('s' + next.nextId, start, end, defaultSegmentCurve(type || 'ConstantFunctionCurve', start, end, shared, shared), {
+          leftClosed: true,
+          rightClosed: true,
+          hasLeftClosed: true,
+          hasRightClosed: true,
+        });
+        next.segments.unshift(added);
+      } else if (Number.isFinite(last.end) && value > last.end) {
+        const start = last.end;
+        const share = sampleCurve(last.curve, start);
+        const shared = share === null ? 0 : share;
+        const end = Math.max(value, start + CURVE_MIN_SEGMENT);
+        added = curveMakeSegment('s' + next.nextId, start, end, defaultSegmentCurve(type || 'ConstantFunctionCurve', start, end, shared, shared), {
+          leftClosed: true,
+          rightClosed: true,
+          hasLeftClosed: true,
+          hasRightClosed: true,
+        });
+        next.segments.push(added);
+      } else {
+        return { draft, segmentId: null };
+      }
+      next.nextId += 1;
+      if (next.rootKind !== 'piecewise' && !next.converted) curveConvertDraft(next);
+      next.edited = true;
+      next.segments = normalizeSegments(next.segments);
+      return { draft: next, segmentId: added.id };
+    }
+
+    /** Delete one segment; the left neighbor (or the right for the first) absorbs its span. */
+    function deleteCurveSegment(draft, index) {
+      if (!draft.segments[index] || draft.segments.length <= 1) return { draft, segmentId: null };
+      const next = cloneCurveDraft(draft);
+      const removed = next.segments[index];
+      let selectId = null;
+      if (index > 0) {
+        next.segments[index - 1].end = removed.end;
+        selectId = next.segments[index - 1].id;
+      } else {
+        next.segments[index + 1].start = removed.start;
+        selectId = next.segments[index + 1].id;
+      }
+      next.segments.splice(index, 1);
+      next.segments = normalizeSegments(next.segments);
+      next.edited = true;
+      return { draft: next, segmentId: selectId };
+    }
+
+    /** Replace a segment's function type, anchored to its current values. */
+    function changeCurveSegmentType(draft, index, type, options) {
+      const opts = options || {};
+      const segment = draft.segments[index];
+      if (!segment || !type) return draft;
+      if (curveTypeOf(segment.curve) === type) return draft;
+      const span = curveHandleSpan(segment.start, segment.end, opts.view);
+      const startValue = sampleCurve(segment.curve, span.lo);
+      const endValue = sampleCurve(segment.curve, span.hi);
+      const next = cloneCurveDraft(draft);
+      next.segments[index].curve = defaultSegmentCurve(
+        type,
+        span.lo,
+        span.hi,
+        startValue === null ? 0 : startValue,
+        endValue === null ? (startValue === null ? 0 : startValue) : endValue,
+      );
+      next.edited = true;
+      return next;
+    }
+
+    /** Numeric-value jumps at shared segment boundaries. */
+    function curveBoundaryWarnings(draft) {
+      const warnings = [];
+      for (let i = 1; i < draft.segments.length; i += 1) {
+        const boundary = draft.segments[i].start;
+        if (!Number.isFinite(boundary)) continue;
+        const left = sampleCurve(draft.segments[i - 1].curve, boundary);
+        const right = sampleCurve(draft.segments[i].curve, boundary);
+        if (left === null || right === null || !Number.isFinite(left) || !Number.isFinite(right)) continue;
+        const tolerance = 1e-6 * Math.max(1, Math.abs(left), Math.abs(right));
+        if (Math.abs(left - right) > tolerance) warnings.push({ index: i, time: boundary, left, right });
+      }
+      return warnings;
+    }
+
+    /** Initial x view: finite segment bounds plus each inner curve's own domain. */
+    function curveInitialView(draft, tempo, fallbackRange) {
+      const bpm = tempo && Number.isFinite(tempo.bpm) && tempo.bpm > 0 ? tempo.bpm : 120;
+      const secondsPerBeat = 60 / bpm;
+      const fallback = Array.isArray(fallbackRange) && fallbackRange.length === 2 ? fallbackRange : [-2 * secondsPerBeat, 2 * secondsPerBeat];
+      const xs = [];
+      for (const segment of draft.segments) {
+        if (Number.isFinite(segment.start)) xs.push(segment.start);
+        if (Number.isFinite(segment.end)) xs.push(segment.end);
+        const natural = curveNaturalRange(segment.curve, fallback);
+        xs.push(natural[0], natural[1]);
+      }
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const value of xs) {
+        if (!Number.isFinite(value)) continue;
+        if (value < lo) lo = value;
+        if (value > hi) hi = value;
+      }
+      if (lo === Infinity) return { x0: fallback[0], x1: fallback[1] };
+      if (!(hi > lo)) {
+        lo -= 2 * secondsPerBeat;
+        hi += 2 * secondsPerBeat;
+      }
+      const pad = Math.max((hi - lo) * 0.12, secondsPerBeat);
+      let x0 = lo - pad;
+      let x1 = hi + pad;
+      const first = draft.segments[0];
+      const last = draft.segments[draft.segments.length - 1];
+      if (first && first.start === -Infinity) x0 = Math.min(x0, lo - 2 * secondsPerBeat);
+      if (last && last.end === Infinity) x1 = Math.max(x1, hi + 2 * secondsPerBeat);
+      if (!(x1 > x0)) {
+        x0 -= secondsPerBeat;
+        x1 += secondsPerBeat;
+      }
+      return { x0, x1 };
+    }
+
+    /** Auto y range for a draft inside a view. */
+    function curveValueRange(draft, view) {
+      const ys = [0];
+      const push = (value) => {
+        if (value !== null && Number.isFinite(value)) ys.push(value);
+      };
+      const piecewise = curveDraftIsPiecewise(draft);
+      if (!piecewise && draft.segments.length === 1) {
+        const count = 160;
+        for (let i = 0; i < count; i += 1) push(sampleCurve(draft.segments[0].curve, view.x0 + ((view.x1 - view.x0) * i) / (count - 1)));
+      } else {
+        for (const segment of draft.segments) {
+          const from = Math.max(segment.start, view.x0);
+          const to = Math.min(segment.end, view.x1);
+          if (!(to > from)) continue;
+          const count = Math.max(2, Math.min(160, Math.round(((to - from) / (view.x1 - view.x0)) * 160)));
+          for (let i = 0; i <= count; i += 1) push(sampleCurve(segment.curve, from + ((to - from) * i) / count));
+        }
+      }
+      for (const segment of draft.segments) {
+        for (const handle of curveParamHandles(segment.curve, { start: segment.start, end: segment.end, view })) {
+          if (!handle.ghost) push(handle.y);
+        }
+      }
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const value of ys) {
+        if (value < lo) lo = value;
+        if (value > hi) hi = value;
+      }
+      if (!(hi > lo)) {
+        const base = Number.isFinite(lo) ? lo : 0;
+        lo = base - 1;
+        hi = base + 1;
+      }
+      const pad = (hi - lo) * 0.15;
+      return [lo - pad, hi + pad];
+    }
+
+    /**
+     * View that puts the curve panel's beat grid on the same screen x as the
+     * main timeline: the left data edge is the main view's left time, and the
+     * scale is the main timeline's pixels-per-second.
+     */
+    function curveAlignedView(anchorTime, mainView, plotWidth) {
+      if (!mainView || !Number.isFinite(mainView.t0) || !Number.isFinite(mainView.pps) || mainView.pps <= 0) return null;
+      if (!Number.isFinite(plotWidth) || plotWidth <= 0) return null;
+      const anchor = Number.isFinite(anchorTime) ? anchorTime : 0;
+      const x0 = mainView.t0 - anchor;
+      const x1 = x0 + Math.max(1, plotWidth) / mainView.pps;
+      if (!(x1 > x0)) return null;
+      return { x0, x1 };
+    }
+
+    /** Pixel <-> data mapping of the curve panel (ruler + segment band + plot). */
+    function curveLayout(width, height, view) {
+      const left = CURVE_LAYOUT.left;
+      const right = CURVE_LAYOUT.right;
+      const plotTop = CURVE_LAYOUT.top;
+      const plotBottom = Math.max(plotTop + 20, height - CURVE_LAYOUT.bottom);
+      const plotW = Math.max(20, width - left - right);
+      const plotH = Math.max(20, plotBottom - plotTop);
+      const bandTop = CURVE_LAYOUT.rulerH + CURVE_LAYOUT.bandGap;
+      const bandH = CURVE_LAYOUT.bandH;
+      const safeX0 = Number.isFinite(view.x0) ? view.x0 : -1;
+      const safeX1 = Number.isFinite(view.x1) && view.x1 > safeX0 ? view.x1 : safeX0 + 1;
+      const safeY0 = Number.isFinite(view.y0) ? view.y0 : -1;
+      const safeY1 = Number.isFinite(view.y1) && view.y1 > safeY0 ? view.y1 : safeY0 + 1;
       return {
-        pad,
+        left,
+        right,
+        plotTop,
+        plotBottom,
         plotW,
         plotH,
-        toX: (x) => pad.left + ((x - bounds.x0) / (bounds.x1 - bounds.x0)) * plotW,
-        toY: (y) => pad.top + plotH - ((y - bounds.y0) / (bounds.y1 - bounds.y0)) * plotH,
+        rulerH: CURVE_LAYOUT.rulerH,
+        bandTop,
+        bandH,
+        view: { x0: safeX0, x1: safeX1, y0: safeY0, y1: safeY1 },
+        toX: (x) => left + ((x - safeX0) / (safeX1 - safeX0)) * plotW,
+        toY: (y) => plotBottom - ((y - safeY0) / (safeY1 - safeY0)) * plotH,
+        fromX: (px) => safeX0 + ((px - left) / plotW) * (safeX1 - safeX0),
+        fromY: (py) => safeY0 + ((plotBottom - py) / plotH) * (safeY1 - safeY0),
       };
     }
 
-    /**
-     * Modal curve editor. Edits a draft copy; Apply commits one patch op so the
-     * whole dialog interaction is a single undo step.
-     */
-    function CurveDialog(props) {
-      const t = props.t;
-      const [draft, setDraft] = useState(() => deepClone(props.value));
-      const canvasRef = useRef(null);
-      const [hover, setHover] = useState(-1);
-      const dragRef = useRef(null);
-      const boundsRef = useRef(null);
+    // ------------------------------------------------------------------------
+    // Per-type draggable parameters. Each handle carries a `drag(x, y)` that
+    // returns the updated curve; nested function curves recurse with a prefix.
+    // ------------------------------------------------------------------------
 
-      const handles = useMemo(() => collectHandles(draft), [draft]);
-      const range = useMemo(() => curveRange(draft), [draft]);
-      const valueRange = useMemo(() => curveValueRange(draft, range[0], range[1]), [draft, range]);
+    /** Collect draggable parameter handles of one function curve. */
+    function curveParamHandles(curve, options) {
+      const opts = options || {};
+      const span = curveHandleSpan(opts.start, opts.end, opts.view);
+      const handles = [];
+      collectCurveParamHandles(curve, span, opts.view || null, '', handles, null);
+      return handles.slice(0, 24);
+    }
 
-      boundsRef.current = { x0: range[0], x1: range[1], y0: valueRange[0], y1: valueRange[1] };
-
-      const paint = useCallback(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const rect = canvas.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
-        const width = Math.max(80, Math.round(rect.width));
-        const height = Math.max(80, Math.round(rect.height));
-        if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
-          canvas.width = Math.round(width * dpr);
-          canvas.height = Math.round(height * dpr);
-        }
-        const ctx = canvas.getContext('2d');
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.clearRect(0, 0, width, height);
-        const bounds = boundsRef.current;
-        const { pad, plotW, plotH, toX, toY } = curvePlotGeometry(width, height, bounds);
-
-        const labelColor = cssToken('--dsw-alias-label-secondary', '#8b93a7');
-        const lineColor = cssToken('--dsw-alias-border-l1', '#2c3446');
-        const brand = cssToken('--dsw-alias-brand-primary', '#5b8cff');
-
-        // Grid.
-        ctx.strokeStyle = lineColor;
-        ctx.lineWidth = 1;
-        ctx.font = '10px ui-monospace, monospace';
-        ctx.fillStyle = labelColor;
-        for (let i = 0; i <= 4; i += 1) {
-          const gy = pad.top + (plotH * i) / 4;
-          ctx.beginPath();
-          ctx.moveTo(pad.left, gy);
-          ctx.lineTo(pad.left + plotW, gy);
-          ctx.stroke();
-          const value = bounds.y1 - ((bounds.y1 - bounds.y0) * i) / 4;
-          ctx.fillText(formatNum(value, 3), 4, gy + 3);
-        }
-        for (let i = 0; i <= 4; i += 1) {
-          const gx = pad.left + (plotW * i) / 4;
-          ctx.beginPath();
-          ctx.moveTo(gx, pad.top);
-          ctx.lineTo(gx, pad.top + plotH);
-          ctx.stroke();
-          const value = bounds.x0 + ((bounds.x1 - bounds.x0) * i) / 4;
-          ctx.fillText(formatNum(value, 3), gx - 10, height - 8);
-        }
-        // Zero line.
-        if (bounds.y0 < 0 && bounds.y1 > 0) {
-          ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-          ctx.beginPath();
-          ctx.moveTo(pad.left, toY(0));
-          ctx.lineTo(pad.left + plotW, toY(0));
-          ctx.stroke();
-        }
-
-        // Piece boundaries.
-        const boundaries = [];
-        (function gather(node) {
-          if (!isTypedValue(node)) return;
-          if (node.t === 'arr') {
-            (node.items || []).forEach(gather);
-            return;
+    /** Recursive worker for curveParamHandles. */
+    function collectCurveParamHandles(curve, span, view, prefix, handles, parent) {
+      const type = curveTypeOf(curve);
+      const fields = curve && isTypedValue(curve) && curve.t === 'obj' ? curve.fields || {} : {};
+      const num = (name, fallback) => curveFieldNumber(curve, name, fallback);
+      const pushPoint = (key, x, y, xEditable, yEditable, drag, extra) => {
+        handles.push(Object.assign({
+          key: prefix + key,
+          x,
+          y,
+          xEditable,
+          yEditable,
+          style: 'point',
+          drag,
+        }, extra || {}));
+      };
+      const pushVertical = (key, x, drag, extra) => {
+        handles.push(Object.assign({
+          key: prefix + key,
+          x,
+          y: 0,
+          xEditable: true,
+          yEditable: false,
+          style: 'vertical',
+          drag,
+        }, extra || {}));
+      };
+      if (type === 'ConstantFunctionCurve' || type === 'ConstantCurve') {
+        const value = num('value', 0);
+        const x = (span.lo + span.hi) / 2;
+        pushPoint('value', x, value, false, true, (nextX, nextY) => (nextY === null ? curve : curveSetNumericField(curve, 'value', nextY)), { label: 'value' });
+        return;
+      }
+      if (type === 'LinearFunctionCurve') {
+        const k = num('k', 0);
+        const b = num('b', 0);
+        const xa = span.lo + (span.hi - span.lo) / 3;
+        const xb = span.lo + ((span.hi - span.lo) * 2) / 3;
+        const ya = k * xa + b;
+        const yb = k * xb + b;
+        const solveA = (nextY) => {
+          if (Math.abs(xb - xa) < 1e-9) return curve;
+          const kk = (yb - nextY) / (xb - xa);
+          return curveSetNumericFields(curve, { k: kk, b: nextY - kk * xa });
+        };
+        const solveB = (nextY) => {
+          if (Math.abs(xa - xb) < 1e-9) return curve;
+          const kk = (ya - nextY) / (xa - xb);
+          return curveSetNumericFields(curve, { k: kk, b: nextY - kk * xb });
+        };
+        pushPoint('linear-a', xa, ya, false, true, (nextX, nextY) => (nextY === null ? curve : solveA(nextY)), { label: 'A' });
+        pushPoint('linear-b', xb, yb, false, true, (nextX, nextY) => (nextY === null ? curve : solveB(nextY)), { label: 'B' });
+        return;
+      }
+      if (type === 'LinearCurve') {
+        const t0 = num('timeStart', span.lo);
+        const t1 = num('timeEnd', span.hi);
+        const v0 = num('valueStart', 0);
+        const v1 = num('valueEnd', 1);
+        pushPoint('key-start', t0, v0, true, true, (nextX, nextY) => {
+          const x = nextX === null ? t0 : Math.min(nextX, t1 - 1e-4);
+          const y = nextY === null ? v0 : nextY;
+          return curveSetNumericFields(curve, { timeStart: x, valueStart: y });
+        }, { label: 'start' });
+        pushPoint('key-end', t1, v1, true, true, (nextX, nextY) => {
+          const x = nextX === null ? t1 : Math.max(nextX, t0 + 1e-4);
+          const y = nextY === null ? v1 : nextY;
+          return curveSetNumericFields(curve, { timeEnd: x, valueEnd: y });
+        }, { label: 'end' });
+        return;
+      }
+      if (type === 'CubicHermiteSpline' || type === 'HermiteSpline') {
+        const startPoint = curvePointOf(curve, 'startPoint', span.lo, 0);
+        const endPoint = curvePointOf(curve, 'endPoint', span.hi, 1);
+        const tangentStart = num('startTangent', 0);
+        const tangentEnd = num('endTangent', 0);
+        const h = Math.max((endPoint.x - startPoint.x) / 4, 1e-6);
+        pushPoint('point-start', startPoint.x, startPoint.y, true, true, (nextX, nextY) => {
+          const x = nextX === null ? startPoint.x : Math.min(nextX, endPoint.x - 1e-4);
+          const y = nextY === null ? startPoint.y : nextY;
+          return curveSetPoint(curve, 'startPoint', x, y);
+        }, { label: 'start' });
+        pushPoint('point-end', endPoint.x, endPoint.y, true, true, (nextX, nextY) => {
+          const x = nextX === null ? endPoint.x : Math.max(nextX, startPoint.x + 1e-4);
+          const y = nextY === null ? endPoint.y : nextY;
+          return curveSetPoint(curve, 'endPoint', x, y);
+        }, { label: 'end' });
+        pushPoint('tangent-start', startPoint.x + h, startPoint.y + tangentStart * h, false, true, (nextX, nextY) => {
+          if (nextY === null) return curve;
+          return curveSetNumericField(curve, 'startTangent', (nextY - startPoint.y) / h);
+        }, { style: 'tangent', label: 'tangent', lineTo: [startPoint.x, startPoint.y] });
+        pushPoint('tangent-end', endPoint.x - h, endPoint.y - tangentEnd * h, false, true, (nextX, nextY) => {
+          if (nextY === null) return curve;
+          return curveSetNumericField(curve, 'endTangent', (endPoint.y - nextY) / h);
+        }, { style: 'tangent', label: 'tangent', lineTo: [endPoint.x, endPoint.y] });
+        return;
+      }
+      if (type === 'PeriodicFunctionCurve') {
+        const startX = num('startX', span.lo);
+        const endX = num('endX', span.hi);
+        pushVertical('period-start', startX, (nextX) => {
+          if (nextX === null) return curve;
+          return curveSetNumericField(curve, 'startX', Math.min(nextX, endX - 1e-4));
+        }, { label: 'startX' });
+        pushVertical('period-end', endX, (nextX) => {
+          if (nextX === null) return curve;
+          return curveSetNumericField(curve, 'endX', Math.max(nextX, startX + 1e-4));
+        }, { label: 'endX' });
+        {
+          const innerSpan = endX > startX ? { lo: startX, hi: endX } : span;
+          const innerHandles = [];
+          collectCurveParamHandles(fields.functionCurve, innerSpan, view, prefix + 'inner.', innerHandles, curve);
+          for (const handle of innerHandles) {
+            const childDrag = handle.drag;
+            handles.push(
+              Object.assign({}, handle, {
+                drag: (nextX, nextY) => {
+                  const updated = childDrag(nextX, nextY);
+                  if (!updated || updated === fields.functionCurve) return curve;
+                  return curveSetField(curve, 'functionCurve', updated);
+                },
+              }),
+            );
           }
-          if (node.t !== 'obj') return;
-          const type = stripNamespace(node.type);
-          if (type === 'FunctionPiece') {
-            const fields = node.fields || {};
-            for (const key of ['startX', 'endX']) {
-              const raw = valueAsNumber(fields[key]);
-              if (raw !== null && Number.isFinite(raw)) boundaries.push(raw);
+        }
+        return;
+      }
+      if (type === 'AxialSymmetricFunctionCurve') {
+        const axis = num('axis', span.lo);
+        pushVertical('axis', axis, (nextX) => (nextX === null ? curve : curveSetNumericField(curve, 'axis', nextX)), { label: 'axis' });
+        const innerHandles = [];
+        collectCurveParamHandles(fields.functionCurve, span, view, prefix + 'inner.', innerHandles, curve);
+        for (const handle of innerHandles) {
+          const childDrag = handle.drag;
+          handles.push(
+            Object.assign({}, handle, {
+              drag: (nextX, nextY) => {
+                const updated = childDrag(nextX, nextY);
+                if (!updated || updated === fields.functionCurve) return curve;
+                return curveSetField(curve, 'functionCurve', updated);
+              },
+            }),
+          );
+          handles.push(Object.assign({}, handle, {
+            key: handle.key + '.mirror',
+            x: 2 * axis - handle.x,
+            ghost: true,
+            drag: () => curve,
+          }));
+        }
+        return;
+      }
+      if (type === 'AdditionFunctionCurve') {
+        const firstHandles = [];
+        collectCurveParamHandles(fields.firstFunctionCurve, span, view, prefix + 'first.', firstHandles, curve);
+        for (const handle of firstHandles) {
+          const childDrag = handle.drag;
+          handles.push(
+            Object.assign({}, handle, {
+              accent: 0,
+              drag: (nextX, nextY) => {
+                const updated = childDrag(nextX, nextY);
+                if (!updated || updated === fields.firstFunctionCurve) return curve;
+                return curveSetField(curve, 'firstFunctionCurve', updated);
+              },
+            }),
+          );
+        }
+        const secondHandles = [];
+        collectCurveParamHandles(fields.secondFunctionCurve, span, view, prefix + 'second.', secondHandles, curve);
+        for (const handle of secondHandles) {
+          const childDrag = handle.drag;
+          handles.push(
+            Object.assign({}, handle, {
+              accent: 1,
+              drag: (nextX, nextY) => {
+                const updated = childDrag(nextX, nextY);
+                if (!updated || updated === fields.secondFunctionCurve) return curve;
+                return curveSetField(curve, 'secondFunctionCurve', updated);
+              },
+            }),
+          );
+        }
+        return;
+      }
+      // CompositeFunctionCurve (and nested piecewise) have no direct x handles.
+    }
+
+    // ------------------------------------------------------------------------
+    // Canvas painter (pure function of the panel state passed in `opts`).
+    // ------------------------------------------------------------------------
+
+    /** Small helper: apply a selection highlight to a color. */
+    function curveWithAlpha(ctx, color, alpha) {
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = color;
+    }
+
+    /** Paint the curve panel canvas. */
+    function paintCurveCanvas(opts) {
+      const canvas = opts.canvasRef && opts.canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect ? canvas.getBoundingClientRect() : { width: 800, height: 420 };
+      const width = Math.max(200, Math.round(rect.width || canvas.clientWidth || 800));
+      const height = Math.max(120, Math.round(rect.height || canvas.clientHeight || 420));
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      ctx.textBaseline = 'alphabetic';
+      ctx.textAlign = 'left';
+
+      const colors = {
+        background: cssToken('--dsw-alias-bg-base', '#10131a'),
+        layerOne: cssToken('--dsw-alias-bg-layer-1', '#171b24'),
+        layerTwo: cssToken('--dsw-alias-bg-layer-2', '#1e2330'),
+        border: cssToken('--dsw-alias-border-l1', '#2b3244'),
+        label: cssToken('--dsw-alias-label-primary', '#eef1f7'),
+        secondary: cssToken('--dsw-alias-label-secondary', '#8b93a7'),
+        brand: cssToken('--dsw-alias-brand-primary', '#5b8cff'),
+        warn: cssToken('--dsw-alias-state-warn-primary', '#f59e0b'),
+      };
+
+      const draft = opts.draft;
+      const segments = draft.segments || [];
+      const view = opts.view;
+      const layout = curveLayout(width, height, view);
+      const selected = segments.find((segment) => segment.id === opts.selectedId) || segments[0] || null;
+      const selectedIndex = selected ? segments.indexOf(selected) : -1;
+      const bpm = opts.tempo && Number.isFinite(opts.tempo.bpm) && opts.tempo.bpm > 0 ? opts.tempo.bpm : 120;
+      const secondsPerBeat = 60 / bpm;
+      const origin = (opts.tempo && Number.isFinite(opts.tempo.offset) ? opts.tempo.offset : 0) - (Number.isFinite(opts.anchorTime) ? opts.anchorTime : 0);
+      const pixelsPerSecond = layout.plotW / (view.x1 - view.x0);
+      const hover = opts.hover;
+      const drag = opts.dragRef ? opts.dragRef.current : null;
+
+      ctx.fillStyle = colors.background;
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = colors.layerOne;
+      ctx.fillRect(0, 0, width, layout.rulerH);
+      ctx.fillStyle = colors.layerTwo;
+      ctx.fillRect(0, layout.bandTop, width, layout.bandH);
+
+      // Beat ruler + vertical grid (main timeline BPM/offset, anchored at the element).
+      const division = opts.snapDiv || 4;
+      let beatStep = 1 / division;
+      let guard = 0;
+      while (beatStep * secondsPerBeat * pixelsPerSecond < 4 && guard < 60) {
+        beatStep *= 2;
+        guard += 1;
+      }
+      if (!Number.isFinite(beatStep) || beatStep <= 0) beatStep = 1;
+      let labelStep = beatStep;
+      guard = 0;
+      while (labelStep * secondsPerBeat * pixelsPerSecond < 58 && guard < 60) {
+        labelStep *= 2;
+        guard += 1;
+      }
+      const firstBeat = Math.ceil((view.x0 - origin) / secondsPerBeat / beatStep) * beatStep - beatStep;
+      const lastBeat = (view.x1 - origin) / secondsPerBeat;
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      for (let beat = firstBeat; beat <= lastBeat + beatStep; beat += beatStep) {
+        const px = layout.toX(origin + beat * secondsPerBeat);
+        if (px < layout.left - 0.5 || px > layout.left + layout.plotW + 0.5) continue;
+        const whole = Math.abs(beat - Math.round(beat)) < 1e-9;
+        ctx.strokeStyle = whole ? colors.border : 'rgba(120,130,150,0.16)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(Math.round(px) + 0.5, layout.rulerH);
+        ctx.lineTo(Math.round(px) + 0.5, layout.plotBottom);
+        ctx.stroke();
+        const labeled = Math.abs(beat / labelStep - Math.round(beat / labelStep)) < 1e-9;
+        if (labeled && whole) {
+          ctx.fillStyle = colors.secondary;
+          ctx.fillText('♪' + formatNum(beat, Math.abs(beat - Math.round(beat)) < 1e-9 ? 0 : 1), px + 3, layout.rulerH - 6);
+        }
+      }
+      // Seconds labels along the bottom.
+      const secondCandidates = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120];
+      let secondsStep = secondCandidates[secondCandidates.length - 1];
+      for (const candidate of secondCandidates) {
+        if (candidate * pixelsPerSecond >= 68) {
+          secondsStep = candidate;
+          break;
+        }
+      }
+      guard = 0;
+      while (secondsStep * pixelsPerSecond < 68 && guard < 60) {
+        secondsStep *= 2;
+        guard += 1;
+      }
+      if (!Number.isFinite(secondsStep) || secondsStep <= 0) secondsStep = 120;
+      const firstSecond = Math.ceil(view.x0 / secondsStep) * secondsStep;
+      for (let x = firstSecond; x <= view.x1 + secondsStep; x += secondsStep) {
+        const px = layout.toX(x);
+        if (px < layout.left || px > layout.left + layout.plotW) continue;
+        ctx.fillStyle = colors.secondary;
+        ctx.fillText(formatNum(x, 2) + 's', px + 2, height - 8);
+      }
+
+      // Horizontal value grid.
+      for (let i = 0; i <= 4; i += 1) {
+        const y = view.y0 + ((view.y1 - view.y0) * i) / 4;
+        const py = layout.toY(y);
+        ctx.strokeStyle = colors.border;
+        ctx.globalAlpha = 0.65;
+        ctx.beginPath();
+        ctx.moveTo(layout.left, Math.round(py) + 0.5);
+        ctx.lineTo(layout.left + layout.plotW, Math.round(py) + 0.5);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = colors.secondary;
+        ctx.fillText(formatNum(y, 3), 4, py + 3);
+      }
+      if (view.y0 < 0 && view.y1 > 0) {
+        const py = layout.toY(0);
+        ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+        ctx.beginPath();
+        ctx.moveTo(layout.left, py);
+        ctx.lineTo(layout.left + layout.plotW, py);
+        ctx.stroke();
+      }
+      // Element origin (x = 0).
+      if (view.x0 <= 0 && view.x1 >= 0) {
+        const px = layout.toX(0);
+        ctx.strokeStyle = 'rgba(124,140,255,0.45)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(px, layout.plotTop);
+        ctx.lineTo(px, layout.plotBottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = colors.secondary;
+        ctx.fillText(opts.t('curveElementOrigin'), px + 3, layout.plotTop - 4);
+      }
+      // Outside-the-covered-range shading (piecewise only).
+      if (curveDraftIsPiecewise(draft) && segments.length) {
+        const first = segments[0];
+        const last = segments[segments.length - 1];
+        const regions = [];
+        if (Number.isFinite(first.start) && first.start > view.x0) regions.push([view.x0, Math.min(first.start, view.x1)]);
+        if (Number.isFinite(last.end) && last.end < view.x1) regions.push([Math.max(last.end, view.x0), view.x1]);
+        for (const region of regions) {
+          const x0 = layout.toX(region[0]);
+          const x1 = layout.toX(region[1]);
+          if (!(x1 > x0)) continue;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x0, layout.plotTop, x1 - x0, layout.plotH);
+          ctx.clip();
+          ctx.strokeStyle = 'rgba(139,147,167,0.18)';
+          ctx.lineWidth = 1;
+          for (let offset = -layout.plotH; offset < x1 - x0 + layout.plotH; offset += 9) {
+            ctx.beginPath();
+            ctx.moveTo(x0 + offset, layout.plotBottom);
+            ctx.lineTo(x0 + offset + layout.plotH, layout.plotTop);
+            ctx.stroke();
+          }
+          ctx.restore();
+          ctx.fillStyle = colors.secondary;
+          ctx.fillText('0', x0 + (x1 - x0) / 2, layout.plotTop + 24);
+        }
+      }
+
+      // Segment band.
+      for (let i = 0; i < segments.length; i += 1) {
+        const segment = segments[i];
+        const from = Math.max(segment.start, view.x0);
+        const to = Math.min(segment.end, view.x1);
+        if (!(to > from)) continue;
+        const x0 = layout.toX(from);
+        const x1 = layout.toX(to);
+        const color = CURVE_SEGMENT_COLORS[i % CURVE_SEGMENT_COLORS.length];
+        const active = selected && segment.id === selected.id;
+        curveWithAlpha(ctx, color, active ? 0.3 : 0.15);
+        ctx.fillRect(x0 + 1, layout.bandTop + 2, Math.max(1, x1 - x0 - 2), layout.bandH - 4);
+        ctx.globalAlpha = 1;
+        if (active) {
+          ctx.strokeStyle = colors.brand;
+          ctx.lineWidth = 1.4;
+          ctx.strokeRect(x0 + 1.5, layout.bandTop + 2.5, Math.max(1, x1 - x0 - 3), layout.bandH - 5);
+        }
+        ctx.fillStyle = colors.label;
+        ctx.font = '10.5px ui-sans-serif, system-ui, sans-serif';
+        const label = i + 1 + ' · ' + curveTypeLabel(opts.t, curveTypeOf(segment.curve));
+        if (x1 - x0 > 30) ctx.fillText(fitText(ctx, label, x1 - x0 - 12), x0 + 6, layout.bandTop + layout.bandH / 2 + 3);
+      }
+
+      // Segment boundary handles + warning marks.
+      const boundaries = curveBoundaries(draft);
+      for (let i = 0; i < boundaries.length; i += 1) {
+        const boundary = boundaries[i];
+        if (!Number.isFinite(boundary)) continue;
+        if (boundary < view.x0 || boundary > view.x1) continue;
+        const px = layout.toX(boundary);
+        const active =
+          (hover && hover.kind === 'boundary' && hover.index === i) ||
+          (drag && drag.kind === 'boundary' && drag.boundaryIndex === i);
+        ctx.strokeStyle = active ? colors.brand : 'rgba(220,226,240,0.28)';
+        ctx.lineWidth = active ? 1.5 : 1;
+        ctx.setLineDash(active ? [] : [3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(px, layout.plotTop);
+        ctx.lineTo(px, layout.plotBottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(px, layout.bandTop + layout.bandH, active ? 6 : 5, 0, Math.PI * 2);
+        ctx.fillStyle = active ? '#ffffff' : colors.brand;
+        ctx.fill();
+        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = active ? colors.brand : 'rgba(255,255,255,0.82)';
+        ctx.stroke();
+      }
+      for (const warning of opts.warnings || []) {
+        if (warning.time < view.x0 || warning.time > view.x1) continue;
+        const px = layout.toX(warning.time);
+        const py = layout.plotTop + 12;
+        ctx.beginPath();
+        ctx.arc(px, py, 6.5, 0, Math.PI * 2);
+        ctx.fillStyle = colors.warn;
+        ctx.fill();
+        ctx.fillStyle = '#10131a';
+        ctx.font = 'bold 9px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('!', px, py + 3);
+        ctx.textAlign = 'left';
+      }
+
+      // Curves.
+      const drawCurve = (curve, from, to, color, lineWidth) => {
+        if (!(to > from)) return;
+        const pixelWidth = (to - from) * pixelsPerSecond;
+        const count = Math.max(2, Math.min(500, Math.round(pixelWidth)));
+        let started = false;
+        ctx.beginPath();
+        for (let i = 0; i <= count; i += 1) {
+          const x = from + ((to - from) * i) / count;
+          const y = sampleCurve(curve, x);
+          if (y === null || !Number.isFinite(y)) {
+            started = false;
+            continue;
+          }
+          const px = layout.toX(x);
+          const py = layout.toY(y);
+          if (!started) {
+            ctx.moveTo(px, py);
+            started = true;
+          } else {
+            ctx.lineTo(px, py);
+          }
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineWidth;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      };
+      if (!curveDraftIsPiecewise(draft) && segments.length === 1) {
+        drawCurve(segments[0].curve, view.x0, view.x1, CURVE_SEGMENT_COLORS[0], 2);
+      } else {
+        for (let i = 0; i < segments.length; i += 1) {
+          const segment = segments[i];
+          const from = Math.max(segment.start, view.x0);
+          const to = Math.min(segment.end, view.x1);
+          const active = selected && segment.id === selected.id;
+          drawCurve(segment.curve, from, to, CURVE_SEGMENT_COLORS[i % CURVE_SEGMENT_COLORS.length], active ? 2.4 : 1.7);
+        }
+      }
+
+      // Parameter handles of the selected segment.
+      if (selected) {
+        const handles = curveParamHandles(selected.curve, { start: selected.start, end: selected.end, view });
+        for (const handle of handles) {
+          if (handle.ghost) continue;
+          if (handle.x < view.x0 || handle.x > view.x1) continue;
+          const px = layout.toX(handle.x);
+          const color =
+            handle.accent === 1 ? '#ff9f43' : handle.accent === 0 ? CURVE_SEGMENT_COLORS[selectedIndex % CURVE_SEGMENT_COLORS.length] : CURVE_SEGMENT_COLORS[selectedIndex % CURVE_SEGMENT_COLORS.length];
+          const active = hover && hover.kind === 'param' && hover.key === handle.key;
+          if (handle.style === 'vertical') {
+            ctx.strokeStyle = active ? colors.brand : 'rgba(220,226,240,0.35)';
+            ctx.setLineDash([4, 3]);
+            ctx.beginPath();
+            ctx.moveTo(px, layout.plotTop);
+            ctx.lineTo(px, layout.plotBottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = active ? '#ffffff' : color;
+            ctx.fillRect(px - 4, layout.plotTop + 2, 8, 8);
+            ctx.strokeStyle = colors.brand;
+            ctx.strokeRect(px - 4, layout.plotTop + 2, 8, 8);
+            if (active) {
+              ctx.fillStyle = colors.label;
+              ctx.font = '10px ui-monospace, monospace';
+              ctx.fillText(formatNum(handle.x, 3), px + 8, layout.plotTop + 12);
+            }
+            continue;
+          }
+          const py = layout.toY(handle.y);
+          if (handle.lineTo) {
+            ctx.strokeStyle = 'rgba(220,226,240,0.35)';
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(px, py);
+            ctx.lineTo(layout.toX(handle.lineTo[0]), layout.toY(handle.lineTo[1]));
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+          ctx.beginPath();
+          ctx.arc(px, py, active ? 6 : 4.5, 0, Math.PI * 2);
+          ctx.fillStyle = active ? '#ffffff' : color;
+          ctx.fill();
+          ctx.lineWidth = 1.4;
+          ctx.strokeStyle = active ? colors.brand : 'rgba(255,255,255,0.85)';
+          ctx.stroke();
+          if (active) {
+            ctx.fillStyle = colors.label;
+            ctx.font = '10px ui-monospace, monospace';
+            ctx.fillText(formatNum(handle.x, 3) + 's / ' + formatNum(handle.y, 3), px + 8, py - 8);
+          }
+        }
+      }
+
+      // Hover crosshair + value readout.
+      if (hover && hover.kind === 'plot' && Number.isFinite(hover.x)) {
+        const px = layout.toX(hover.x);
+        if (px >= layout.left && px <= layout.left + layout.plotW) {
+          ctx.strokeStyle = 'rgba(220,226,240,0.35)';
+          ctx.setLineDash([2, 4]);
+          ctx.beginPath();
+          ctx.moveTo(px, layout.plotTop);
+          ctx.lineTo(px, layout.plotBottom);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          let value = null;
+          for (const segment of segments) {
+            if (hover.x >= segment.start && hover.x <= segment.end) {
+              value = sampleCurve(segment.curve, hover.x);
+              break;
             }
           }
-          const fields = node.fields || {};
-          for (const key of Object.keys(fields)) gather(fields[key]);
-        })(draft);
-        ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = 'rgba(124,140,255,0.5)';
-        for (const boundary of boundaries) {
-          if (boundary < bounds.x0 || boundary > bounds.x1) continue;
-          const px = toX(boundary);
-          ctx.beginPath();
-          ctx.moveTo(px, pad.top);
-          ctx.lineTo(px, pad.top + plotH);
-          ctx.stroke();
+          const beat = (hover.x - origin) / secondsPerBeat;
+          const text =
+            formatNum(hover.x, 3) +
+            's · ' +
+            (opts.t('beat') || 'beat') +
+            ' ' +
+            formatNum(beat, 3) +
+            (value === null ? '' : ' · ' + formatNum(value, 3));
+          ctx.font = '10.5px ui-monospace, monospace';
+          const textWidth = ctx.measureText(text).width;
+          const boxX = Math.min(px + 8, layout.left + layout.plotW - textWidth - 10);
+          const boxY = layout.plotTop + 14;
+          ctx.fillStyle = colors.layerTwo;
+          ctx.fillRect(boxX - 4, boxY - 11, textWidth + 8, 17);
+          ctx.strokeStyle = colors.border;
+          ctx.strokeRect(boxX - 4.5, boxY - 11.5, textWidth + 9, 18);
+          ctx.fillStyle = colors.label;
+          ctx.fillText(text, boxX, boxY + 2);
         }
-        ctx.setLineDash([]);
+      }
 
-        // Curve.
-        const series = sampleCurveSeries(draft, bounds.x0, bounds.x1, Math.max(80, Math.round(plotW)));
-        if (series.length > 1) {
-          ctx.strokeStyle = brand;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          series.forEach(([x, y], index) => {
-            const px = toX(x);
-            const py = toY(y);
-            if (index === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-          });
-          ctx.stroke();
-        }
+      if (!segments.length) {
+        ctx.fillStyle = colors.secondary;
+        ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(opts.t('curveNoSegments'), width / 2, height / 2);
+        ctx.textAlign = 'left';
+      }
+    }
 
-        // Handles.
-        handles.forEach((handle, index) => {
-          let px;
-          let py;
-          if (handle.kind === 'point') {
-            const point = handlePoint(draft, handle);
-            if (!point) return;
-            px = toX(point[0]);
-            py = toY(point[1]);
-          } else if (handle.kind === 'y') {
-            const y = valueAsNumber(getAtPath(draft, handle.yPath));
-            if (y === null) return;
-            px = pad.left + plotW * 0.5;
-            py = toY(y);
-          } else if (handle.kind === 'x') {
-            const x = valueAsNumber(getAtPath(draft, handle.xPath));
-            if (x === null) return;
-            px = toX(x);
-            py = pad.top + plotH - 8;
-          } else {
-            return;
-          }
-          const active = index === hover || (dragRef.current && dragRef.current.index === index);
-          ctx.beginPath();
-          ctx.arc(px, py, active ? 6.5 : 5, 0, Math.PI * 2);
-          ctx.fillStyle = active ? '#ffffff' : brand;
-          ctx.fill();
-          ctx.lineWidth = 1.6;
-          ctx.strokeStyle = active ? brand : 'rgba(255,255,255,0.85)';
-          ctx.stroke();
-        });
-      }, [draft, handles, hover]);
+    // ------------------------------------------------------------------------
+    // Context menu (new segment / change type / delete).
+    // ------------------------------------------------------------------------
+
+    /** Small fixed menu for the curve panel. */
+    function CurveContextMenu(props) {
+      const { t, menu, segments, onClose, onSetView, onCreate, onChangeType, onDelete } = props;
+      const menuRef = useRef(null);
+      useEffect(() => {
+        const close = () => onClose();
+        const onPointerDown = (event) => {
+          const node = menuRef.current;
+          if (node && event && event.target && typeof node.contains === 'function' && node.contains(event.target)) return;
+          onClose();
+        };
+        const onKeyDown = (event) => {
+          if (!event || event.key !== 'Escape') return;
+          event.preventDefault();
+          event.stopPropagation();
+          onClose();
+        };
+        window.addEventListener('pointerdown', onPointerDown, true);
+        window.addEventListener('keydown', onKeyDown, true);
+        window.addEventListener('resize', close);
+        window.addEventListener('wheel', close, true);
+        window.addEventListener('blur', close);
+        return () => {
+          window.removeEventListener('pointerdown', onPointerDown, true);
+          window.removeEventListener('keydown', onKeyDown, true);
+          window.removeEventListener('resize', close);
+          window.removeEventListener('wheel', close, true);
+          window.removeEventListener('blur', close);
+        };
+      }, [onClose]);
+      const segment = menu.segmentId ? segments.find((item) => item.id === menu.segmentId) || null : null;
+      const currentType = segment ? curveTypeOf(segment.curve) : '';
+      const width = 244;
+      const estimatedHeight = menu.view === 'root' ? 168 : 360;
+      const left = clamp(Number.isFinite(menu.x) ? menu.x : 12, 8, Math.max(8, (window.innerWidth || 1200) - width - 8));
+      const top = clamp(Number.isFinite(menu.y) ? menu.y : 12, 8, Math.max(8, (window.innerHeight || 800) - estimatedHeight - 8));
+      const head =
+        menu.view === 'root'
+          ? segment
+            ? t('curveSegment') + ' ' + (segments.indexOf(segment) + 1) + ' · ' + curveTypeLabel(t, currentType)
+            : t('curveNewSegmentAt').replace('{time}', formatNum(menu.xData, 3) + 's')
+          : menu.action === 'change'
+            ? t('curveChangeType')
+            : t('curveChooseType');
+      const item = (key, label, icon, onClick, options) =>
+        h(
+          'button',
+          {
+            key,
+            type: 'button',
+            className: 'dgc-menuItem' + (options && options.danger ? ' is-danger' : ''),
+            role: 'menuitem',
+            disabled: options && options.disabled,
+            style: options && options.disabled ? { opacity: 0.45, cursor: 'default' } : undefined,
+            onClick: options && options.disabled ? undefined : onClick,
+          },
+          icon ? h(Icon, { name: icon, size: 13 }) : h('span', { style: { width: 13, flex: '0 0 13px' } }, ''),
+          h('span', null, label),
+        );
+      return h(
+        'div',
+        {
+          ref: menuRef,
+          className: 'dgc-menu',
+          role: 'menu',
+          'aria-label': head,
+          style: { left, top },
+          onContextMenu: (event) => event.preventDefault(),
+        },
+        h('div', { className: 'dgc-menuHead' }, head),
+        menu.view === 'root'
+          ? [
+              item('new', t('curveNewSegment'), 'plus', () => onSetView(menu.segmentId ? 'new' : 'new'), { disabled: menu.segmentId ? false : !menu.canInsert }),
+              item('change', t('curveChangeType'), 'pencil', () => onSetView('change'), { disabled: !segment }),
+              item('delete', t('curveDeleteSegment'), 'trash', onDelete, { danger: true, disabled: !segment || segments.length <= 1 }),
+            ]
+          : curveTypeChoices(currentType).map((type) =>
+              h(
+                'button',
+                {
+                  key: type,
+                  type: 'button',
+                  className: 'dgc-menuItem',
+                  role: 'menuitemradio',
+                  'aria-checked': type === currentType,
+                  onClick: () => (menu.action === 'change' ? onChangeType(type) : onCreate(type)),
+                },
+                h('span', { style: { width: 13, textAlign: 'center', fontSize: 11, flex: '0 0 13px' } }, type === currentType ? '✓' : ''),
+                h('span', null, curveTypeLabel(t, type)),
+              ),
+            ),
+      );
+    }
+
+    // ------------------------------------------------------------------------
+    // The docked panel.
+    // ------------------------------------------------------------------------
+
+    /** One finite/infinite boundary input. */
+    function CurveBoundaryField(props) {
+      const { t, value, onChange, onMakeFinite } = props;
+      if (!Number.isFinite(value)) {
+        return h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+          h('span', { className: 'dgc-mono dgc-listRowSlim' }, value > 0 ? '+∞' : '−∞'),
+          onMakeFinite
+            ? h(Button, { variant: 'ghost', onClick: onMakeFinite, title: t('curveMakeFinite') }, h('span', { className: 'dgc-listRowSlim' }, t('curveMakeFinite')))
+            : null,
+        );
+      }
+      return h(NumberField, { value, step: 0.05, onCommit: onChange });
+    }
+
+    /** The docked curve editor: beat ruler, segment band, plot and side editor. */
+    function CurveEditorLayer(props) {
+      const t = props.t;
+      const target = props.target || {};
+      const bpm = props.tempo && Number.isFinite(props.tempo.bpm) && props.tempo.bpm > 0 ? props.tempo.bpm : 120;
+      const secondsPerBeat = 60 / bpm;
+      const fallbackRange = useMemo(() => [-2 * secondsPerBeat, 2 * secondsPerBeat], [secondsPerBeat]);
+      const anchorTime = Number.isFinite(target.anchorTime) ? target.anchorTime : 0;
+
+      const initialRef = useRef(null);
+      if (initialRef.current === null) {
+        initialRef.current = readCurveDraft(target.value, { fallbackRange });
+      }
+      const [draft, setDraft] = useState(initialRef.current);
+      const [selectedId, setSelectedId] = useState(() => firstCurveSegmentId(initialRef.current));
+      const [view, setView] = useState(() => curveInitialView(initialRef.current, props.tempo, fallbackRange));
+      const [hover, setHover] = useState(null);
+      const [drag, setDrag] = useState(null);
+      const [menu, setMenu] = useState(null);
+      const [resizeTick, setResizeTick] = useState(0);
+      const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+      const dragRef = useRef(null);
+      const hoverRef = useRef(null);
+      const canvasRef = useRef(null);
+      const mainView = target.mainView;
+      const draftRef = useRef(draft);
+      const viewRef = useRef(view);
+      const selectedIdRef = useRef(selectedId);
+      const yRange = useMemo(() => curveValueRange(draft, view), [draft, view]);
+      const yRangeRef = useRef(yRange);
+      const warnings = useMemo(() => curveBoundaryWarnings(draft), [draft]);
+      const boundaries = curveBoundaries(draft);
+      const foundIndex = draft.segments.findIndex((segment) => segment.id === selectedId);
+      const selectedIndex = foundIndex >= 0 ? foundIndex : draft.segments.length ? 0 : -1;
+      const selected = selectedIndex >= 0 ? draft.segments[selectedIndex] : null;
+      const currentType = selected ? curveTypeOf(selected.curve) : '';
+      const piecewise = curveDraftIsPiecewise(draft);
+      const dirty = draft.edited === true;
+
+      draftRef.current = draft;
+      viewRef.current = view;
+      selectedIdRef.current = selected ? selected.id : selectedId;
+      hoverRef.current = hover;
+      yRangeRef.current = yRange;
+
+      const changeDrag = useCallback((next) => {
+        dragRef.current = next;
+        setDrag(next);
+      }, []);
 
       useEffect(() => {
-        paint();
-      }, [paint]);
-
-      useEffect(() => {
-        const onResize = () => paint();
+        const onResize = () => setResizeTick((value) => value + 1);
         window.addEventListener('resize', onResize);
         return () => window.removeEventListener('resize', onResize);
-      }, [paint]);
+      }, []);
 
-      /** Data coordinates from a pointer event. */
-      const pointFromEvent = useCallback((event) => {
+      // Track the plot canvas size so the aligned view can be computed.
+      useEffect(() => {
+        const measure = () => {
+          const canvas = canvasRef.current;
+          if (!canvas || typeof canvas.getBoundingClientRect !== 'function') return;
+          const rect = canvas.getBoundingClientRect();
+          const w = Math.round(rect.width || 0);
+          const h = Math.round(rect.height || 0);
+          setCanvasSize((previous) => (previous.w === w && previous.h === h ? previous : { w, h }));
+        };
+        measure();
+        window.addEventListener('resize', measure);
+        let observer = null;
+        if (typeof ResizeObserver === 'function' && canvasRef.current) {
+          observer = new ResizeObserver(measure);
+          observer.observe(canvasRef.current);
+        }
+        return () => {
+          window.removeEventListener('resize', measure);
+          if (observer) observer.disconnect();
+        };
+      }, []);
+
+      // Align the beat grid with the main timeline's time scale/offset until
+      // the user explicitly zooms or pans the panel.
+      useEffect(() => {
+        const plotWidth = canvasSize.w - CURVE_LAYOUT.left - CURVE_LAYOUT.right;
+        const aligned = curveAlignedView(anchorTime, mainView, plotWidth);
+        if (!aligned) return;
+        setView((previous) => {
+          if (Math.abs(previous.x0 - aligned.x0) < 1e-9 && Math.abs(previous.x1 - aligned.x1) < 1e-9) return previous;
+          return aligned;
+        });
+      }, [mainView, anchorTime, canvasSize.w, target.token]);
+
+      // Re-key the draft when the page swaps to another curve target without a
+      // remount (the page normally closes/unmounts first; this also keeps the
+      // component correct under the test harness's positional hook slots).
+      const activeTokenRef = useRef(target.token);
+      useEffect(() => {
+        if (activeTokenRef.current === target.token) return;
+        activeTokenRef.current = target.token;
+        const fresh = readCurveDraft(target.value, { fallbackRange });
+        setDraft(fresh);
+        setSelectedId(firstCurveSegmentId(fresh));
+        setView(curveInitialView(fresh, props.tempo, fallbackRange));
+        setHover(null);
+        changeDrag(null);
+        setMenu(null);
+      }, [target.token, target.value, fallbackRange, props.tempo, changeDrag]);
+
+      useDialogEscape(props.onClose);
+
+      // A non-drag draft edit invalidates the hover readout (segment/type edit,
+      // numeric input); a drag keeps its active handle hover.
+      useEffect(() => {
+        if (!dragRef.current && hoverRef.current) setHover(null);
+      }, [draft]);
+
+      // The shared x view can move under the pointer (main scroll/zoom); drop
+      // the stale data readout until the next pointer move.
+      useEffect(() => {
+        if (!dragRef.current && hoverRef.current) setHover(null);
+      }, [view.x0, view.x1]);
+
+      /** Live view (frozen while a drag is in progress). */
+      const currentView = () => {
+        const active = dragRef.current;
+        if (active && active.frozen) return active.frozen;
+        return { x0: viewRef.current.x0, x1: viewRef.current.x1, y0: yRangeRef.current[0], y1: yRangeRef.current[1] };
+      };
+
+      /** Pointer position in canvas CSS pixels + the canvas rect. */
+      const localPoint = (event) => {
         const canvas = canvasRef.current;
         if (!canvas) return null;
         const rect = canvas.getBoundingClientRect();
-        // While dragging, keep the bounds captured at pointer-down: otherwise a
-        // handle that changes the curve range would move the axes under the
-        // cursor and the handle would jump.
-        const bounds = (dragRef.current && dragRef.current.bounds) || boundsRef.current;
-        const geometry = curvePlotGeometry(rect.width, rect.height, bounds);
-        const px = event.clientX - rect.left;
-        const py = event.clientY - rect.top;
-        return {
-          dataX: bounds.x0 + ((px - geometry.pad.left) / geometry.plotW) * (bounds.x1 - bounds.x0),
-          dataY: bounds.y0 + ((geometry.pad.top + geometry.plotH - py) / geometry.plotH) * (bounds.y1 - bounds.y0),
-        };
-      }, []);
+        const clientX = event && Number.isFinite(event.clientX) ? event.clientX : 0;
+        const clientY = event && Number.isFinite(event.clientY) ? event.clientY : 0;
+        return { x: clientX - rect.left, y: clientY - rect.top, width: rect.width || 800, height: rect.height || 420 };
+      };
 
-      /** Closest handle to the pointer, in pixels. */
-      const hitHandle = useCallback(
-        (event) => {
-          const canvas = canvasRef.current;
-          if (!canvas) return -1;
-          const rect = canvas.getBoundingClientRect();
-          const bounds = (dragRef.current && dragRef.current.bounds) || boundsRef.current;
-          const { pad, plotW, plotH, toX, toY } = curvePlotGeometry(rect.width, rect.height, bounds);
-          let best = -1;
-          let bestDistance = 12 * 12;
-          handles.forEach((handle, index) => {
-            let hx;
-            let hy;
-            if (handle.kind === 'point') {
-              const point = handlePoint(draft, handle);
-              if (!point) return;
-              hx = toX(point[0]);
-              hy = toY(point[1]);
-            } else if (handle.kind === 'y') {
-              const y = valueAsNumber(getAtPath(draft, handle.yPath));
-              if (y === null) return;
-              hx = pad.left + plotW * 0.5;
-              hy = toY(y);
-            } else if (handle.kind === 'x') {
-              const x = valueAsNumber(getAtPath(draft, handle.xPath));
-              if (x === null) return;
-              hx = toX(x);
-              hy = pad.top + plotH - 8;
-            } else {
-              return;
-            }
-            const dx = hx - (event.clientX - rect.left);
-            const dy = hy - (event.clientY - rect.top);
+      /** Segment index whose [start, end] contains x (last segment closes its end). */
+      const segmentIndexAt = (x) => {
+        const list = draftRef.current.segments;
+        for (let i = 0; i < list.length; i += 1) {
+          const segment = list[i];
+          if (x >= segment.start && (x < segment.end || (i === list.length - 1 && x <= segment.end))) return i;
+        }
+        return -1;
+      };
+
+      /** Closest handle, boundary or segment under a pointer. */
+      const hitTest = (point) => {
+        const v = currentView();
+        const layout = curveLayout(point.width, point.height, v);
+        const list = draftRef.current.segments;
+        const bounds = curveBoundaries(draftRef.current);
+        let boundaryIndex = -1;
+        let boundaryDistance = 14;
+        for (let i = 0; i < bounds.length; i += 1) {
+          const boundary = bounds[i];
+          if (!Number.isFinite(boundary)) continue;
+          const px = layout.toX(boundary);
+          const inBand = point.y >= layout.bandTop - 5 && point.y <= layout.bandTop + layout.bandH + 5;
+          // Boundaries are grabbed from the segment band only, so parameter
+          // handles that sit exactly on a segment edge remain draggable.
+          if (!inBand) continue;
+          const distance = Math.abs(px - point.x);
+          if (distance < boundaryDistance) {
+            boundaryDistance = distance;
+            boundaryIndex = i;
+          }
+        }
+        if (boundaryIndex >= 0) return { kind: 'boundary', index: boundaryIndex };
+        const selectedNow = list.find((segment) => segment.id === selectedIdRef.current) || list[0];
+        if (selectedNow) {
+          const handles = curveParamHandles(selectedNow.curve, { start: selectedNow.start, end: selectedNow.end, view: v });
+          let bestHandle = null;
+          let bestDistance = 11 * 11;
+          for (const handle of handles) {
+            if (handle.ghost) continue;
+            const px = layout.toX(handle.x);
+            const py = handle.style === 'vertical' ? layout.plotTop + 6 : layout.toY(handle.y);
+            const dx = px - point.x;
+            const dy = py - point.y;
             const distance = dx * dx + dy * dy;
             if (distance < bestDistance) {
               bestDistance = distance;
-              best = index;
+              bestHandle = handle;
             }
-          });
-          return best;
-        },
-        [draft, handles],
-      );
-
-      const onPointerDown = useCallback(
-        (event) => {
-          const index = hitHandle(event);
-          if (index < 0) return;
-          event.preventDefault();
-          const bounds = boundsRef.current;
-          dragRef.current = { index, bounds };
-          try {
-            event.currentTarget.setPointerCapture(event.pointerId);
-          } catch (error) {
-            /* ignore */
           }
-          setHover(index);
-        },
-        [hitHandle],
-      );
+          if (bestHandle) return { kind: 'param', key: bestHandle.key };
+        }
+        if (point.y < layout.rulerH) return { kind: 'ruler' };
+        const x = layout.fromX(point.x);
+        const segmentIndex = segmentIndexAt(x);
+        return {
+          kind: point.y <= layout.bandTop + layout.bandH ? 'band' : 'plot',
+          x,
+          segmentIndex,
+        };
+      };
 
-      const onPointerMove = useCallback(
-        (event) => {
-          const drag = dragRef.current;
-          if (!drag) {
-            const index = hitHandle(event);
-            if (index !== hover) setHover(index);
+      const updateHover = (point) => {
+        const hit = hitTest(point);
+        let next = null;
+        if (hit.kind === 'boundary') next = { kind: 'boundary', index: hit.index };
+        else if (hit.kind === 'param') next = { kind: 'param', key: hit.key };
+        else if (hit.kind === 'plot') next = { kind: 'plot', x: hit.x, segmentIndex: hit.segmentIndex };
+        else if (hit.kind === 'band') next = { kind: 'band', x: hit.x, segmentIndex: hit.segmentIndex };
+        const previousKey = hoverRef.current ? JSON.stringify(hoverRef.current) : '';
+        const nextKey = next ? JSON.stringify(next) : '';
+        if (previousKey !== nextKey) setHover(next);
+      };
+
+      const onPointerDown = (event) => {
+        if (event && event.button !== undefined && event.button !== 0) return;
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const point = localPoint(event);
+        if (!point) return;
+        try {
+          canvas.setPointerCapture(event.pointerId);
+        } catch (error) {
+          /* the harness / older browsers may not support pointer capture */
+        }
+        const hit = hitTest(point);
+        const v = currentView();
+        const frozen = { x0: v.x0, x1: v.x1, y0: v.y0, y1: v.y1 };
+        if (hit.kind === 'boundary') {
+          changeDrag({ kind: 'boundary', boundaryIndex: hit.index, frozen, pointerId: event.pointerId });
+          setHover({ kind: 'boundary', index: hit.index });
+          return;
+        }
+        if (hit.kind === 'param') {
+          const selectedNow = draftRef.current.segments.find((segment) => segment.id === selectedIdRef.current) || draftRef.current.segments[0];
+          if (selectedNow) {
+            changeDrag({ kind: 'param', key: hit.key, segmentId: selectedNow.id, frozen, pointerId: event.pointerId });
+            setHover({ kind: 'param', key: hit.key });
             return;
           }
-          const point = pointFromEvent(event);
-          if (!point) return;
-          const handle = handles[drag.index];
-          if (!handle) return;
-          // Snap very small movements to a tenth.
-          const sx = event.shiftKey ? Math.round(point.dataX * 100) / 100 : Math.round(point.dataX * 1000) / 1000;
-          const sy = event.shiftKey ? Math.round(point.dataY * 100) / 100 : Math.round(point.dataY * 1000) / 1000;
-          setDraft((current) => {
-            // Recompute against the CURRENT handle paths but with drag-time bounds frozen.
-            const liveHandles = collectHandles(current);
-            const liveHandle = liveHandles[drag.index];
-            if (!liveHandle) return current;
-            return moveHandle(current, liveHandle, liveHandle.xPath ? sx : null, liveHandle.yPath ? sy : null);
-          });
-        },
-        [handles, hitHandle, hover, pointFromEvent],
-      );
+        }
+        if (hit.segmentIndex >= 0) {
+          const segment = draftRef.current.segments[hit.segmentIndex];
+          if (segment) setSelectedId(segment.id);
+        }
+        changeDrag({
+          kind: 'pan',
+          startX: point.x,
+          startY: point.y,
+          frozen,
+          view0: { x0: viewRef.current.x0, x1: viewRef.current.x1 },
+          pointerId: event.pointerId,
+          moved: false,
+          segmentIndex: hit.segmentIndex,
+        });
+      };
 
-      const onPointerUp = useCallback((event) => {
-        if (dragRef.current) {
-          dragRef.current = null;
-          try {
-            event.currentTarget.releasePointerCapture(event.pointerId);
-          } catch (error) {
-            /* ignore */
+      const onPointerMove = (event) => {
+        const point = localPoint(event);
+        if (!point) return;
+        const active = dragRef.current;
+        if (!active) {
+          updateHover(point);
+          return;
+        }
+        if (active.kind === 'pan') {
+          const dx = point.x - active.startX;
+          const dy = point.y - active.startY;
+          if (!active.moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
+          active.moved = true;
+          const layout = curveLayout(point.width, point.height, active.frozen);
+          const delta = (dx / layout.plotW) * (active.frozen.x1 - active.frozen.x0);
+          if (typeof props.onTimelineSetT0 === 'function') {
+            props.onTimelineSetT0(active.frozen.x0 + anchorTime - delta);
+            return;
+          }
+          setView({ x0: active.view0.x0 - delta, x1: active.view0.x1 - delta });
+          return;
+        }
+        if (active.kind === 'boundary') {
+          const layout = curveLayout(point.width, point.height, active.frozen);
+          const raw = layout.fromX(point.x);
+          const nextX = props.snapOn ? snapCurveTime(raw, props.tempo, props.snapDiv, anchorTime, true) : round(raw, 6);
+          setDraft((current) => setSegmentBoundary(current, active.boundaryIndex, nextX, { snap: false }));
+          return;
+        }
+        if (active.kind === 'param') {
+          const layout = curveLayout(point.width, point.height, active.frozen);
+          const rawX = layout.fromX(point.x);
+          const rawY = layout.fromY(point.y);
+          const nextX = props.snapOn ? snapCurveTime(rawX, props.tempo, props.snapDiv, anchorTime, true) : round(rawX, 6);
+          const nextY = round(rawY, 6);
+          const segmentId = active.segmentId;
+          const handleKey = active.key;
+          const handleView = active.frozen;
+          setDraft((current) => {
+            const segment = current.segments.find((item) => item.id === segmentId);
+            if (!segment) return current;
+            const handles = curveParamHandles(segment.curve, { start: segment.start, end: segment.end, view: handleView });
+            const handle = handles.find((item) => item.key === handleKey);
+            if (!handle) return current;
+            const nextCurve = handle.drag(handle.xEditable ? nextX : null, handle.yEditable ? nextY : null);
+            if (!nextCurve) return current;
+            return updateSegmentCurve(current, segmentId, nextCurve);
+          });
+        }
+      };
+
+      const onPointerUp = (event) => {
+        const active = dragRef.current;
+        if (!active) return;
+        if (active.kind === 'pan' && !active.moved && active.segmentIndex >= 0) {
+          const segment = draftRef.current.segments[active.segmentIndex];
+          if (segment) setSelectedId(segment.id);
+        }
+        changeDrag(null);
+        try {
+          if (canvasRef.current) canvasRef.current.releasePointerCapture(event.pointerId);
+        } catch (error) {
+          /* ignore */
+        }
+      };
+
+      const onPointerCancel = (event) => {
+        changeDrag(null);
+        try {
+          if (canvasRef.current) canvasRef.current.releasePointerCapture(event.pointerId);
+        } catch (error) {
+          /* ignore */
+        }
+      };
+
+      const onPointerLeave = () => {
+        if (!dragRef.current) setHover(null);
+      };
+
+      const onWheel = (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        const point = localPoint(event);
+        if (!point) return;
+        const v = currentView();
+        const layout = curveLayout(point.width, point.height, v);
+        if (event.shiftKey || Math.abs(event.deltaX || 0) > Math.abs(event.deltaY || 0)) {
+          const delta = ((event.shiftKey ? event.deltaY : event.deltaX) / layout.plotW) * (v.x1 - v.x0);
+          if (typeof props.onTimelineScroll === 'function') {
+            props.onTimelineScroll(delta);
+            return;
+          }
+          setView({ x0: v.x0 + delta, x1: v.x1 + delta });
+          return;
+        }
+        const factor = Math.exp((event.deltaY || 0) * 0.0015);
+        if (typeof props.onTimelineZoom === 'function') {
+          const anchorX = clamp(point.x, layout.left, layout.left + layout.plotW);
+          const absoluteTime = anchorTime + layout.fromX(anchorX);
+          props.onTimelineZoom(1 / factor, absoluteTime, anchorX);
+          return;
+        }
+        const span = clamp((v.x1 - v.x0) * factor, 1e-4, 1e6);
+        const ratio = clamp((point.x - layout.left) / layout.plotW, 0, 1);
+        const anchorX = layout.fromX(clamp(point.x, layout.left, layout.left + layout.plotW));
+        setView({ x0: anchorX - ratio * span, x1: anchorX + (1 - ratio) * span });
+      };
+
+      const onContextMenu = (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+        const point = localPoint(event);
+        if (!point) return;
+        const v = currentView();
+        const layout = curveLayout(point.width, point.height, v);
+        const rawX = layout.fromX(point.x);
+        const snappedX = round(snapCurveTime(rawX, props.tempo, props.snapDiv, anchorTime, props.snapOn), 6);
+        const segmentIndex = segmentIndexAt(snappedX);
+        const segment = segmentIndex >= 0 ? draftRef.current.segments[segmentIndex] : null;
+        if (segment) setSelectedId(segment.id);
+        const first = draftRef.current.segments[0];
+        const last = draftRef.current.segments[draftRef.current.segments.length - 1];
+        const canInsert = !segment && ((first && Number.isFinite(first.start) && snappedX < first.start) || (last && Number.isFinite(last.end) && snappedX > last.end));
+        setMenu({
+          x: event && Number.isFinite(event.clientX) ? event.clientX : 24,
+          y: event && Number.isFinite(event.clientY) ? event.clientY : 24,
+          xData: snappedX,
+          segmentId: segment ? segment.id : null,
+          canInsert,
+          view: 'root',
+          action: null,
+        });
+      };
+
+      const closeMenu = useCallback(() => setMenu(null), []);
+      const menuSetView = (nextView) => {
+        setMenu((current) => (current ? Object.assign({}, current, { view: nextView, action: nextView === 'change' ? 'change' : 'new' }) : current));
+      };
+      const menuCreate = (type) => {
+        const current = menu;
+        if (!current) return;
+        const ref = draftRef.current;
+        let result;
+        if (current.segmentId) {
+          const index = ref.segments.findIndex((segment) => segment.id === current.segmentId);
+          result = splitCurveSegment(ref, index, current.xData, type, { view: currentView() });
+        } else {
+          result = addCurveSegmentOutside(ref, current.xData, type, { view: currentView() });
+        }
+        if (result.draft !== ref) {
+          setDraft(result.draft);
+          if (result.segmentId) setSelectedId(result.segmentId);
+        }
+        setMenu(null);
+      };
+      const menuChangeType = (type) => {
+        const current = menu;
+        if (!current || !current.segmentId) return;
+        const index = draftRef.current.segments.findIndex((segment) => segment.id === current.segmentId);
+        if (index >= 0) setDraft((draftNow) => changeCurveSegmentType(draftNow, index, type, { view: currentView() }));
+        setMenu(null);
+      };
+      const menuDelete = () => {
+        const current = menu;
+        if (!current || !current.segmentId) return;
+        const ref = draftRef.current;
+        const index = ref.segments.findIndex((segment) => segment.id === current.segmentId);
+        if (index >= 0) {
+          const result = deleteCurveSegment(ref, index);
+          if (result.draft !== ref) {
+            setDraft(result.draft);
+            setSelectedId(result.segmentId || (result.draft.segments[0] ? result.draft.segments[0].id : null));
           }
         }
-      }, []);
+        setMenu(null);
+      };
 
-      const summary = describeValue(draft);
+      const typeOptions = curveTypeChoices(currentType);
+      const onTypeSelect = (event) => {
+        const type = event && event.target ? event.target.value : '';
+        if (!type) return;
+        setDraft((current) => {
+          const index = current.segments.findIndex((segment) => segment.id === selectedIdRef.current);
+          return index >= 0 ? changeCurveSegmentType(current, index, type, { view: currentView() }) : current;
+        });
+      };
+      const onBoundaryCommit = (index, value) => {
+        if (!Number.isFinite(value)) return;
+        setDraft((current) => setSegmentBoundary(current, index, round(value, 6), { snap: false }));
+      };
+      const onMakeBoundaryFinite = (index) => {
+        const edge = index === 0 ? viewRef.current.x0 : viewRef.current.x1;
+        setDraft((current) => setSegmentBoundary(current, index, round(edge, 6), { snap: false }));
+      };
+      const onFlagChange = (id, flags) => setDraft((current) => setSegmentFlags(current, id, flags));
+
+      const addSegment = () => {
+        const ref = draftRef.current;
+        const segment = ref.segments.find((item) => item.id === selectedIdRef.current) || ref.segments[0];
+        if (!segment) return;
+        const index = ref.segments.indexOf(segment);
+        const playhead = props.playheadRef && Number.isFinite(props.playheadRef.current) ? props.playheadRef.current : null;
+        const relative = playhead === null ? null : playhead - anchorTime;
+        const span = curveHandleSpan(segment.start, segment.end, currentView());
+        let cut = relative;
+        if (cut === null || !(cut > segment.start && cut < segment.end)) cut = (span.lo + span.hi) / 2;
+        cut = snapCurveTime(cut, props.tempo, props.snapDiv, anchorTime, props.snapOn);
+        const type = curveTypeOf(segment.curve) || 'ConstantFunctionCurve';
+        const result = splitCurveSegment(ref, index, cut, type, { view: currentView() });
+        if (result.draft !== ref) {
+          setDraft(result.draft);
+          if (result.segmentId) setSelectedId(result.segmentId);
+        }
+      };
+
+      const deleteSelected = () => {
+        const ref = draftRef.current;
+        const index = ref.segments.findIndex((segment) => segment.id === selectedIdRef.current);
+        if (index < 0) return;
+        const result = deleteCurveSegment(ref, index);
+        if (result.draft !== ref) {
+          setDraft(result.draft);
+          setSelectedId(result.segmentId || (result.draft.segments[0] ? result.draft.segments[0].id : null));
+        }
+      };
+
+      const reset = () => {
+        const fresh = readCurveDraft(target.value, { fallbackRange });
+        setDraft(fresh);
+        setSelectedId(firstCurveSegmentId(fresh));
+        setHover(null);
+        changeDrag(null);
+        setMenu(null);
+      };
+
+      const fit = () => {
+        if (typeof props.onTimelineFit === 'function') {
+          props.onTimelineFit();
+          return;
+        }
+        setView(curveInitialView(draftRef.current, props.tempo, fallbackRange));
+        setHover(null);
+        setMenu(null);
+      };
+
+      const apply = () => {
+        if (typeof props.onApply === 'function') props.onApply(buildCurveValue(draftRef.current));
+      };
+      const paintView = (() => {
+        const active = dragRef.current;
+        if (active && active.frozen) return active.frozen;
+        return { x0: view.x0, x1: view.x1, y0: yRange[0], y1: yRange[1] };
+      })();
+
+      useEffect(() => {
+        paintCurveCanvas({
+          canvasRef,
+          draft,
+          view: paintView,
+          selectedId: selected ? selected.id : null,
+          hover,
+          dragRef,
+          warnings,
+          tempo: props.tempo,
+          anchorTime,
+          snapDiv: props.snapDiv || 4,
+          t,
+        });
+      }, [draft, view, yRange, selected, selectedId, hover, drag, menu, props.tempo, props.snapDiv, anchorTime, t, warnings, resizeTick]);
+
+      let cursor = 'default';
+      if (drag) cursor = drag.kind === 'pan' ? 'grabbing' : drag.kind === 'boundary' ? 'ew-resize' : 'grabbing';
+      else if (hover) cursor = hover.kind === 'boundary' ? 'ew-resize' : hover.kind === 'param' ? 'pointer' : hover.kind === 'plot' || hover.kind === 'band' ? 'grab' : 'default';
+
+      const subtitle = [
+        target.elementType ? shortType(target.elementType) : '',
+        t('curveElementOrigin') + ' ' + formatTime(anchorTime),
+        t('tempo') + ' ' + formatNum(bpm, 2),
+        props.snapOn ? t('snap') + ' 1/' + (props.snapDiv || 4) : t('snapOff'),
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      const rangeLabel = (segment) => {
+        const side = (value) => (Number.isFinite(value) ? formatNum(value, 2) + 's' : value > 0 ? '+∞' : '−∞');
+        return side(segment.start) + ' – ' + side(segment.end);
+      };
+
+      const lengthLabel =
+        selected && Number.isFinite(selected.start) && Number.isFinite(selected.end)
+          ? formatNum(selected.end - selected.start, 3) + 's'
+          : '∞';
+
+      const startBoundary = selected ? selectedIndex : -1;
+      const endBoundary = selected ? selectedIndex + 1 : -1;
+      const boundaryField = (index) => {
+        if (index < 0) return null;
+        const value = boundaries[index];
+        return h(CurveBoundaryField, {
+          t,
+          value,
+          onChange: (next) => onBoundaryCommit(index, next),
+          onMakeFinite: Number.isFinite(value) ? null : () => onMakeBoundaryFinite(index),
+        });
+      };
+
+      const header = h(
+        'div',
+        { className: 'dgc-curveHead' },
+        h(Icon, { name: 'curve' }),
+        h(
+          'div',
+          { className: 'dgc-curveTitle' },
+          h('strong', null, (target.name ? target.name + ' · ' : '') + t('curveEditor')),
+          h('span', null, subtitle),
+        ),
+        h('span', { className: 'dgc-badge' }, t('curveSegmentCount').replace('{count}', String(draft.segments.length))),
+        dirty ? h('span', { className: 'dgc-badge is-dirty' }, t('curveEdited')) : null,
+        draft.converted ? h('span', { className: 'dgc-badge is-dirty' }, t('curveConverted')) : null,
+        h('span', { className: 'dgc-spacer' }),
+        h(Button, { icon: 'plus', title: t('curveAddAtPlayhead'), onClick: addSegment }, t('curveNewSegment')),
+        h(Button, { variant: 'ghost', icon: 'fit', title: t('curveFit'), onClick: fit }),
+        h(Button, { variant: 'ghost', icon: 'reload', title: t('reset'), onClick: reset }),
+        h(Button, { onClick: props.onClose }, t('cancel')),
+        h(Button, { variant: 'primary', onClick: apply }, t('apply')),
+        h(Button, { variant: 'ghost', onClick: props.onClose, title: t('close') }, '×'),
+      );
+
+      const side = h(
+        'div',
+        { className: 'dgc-curveSide' },
+        h(
+          'div',
+          { className: 'dgc-curveSideBody' },
+          h(
+            'div',
+            { className: 'dgc-sectionTitle' },
+            h('span', null, t('curveSegments')),
+            h('span', { className: 'dgc-badge' }, String(draft.segments.length)),
+            h('span', { className: 'dgc-spacer' }),
+            h(Button, { variant: 'ghost', icon: 'plus', title: t('curveAddAtPlayhead'), onClick: addSegment }),
+          ),
+          h(
+            'div',
+            { className: 'dgc-curveSegList' },
+            draft.segments.map((segment, index) =>
+              h(
+                'div',
+                {
+                  key: segment.id,
+                  className: 'dgc-curveSeg' + (segment.id === (selected ? selected.id : '') ? ' is-active' : ''),
+                  onClick: () => setSelectedId(segment.id),
+                  title: rangeLabel(segment),
+                },
+                h('span', { className: 'dgc-curveSegColor', style: { background: CURVE_SEGMENT_COLORS[index % CURVE_SEGMENT_COLORS.length] } }),
+                h('span', { className: 'dgc-curveSegLabel' }, index + 1 + ' · ' + curveTypeLabel(t, curveTypeOf(segment.curve))),
+                h('span', { className: 'dgc-curveSegMeta' }, rangeLabel(segment)),
+              ),
+            ),
+          ),
+          warnings.length
+            ? h(
+                'div',
+                { className: 'dgc-curveWarn' },
+                h('strong', null, t('curveValueJump') + ' × ' + warnings.length),
+                warnings.map((warning) =>
+                  h(
+                    'div',
+                    { key: warning.index, className: 'dgc-curveWarnRow' },
+                    t('curveValueJumpAt')
+                      .replace('{time}', formatNum(warning.time, 3))
+                      .replace('{left}', formatNum(warning.left, 3))
+                      .replace('{right}', formatNum(warning.right, 3)),
+                  ),
+                ),
+              )
+            : null,
+          selected
+            ? h(
+                'div',
+                null,
+                h('div', { className: 'dgc-sectionTitle' }, t('curveSegment') + ' ' + (selectedIndex + 1)),
+                h(
+                  FieldRow,
+                  { label: t('curveFunctionType') },
+                  h(
+                    'select',
+                    { className: 'dgc-select', value: currentType, onChange: onTypeSelect, style: { width: '100%' } },
+                    typeOptions.map((type) => h('option', { key: type, value: type }, curveTypeLabel(t, type))),
+                  ),
+                ),
+                h(FieldRow, { label: t('curveStart') }, boundaryField(startBoundary)),
+                h(FieldRow, { label: t('curveEnd') }, boundaryField(endBoundary)),
+                h(FieldRow, { label: t('curveLength') }, h('span', { className: 'dgc-mono' }, lengthLabel)),
+                piecewise
+                  ? h(
+                      FieldRow,
+                      { label: t('curveLeftClosed') },
+                      h(Checkbox, { checked: selected.leftClosed === true, onChange: (next) => onFlagChange(selected.id, { leftClosed: next }) }),
+                    )
+                  : null,
+                piecewise
+                  ? h(
+                      FieldRow,
+                      { label: t('curveRightClosed') },
+                      h(Checkbox, { checked: selected.rightClosed === true, onChange: (next) => onFlagChange(selected.id, { rightClosed: next }) }),
+                    )
+                  : null,
+                h(
+                  'div',
+                  { className: 'dgc-rowActions', style: { margin: '8px 0' } },
+                  h(Button, { variant: 'danger', icon: 'trash', disabled: draft.segments.length <= 1, title: t('curveDeleteSegment'), onClick: deleteSelected }, t('curveDeleteSegment')),
+                ),
+                h('div', { className: 'dgc-curveNote' }, piecewise ? t('curveConverted') : t('curveWillConvert')),
+                h('div', { className: 'dgc-sectionTitle' }, t('curveParams')),
+                h(ValueEditor, {
+                  key: selected.id + ':' + currentType,
+                  value: selected.curve,
+                  schema: curveValueSchema(props.catalog, selected.curve),
+                  t,
+                  depth: 0,
+                  onChange: (next) => setDraft((current) => updateSegmentCurve(current, selected.id, next)),
+                }),
+                currentType === 'CompositeFunctionCurve' ? h('div', { className: 'dgc-curveNote' }, t('curveCompositeHint')) : null,
+              )
+            : h('div', { className: 'dgc-hint' }, t('curveNoSegments')),
+        ),
+      );
+
+      const footer = h(
+        'div',
+        { className: 'dgc-curveFoot' },
+        h('span', { className: 'dgc-curveHint' }, t('curvePanelHint')),
+        h('span', { className: 'dgc-spacer' }),
+        warnings.length ? h('span', { className: 'dgc-err' }, t('curveValueJump') + ' × ' + warnings.length) : h('span', { className: 'dgc-listRowSlim' }, t('curveNoJump')),
+        h('span', { className: 'dgc-listRowSlim' }, t('curveTimeAxis')),
+        h('span', { className: 'dgc-listRowSlim' }, t('curveBeatGrid')),
+      );
+
+      const body = h(
+        'div',
+        { className: 'dgc-curveBody' },
+        h(
+          'div',
+          { className: 'dgc-curvePlot' },
+          h('canvas', {
+            ref: canvasRef,
+            className: 'dgc-curveCanvas',
+            style: { cursor },
+            onPointerDown,
+            onPointerMove,
+            onPointerUp,
+            onPointerCancel,
+            onPointerLeave,
+            onContextMenu,
+            onWheel,
+          }),
+        ),
+        side,
+      );
 
       return h(
         'div',
-        { className: 'dgc-modalBackdrop', role: 'dialog', 'aria-modal': 'true' },
-        h(
-          'div',
-          { className: 'dgc-modal' },
-          h(
-            'div',
-            { className: 'dgc-modalHead' },
-            h(Icon, { name: 'curve' }),
-            h('h3', null, (props.title || t('curveEditor')) + ' · ' + summary),
-            h(Button, { variant: 'ghost', icon: 'reload', title: t('reset'), onClick: () => setDraft(deepClone(props.value)) }),
-            h(Button, { variant: 'ghost', onClick: props.onClose, title: t('close') }, '×'),
-          ),
-          h(
-            'div',
-            { className: 'dgc-modalBody' },
-            h('div', { className: 'dgc-modalCanvas' }, h('canvas', {
-              ref: canvasRef,
-              className: 'dgc-canvas',
-              style: { cursor: hover >= 0 ? 'grab' : 'default' },
-              onPointerDown,
-              onPointerMove,
-              onPointerUp,
-              onPointerCancel: onPointerUp,
-              onPointerLeave: () => {
-                if (!dragRef.current) setHover(-1);
-              },
-            })),
-            h(
-              'div',
-              { className: 'dgc-modalSide' },
-              h('div', { className: 'dgc-sectionTitle' }, t('numeric')),
-              h(ValueEditor, {
-                value: draft,
-                schema: props.schema || null,
-                t,
-                depth: 0,
-                onChange: (next) => setDraft(next),
-              }),
-            ),
-          ),
-          h(
-            'div',
-            { className: 'dgc-modalFoot' },
-            h('span', { className: 'dgc-listRowSlim', style: { flex: '1 1 auto' } }, props.hint || t('dragHint')),
-            h(Button, { onClick: props.onClose }, t('cancel')),
-            h(
-              Button,
-              {
-                variant: 'primary',
-                onClick: () => {
-                  if (props.onApply) props.onApply(draft);
-                  props.onClose();
-                },
-              },
-              t('apply'),
-            ),
-          ),
-        ),
+        { className: 'dgc-curveLayer', role: 'region', 'aria-label': t('curveEditor') },
+        header,
+        body,
+        footer,
+        menu
+          ? h(CurveContextMenu, {
+              t,
+              menu,
+              segments: draft.segments,
+              onClose: closeMenu,
+              onSetView: menuSetView,
+              onCreate: menuCreate,
+              onChangeType: menuChangeType,
+              onDelete: menuDelete,
+            })
+          : null,
       );
     }
+
+    /** Memoized docked curve panel (avoids 60fps re-renders while playing). */
+    const CurveEditorLayerMemo = React.memo(CurveEditorLayer);
 
     // ========================================================================
     // 11 · Left pane: staff list and element list.
@@ -5152,8 +7152,6 @@ window.__ModuleLoader__.load({
     function ElementInspector(props) {
       const { project, catalog, t, elementId, onEdit, onDelete, onDuplicate, seek } = props;
       const found = useMemo(() => findElement(project, elementId), [project, elementId]);
-      const curveState = useState(null);
-      const [curveTarget, setCurveTarget] = curveState;
 
       if (!found) return h('div', { className: 'dgc-hint' }, t('noSelection'));
 
@@ -5182,15 +7180,47 @@ window.__ModuleLoader__.load({
       const lanes = props.lanes || [];
       const laneFieldName = timing.lane || 'laneName';
 
+      const toggleOptionalField = (name, schema, checked) => {
+        if (checked) {
+          patchField(name, defaultValueForSchema(schema));
+          return;
+        }
+        if (!Object.prototype.hasOwnProperty.call(fields, name)) return;
+        // Optional fields are removed, not set to null, so an unchecked field
+        // disappears from the .g file exactly like a field the chart omitted.
+        const nextFields = Object.assign({}, fields);
+        delete nextFields[name];
+        props.onEdit([{ op: 'patch', elementId: element.id, path: [], value: nextFields }]);
+      };
+
       const fieldRowFor = (name) => {
         const schema = schemaFields.find((field) => field.name === name) || null;
         const value = fields[name];
+        const label = (schema && schema.label) || name;
+        const optional = !!(schema && schema.optional === true);
         if (value === undefined) {
+          if (optional) {
+            return h(
+              FieldRow,
+              {
+                key: name,
+                label,
+                title: name,
+                optional: {
+                  name,
+                  checked: false,
+                  title: label,
+                  onChange: (checked) => toggleOptionalField(name, schema, checked),
+                },
+              },
+              h('span', { className: 'dgc-optionalHint' }, t('fieldUnused')),
+            );
+          }
           // Injector-default field the .g file left implicit: offer to
           // materialise it so it becomes editable (patching creates it).
           return h(
             FieldRow,
-            { key: name, label: (schema && schema.label) || name, title: name },
+            { key: name, label, title: name },
             h(
               Button,
               { variant: 'ghost', icon: 'plus', title: t('addField'), onClick: () => patchField(name, defaultValueForSchema(schema)) },
@@ -5198,17 +7228,54 @@ window.__ModuleLoader__.load({
             ),
           );
         }
+        const unused = optional && value === null;
         return h(
           FieldRow,
-          { key: name, label: (schema && schema.label) || name, title: name },
-          h(ValueEditor, {
-            value,
-            schema,
-            t,
-            depth: 0,
-            onChange: (next) => patchField(name, next),
-            onEditCurve: (current, apply) => setCurveTarget({ name, value: current, apply }),
-          }),
+          {
+            key: name,
+            label,
+            title: name,
+            optional: optional
+              ? {
+                  name,
+                  checked: !unused,
+                  title: label,
+                  onChange: (checked) => toggleOptionalField(name, schema, checked),
+                }
+              : null,
+          },
+          unused
+            ? h('span', { className: 'dgc-optionalHint' }, t('fieldUnused'))
+            : h(ValueEditor, {
+                value,
+                schema,
+                t,
+                depth: 0,
+                path: [name],
+                onChange: (next) => patchField(name, next),
+                onEditCurve: props.onOpenCurve
+                  ? (current, apply, curvePath) => {
+                      // Patch the curve at its exact path instead of rebuilding
+                      // the parent object, so editing another inspector field
+                      // while the panel is open is not reverted on Apply.
+                      const path =
+                        Array.isArray(curvePath) && curvePath.length > 0 ? curvePath.slice() : [name];
+                      const tail = path[path.length - 1];
+                      const curveName =
+                        typeof tail === 'number'
+                          ? path.filter((segment) => segment !== 'items' && segment !== 'fields').join('.') + '[' + tail + ']'
+                          : tail || name;
+                      props.onOpenCurve({
+                        name: curveName,
+                        value: current,
+                        apply: (next) => onEdit([{ op: 'patch', elementId: element.id, path, value: next }]),
+                        anchorTime: Number.isFinite(element.start) ? element.start : 0,
+                        elementId: element.id,
+                        elementType: element.type,
+                      });
+                    }
+                  : undefined,
+              }),
         );
       };
 
@@ -5273,16 +7340,6 @@ window.__ModuleLoader__.load({
               h('div', { className: 'dgc-listRowSlim', style: { paddingBottom: 4 } }, t('advancedHint')),
               unknownNames.map((name) => fieldRowFor(name)),
             )
-          : null,
-        curveTarget
-          ? h(CurveDialog, {
-              t,
-              title: (curveTarget.name || '') + ' · ' + t('curveEditor'),
-              value: curveTarget.value,
-              schema: (schemaFields.find((field) => field.name === curveTarget.name) || {}).schema || null,
-              onClose: () => setCurveTarget(null),
-              onApply: (next) => curveTarget.apply(next),
-            })
           : null,
       );
     }
@@ -5357,6 +7414,7 @@ window.__ModuleLoader__.load({
         prev.bpmBusy === next.bpmBusy &&
         prev.bpmAvailable === next.bpmAvailable &&
         prev.onDetectBpm === next.onDetectBpm &&
+        prev.onOpenCurve === next.onOpenCurve &&
         prev.t === next.t
       );
     });
@@ -5754,6 +7812,11 @@ window.__ModuleLoader__.load({
       const canvasRef = useRef(null);
       const [size, setSize] = useState({ w: 0, h: 0 });
       const [view, setView] = useState({ t0: 0, pps: PPS_DEFAULT, scrollY: 0 });
+      useEffect(() => {
+        if (typeof props.onViewChange === 'function') {
+          props.onViewChange({ t0: view.t0, pps: view.pps });
+        }
+      }, [view.t0, view.pps, props.onViewChange]);
       const [hover, setHover] = useState(null);
       // Right-click menu for the audio strip and the persisted view mode.
       const [waveMode, setWaveMode] = useState(readWaveModePreference);
@@ -5804,6 +7867,12 @@ window.__ModuleLoader__.load({
       layoutRef.current = layout;
 
       const headerH = RULER_H + WAVE_H;
+
+      useEffect(() => {
+        if (typeof props.onContentHeight === 'function') {
+          props.onContentHeight(headerH + layout.total);
+        }
+      }, [headerH, layout.total, props.onContentHeight]);
 
       /** Switch the audio strip between waveform and spectrum, and persist it. */
       const selectWaveMode = useCallback((mode) => {
@@ -7036,6 +9105,23 @@ window.__ModuleLoader__.load({
               const duration = Math.max(1, (projectRef.current && projectRef.current.duration) || 30);
               const width = Math.max(120, currentSize.w - GUTTER_W - 24);
               setView({ t0: 0, pps: clamp(width / duration, MIN_PPS, MAX_PPS), scrollY: 0 });
+            },
+            scrollBy: (delta) => {
+              if (!Number.isFinite(delta)) return;
+              setView((previous) => Object.assign({}, previous, { t0: Math.max(0, previous.t0 + delta) }));
+            },
+            setT0: (t0) => {
+              if (!Number.isFinite(t0)) return;
+              setView((previous) => Object.assign({}, previous, { t0: Math.max(0, t0) }));
+            },
+            zoomAt: (factor, time, x) => {
+              if (!Number.isFinite(factor) || factor <= 0 || !Number.isFinite(time)) return;
+              setView((previous) => {
+                const nextPps = clamp(previous.pps * factor, MIN_PPS, MAX_PPS);
+                const px = Number.isFinite(x) ? x : GUTTER_W;
+                const t0 = Math.max(0, time - (px - GUTTER_W) / nextPps);
+                return { t0, pps: nextPps, scrollY: previous.scrollY };
+              });
             },
             center: (time) => {
               const currentSize = sizeRef.current;
@@ -8626,7 +10712,7 @@ window.__ModuleLoader__.load({
      * Pure presentation; every value arrives from ChartStudioPage.
      */
     function StudioHeader(props) {
-      const { t, project, dirty, connection, session, hasPlayableContent, onOpenProject, onPreview } = props;
+      const { t, project, dirty, connection, session, hasPlayableContent, onOpenProject, onPreview, previewDisabled, curveBusy } = props;
       return h(
         'div',
         { className: 'dgc-header' },
@@ -8641,10 +10727,10 @@ window.__ModuleLoader__.load({
         connection === 'offline' ? h('span', { className: 'dgc-badge is-dirty dgc-offline' }, t('offline')) : null,
         h('span', { className: 'dgc-spacer' }),
         h(Button, { icon: 'folder', onClick: onOpenProject }, t('openProject')),
-        h(Button, { icon: 'preview', onClick: onPreview, disabled: !project || !hasPlayableContent, title: t('playbackOpen') }, t('playbackOpen')),
-        h(Button, { icon: 'reload', onClick: () => session.reload(), disabled: !project }, t('reload')),
-        h(Button, { icon: 'undo', onClick: () => session.undo(), disabled: !project }, t('undo')),
-        h(Button, { icon: 'redo', onClick: () => session.redo(), disabled: !project }, t('redo')),
+        h(Button, { icon: 'preview', onClick: onPreview, disabled: !project || !hasPlayableContent || previewDisabled, title: previewDisabled ? t('curvePreviewBusy') : t('playbackOpen') }, t('playbackOpen')),
+        h(Button, { icon: 'reload', onClick: () => session.reload(), disabled: !project || curveBusy, title: curveBusy ? t('curvePreviewBusy') : undefined }, t('reload')),
+        h(Button, { icon: 'undo', onClick: () => session.undo(), disabled: !project || curveBusy, title: curveBusy ? t('curvePreviewBusy') : undefined }, t('undo')),
+        h(Button, { icon: 'redo', onClick: () => session.redo(), disabled: !project || curveBusy, title: curveBusy ? t('curvePreviewBusy') : undefined }, t('redo')),
         h(
           Button,
           {
@@ -8768,6 +10854,8 @@ window.__ModuleLoader__.load({
         tempo,
         snapDiv,
         canvasApiRef,
+        curveEditing,
+        closeCurvePanel,
       } = actions;
 
       const target = event.target;
@@ -8798,6 +10886,22 @@ window.__ModuleLoader__.load({
       }
       const tag = target && target.tagName ? target.tagName.toUpperCase() : '';
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (target && target.isContentEditable)) return;
+      if (curveEditing) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeCurvePanel();
+          return;
+        }
+        if (event.key === ' ') {
+          event.preventDefault();
+          if (transport.playing) transport.pause();
+          else transport.play();
+          return;
+        }
+        // Keep chart-editing shortcuts (delete/undo/duplicate/...) away from
+        // the draft editor; the panel has its own apply/cancel controls.
+        return;
+      }
       const mod = event.metaKey || event.ctrlKey;
       if (mod && event.key.toLowerCase() === 'z') {
         event.preventDefault();
@@ -8900,9 +11004,45 @@ window.__ModuleLoader__.load({
       const [openDialog, setOpenDialog] = useState(false);
       const [preview, setPreview] = useState(false);
       const [notice, setNotice] = useState(null);
+      const [curveTarget, setCurveTarget] = useState(null);
+      const curveSeqRef = useRef(0);
+      const curveTargetRef = useRef(null);
+      // Latest main-timeline view ({t0, pps}); the docked curve panel uses it
+      // to put its beat grid on the same x coordinates as the main ruler.
+      const timelineViewRef = useRef({ t0: 0, pps: PPS_DEFAULT });
+      const [liveTimelineView, setLiveTimelineView] = useState({ t0: 0, pps: PPS_DEFAULT });
+      const [timelineContentHeight, setTimelineContentHeight] = useState(0);
+      const onTimelineContentHeight = useCallback((height) => {
+        if (!Number.isFinite(height)) return;
+        const next = Math.max(0, Math.round(height));
+        setTimelineContentHeight((previous) => (Math.abs(previous - next) <= 1 ? previous : next));
+      }, []);
+      const onTimelineView = useCallback((next) => {
+        if (!next) return;
+        timelineViewRef.current = { t0: next.t0, pps: next.pps };
+        // While the curve panel is open it is the second view of the same time
+        // axis, so every main horizontal scroll/zoom must update it too.
+        if (curveTargetRef.current) setLiveTimelineView({ t0: next.t0, pps: next.pps });
+      }, []);
       const canvasApiRef = useRef(null);
       const setCanvasApi = useCallback((api) => {
         canvasApiRef.current = api;
+      }, []);
+      const syncTimelineScroll = useCallback((delta) => {
+        const api = canvasApiRef.current;
+        if (api && typeof api.scrollBy === 'function') api.scrollBy(delta);
+      }, []);
+      const syncTimelineSetT0 = useCallback((t0) => {
+        const api = canvasApiRef.current;
+        if (api && typeof api.setT0 === 'function') api.setT0(t0);
+      }, []);
+      const syncTimelineZoom = useCallback((factor, time, x) => {
+        const api = canvasApiRef.current;
+        if (api && typeof api.zoomAt === 'function') api.zoomAt(factor, time, x);
+      }, []);
+      const syncTimelineFit = useCallback(() => {
+        const api = canvasApiRef.current;
+        if (api && typeof api.fit === 'function') api.fit();
       }, []);
       const [library, setLibrary] = useState([]);
       const clipboardRef = useRef([]);
@@ -8968,7 +11108,7 @@ window.__ModuleLoader__.load({
       }, [project]);
       const playbackModel = useMemo(() => (preview && project ? buildPlaybackModel(project) : null), [preview, project]);
       const openPreview = useCallback(() => {
-        if (!project) return;
+        if (!project || curveTargetRef.current) return;
         const total = Math.max(1, transport.duration || project.duration || 0);
         if (transport.time >= total - 0.05) transport.seek(0);
         transport.play();
@@ -8987,6 +11127,59 @@ window.__ModuleLoader__.load({
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
         noticeTimerRef.current = window.setTimeout(() => setNotice(null), 4200);
       }, []);
+
+      // Docked curve editor: the inspector requests it, the center pane hosts it.
+      curveTargetRef.current = curveTarget;
+      // Keep the beat origin in sync when the element's start time is edited
+      // while the panel is open (the stored target keeps the value snapshot).
+      const liveCurveTarget = useMemo(() => {
+        if (!curveTarget) return null;
+        const found = project ? findElement(project, curveTarget.elementId) : null;
+        const anchor = found && Number.isFinite(found.element.start) ? found.element.start : curveTarget.anchorTime;
+        return Object.assign({}, curveTarget, { anchorTime: anchor, mainView: liveTimelineView });
+      }, [curveTarget, project, liveTimelineView]);
+      const closeCurvePanel = useCallback(() => setCurveTarget(null), []);
+      const applyCurvePanel = useCallback((next) => {
+        const current = curveTargetRef.current;
+        if (current && typeof current.apply === 'function') current.apply(next);
+        setCurveTarget(null);
+      }, []);
+      const openCurveRef = useRef(null);
+      openCurveRef.current = (target) => {
+        if (!target) return;
+        if (curveTargetRef.current) {
+          pushNotice({ kind: 'error', text: t('curveOpenBusy') });
+          return;
+        }
+        if (preview) {
+          transport.pause();
+          setPreview(false);
+        }
+        curveSeqRef.current += 1;
+        const view = timelineViewRef.current;
+        setLiveTimelineView({ t0: view.t0, pps: view.pps });
+        setCurveTarget(
+          Object.assign({}, target, {
+            token: curveSeqRef.current,
+            mainView: view ? { t0: view.t0, pps: view.pps } : null,
+          }),
+        );
+      };
+      const openCurvePanel = useCallback((target) => openCurveRef.current(target), []);
+
+      // Close the editor when its element/selection goes away or the document
+      // changes underneath it (agent edit, undo/redo, reload).
+      useEffect(() => {
+        if (!curveTarget) return;
+        if (selection.length !== 1 || selection[0] !== curveTarget.elementId) setCurveTarget(null);
+      }, [selection, curveTarget]);
+      useEffect(() => {
+        if (!curveTarget) return;
+        if (!project || !findElement(project, curveTarget.elementId)) setCurveTarget(null);
+      }, [project, curveTarget]);
+      useEffect(() => {
+        setCurveTarget(null);
+      }, [project && project.dir]);
 
       const [bpmBusy, setBpmBusy] = useState(false);
       const bpmAvailable = useMemo(
@@ -9387,6 +11580,8 @@ window.__ModuleLoader__.load({
           tempo,
           snapDiv,
           canvasApiRef,
+          curveEditing: curveTarget !== null,
+          closeCurvePanel,
         });
 
       // The left pane is memoized and ignores callback props, so hand it stable
@@ -9416,6 +11611,8 @@ window.__ModuleLoader__.load({
           connection,
           session,
           hasPlayableContent,
+          previewDisabled: curveTarget !== null,
+          curveBusy: curveTarget !== null,
           onOpenProject: () => setOpenDialog(true),
           onPreview: openPreview,
         }),
@@ -9471,7 +11668,13 @@ window.__ModuleLoader__.load({
             : null,
           h(
             'div',
-            { className: 'dgc-center' },
+            {
+              className: 'dgc-center' + (liveCurveTarget && project ? ' has-curve' : ''),
+              style:
+                liveCurveTarget && project
+                  ? { '--dgc-timeline-h': Math.max(120, timelineContentHeight) + 'px' }
+                  : undefined,
+            },
             h(TimelineCanvas, {
               project: project || { staffs: [], tempo, duration: 0 },
               catalog,
@@ -9494,7 +11697,29 @@ window.__ModuleLoader__.load({
               waveStatus,
               audioClips,
               onReady: setCanvasApi,
+              onViewChange: onTimelineView,
+              onContentHeight: onTimelineContentHeight,
             }),
+            // Docked curve editor: replaces the timeline pane visually while
+            // keeping the editor chrome, inspector and transport reachable.
+            liveCurveTarget && project
+              ? h(CurveEditorLayerMemo, {
+                  key: liveCurveTarget.token,
+                  t,
+                  catalog,
+                  target: liveCurveTarget,
+                  tempo,
+                  snapOn,
+                  snapDiv,
+                  playheadRef: transport.timeRef,
+                  onTimelineScroll: syncTimelineScroll,
+                  onTimelineSetT0: syncTimelineSetT0,
+                  onTimelineZoom: syncTimelineZoom,
+                  onTimelineFit: syncTimelineFit,
+                  onApply: applyCurvePanel,
+                  onClose: closeCurvePanel,
+                })
+              : null,
             phase === 'error'
               ? h(
                   'div',
@@ -9540,6 +11765,7 @@ window.__ModuleLoader__.load({
                 bpmAvailable,
                 onDelete: deleteElements,
                 onDuplicate: (id) => duplicateElements([id]),
+                onOpenCurve: openCurvePanel,
                 seek: (time) => {
                   transport.seek(time);
                   if (canvasApiRef.current) canvasApiRef.current.reveal(time);
@@ -9595,7 +11821,17 @@ window.__ModuleLoader__.load({
               notice.text,
             )
           : null,
-        openDialog ? h(OpenProjectDialog, { t, state: dialogState, onOpen: session.openProject, onClose: () => setOpenDialog(false) }) : null,
+        openDialog
+          ? h(OpenProjectDialog, {
+              t,
+              state: dialogState,
+              onOpen: (dir) => {
+                setCurveTarget(null);
+                session.openProject(dir);
+              },
+              onClose: () => setOpenDialog(false),
+            })
+          : null,
       );
     }
 
@@ -9673,6 +11909,28 @@ window.__ModuleLoader__.load({
       evalAdd,
     });
     const audioTestApi = Object.freeze({ audioClipsOf, clipActiveAt, spectrumFromSamples: computeSpectrum, wavPeaks, detectBpmFromSpectrum, detectBpmFromOnsets });
+    const curveTestApi = Object.freeze({
+      sampleCurve,
+      readCurveDraft,
+      buildCurveValue,
+      normalizeSegments,
+      setSegmentBoundary,
+      splitCurveSegment,
+      addCurveSegmentOutside,
+      deleteCurveSegment,
+      changeCurveSegmentType,
+      defaultSegmentCurve,
+      curveNaturalRange,
+      curveInitialView,
+      curveAlignedView,
+      curveValueRange,
+      curveParamHandles,
+      curveBoundaryWarnings,
+      snapCurveTime,
+      curveLayout,
+      curveTypeOf,
+      isCurveEditorValue,
+    });
     const clientPlugin = {
       name: 'gorge-chart-studio-client',
       inject: ['slots', 'locale'],
@@ -9682,6 +11940,7 @@ window.__ModuleLoader__.load({
     // and the audio-clip window/legacy-fallback helpers.
     Object.defineProperty(clientPlugin, '__playback', { value: playbackTestApi, enumerable: false });
     Object.defineProperty(clientPlugin, '__audio', { value: audioTestApi, enumerable: false });
+    Object.defineProperty(clientPlugin, '__curve', { value: curveTestApi, enumerable: false });
     return clientPlugin;
   },
 });
