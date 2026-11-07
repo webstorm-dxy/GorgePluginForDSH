@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 
@@ -23,10 +24,13 @@ import {
   apply,
   createEditHandler,
   createEventsHandler,
+  createExportHandler,
   createFileHandler,
   createHandlers,
+  createCreateHandler,
   createImportAudioHandler,
   createOpenHandler,
+  createProjectFiles,
   createProjectsHandler,
   createReloadHandler,
   createSaveHandler,
@@ -41,8 +45,10 @@ import {
   resolveProjectDirectory,
   resolveProjectFile,
   scanProjectRoot,
+  validateProjectName,
   workspaceSummary,
 } from '../index.js'
+import { buildProjectZip, crc32 } from '../gorge-zip.js'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -198,6 +204,53 @@ async function waitForEnd(res) {
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
   throw new Error('response did not finish')
+}
+
+/**
+ * Parse an archive built by `gorge-zip.js` back into `Map<name, Buffer>`.
+ * Walks the central directory (the authoritative index), validates both
+ * headers, decodes stored/deflated bodies and checks every CRC.
+ */
+function readZip(buffer) {
+  assert.ok(Buffer.isBuffer(buffer) && buffer.length > 22, 'zip buffer is too small')
+  const eocdOffset = buffer.length - 22
+  assert.equal(buffer.readUInt32LE(eocdOffset), 0x06054b50, 'missing the end-of-central-directory record')
+  const entryCount = buffer.readUInt16LE(eocdOffset + 10)
+  const centralSize = buffer.readUInt32LE(eocdOffset + 12)
+  const centralOffset = buffer.readUInt32LE(eocdOffset + 16)
+  assert.equal(centralOffset + centralSize, eocdOffset, 'central directory size/offset mismatch')
+  const files = new Map()
+  let cursor = centralOffset
+  for (let index = 0; index < entryCount; index += 1) {
+    assert.equal(buffer.readUInt32LE(cursor), 0x02014b50, 'bad central directory signature')
+    const flags = buffer.readUInt16LE(cursor + 8)
+    const method = buffer.readUInt16LE(cursor + 10)
+    const crc = buffer.readUInt32LE(cursor + 16)
+    const compressedSize = buffer.readUInt32LE(cursor + 20)
+    const size = buffer.readUInt32LE(cursor + 24)
+    const nameLength = buffer.readUInt16LE(cursor + 28)
+    const extraLength = buffer.readUInt16LE(cursor + 30)
+    const commentLength = buffer.readUInt16LE(cursor + 32)
+    const localOffset = buffer.readUInt32LE(cursor + 42)
+    const name = buffer.toString('utf8', cursor + 46, cursor + 46 + nameLength)
+    assert.equal(flags & 0x0800, 0x0800, `${name}: UTF-8 name flag is not set`)
+    assert.equal(buffer.readUInt32LE(localOffset), 0x04034b50, `${name}: bad local header signature`)
+    assert.equal(
+      buffer.toString('utf8', localOffset + 30, localOffset + 30 + buffer.readUInt16LE(localOffset + 26)),
+      name,
+      `${name}: local and central names differ`,
+    )
+    const dataStart =
+      localOffset + 30 + buffer.readUInt16LE(localOffset + 26) + buffer.readUInt16LE(localOffset + 28)
+    const body = buffer.subarray(dataStart, dataStart + compressedSize)
+    const data = method === 0 ? Buffer.from(body) : zlib.inflateRawSync(body)
+    assert.equal(data.length, size, `${name}: uncompressed size mismatch`)
+    assert.equal(crc32(data), crc, `${name}: CRC mismatch`)
+    files.set(name, data)
+    cursor += 46 + nameLength + extraLength + commentLength
+  }
+  assert.equal(cursor, eocdOffset, 'central directory was not consumed exactly')
+  return files
 }
 
 /** Fake Cordis host capturing tools, routes, prompt contexts, and disposers. */
@@ -446,7 +499,19 @@ test('config: zero-config defaults and Standard Schema', () => {
 
 test('exports: inject declaration and endpoint table', () => {
   assert.deepEqual(pluginInject, ['tools'])
-  assert.deepEqual(Object.keys(ENDPOINTS).sort(), ['edit', 'events', 'file', 'importAudio', 'open', 'projects', 'reload', 'save', 'state'])
+  assert.deepEqual(Object.keys(ENDPOINTS).sort(), [
+    'create',
+    'edit',
+    'events',
+    'export',
+    'file',
+    'importAudio',
+    'open',
+    'projects',
+    'reload',
+    'save',
+    'state',
+  ])
   for (const routePath of Object.values(ENDPOINTS)) {
     assert.ok(routePath.startsWith('/plugins/gorge-chart/'), `${routePath} must live under /plugins/gorge-chart/`)
   }
@@ -601,6 +666,109 @@ test('store: resolves project directories by absolute path and by name', () => {
   assert.equal(byName, path.resolve(copy.project))
   assert.throws(() => resolveProjectDirectory('NoSuchProject', { projectRoot: copy.root }), /not found/)
   assert.throws(() => resolveProjectDirectory(''), /required/)
+})
+
+// ---------------------------------------------------------------------------
+// Store: brand-new project creation
+// ---------------------------------------------------------------------------
+
+test('create: validates project folder names', () => {
+  for (const name of ['MySong', '中文谱面', 'a b', 'Chart_01']) assert.equal(validateProjectName(name), null, name)
+  assert.match(validateProjectName(''), /required/)
+  assert.match(validateProjectName('   '), /required/)
+  assert.match(validateProjectName('.'), /must not be "\."/)
+  assert.match(validateProjectName('..'), /must not be "\."/)
+  assert.match(validateProjectName('.hidden'), /must not start with "\."/)
+  assert.match(validateProjectName('trail.'), /must not end with "\."/)
+  for (const name of ['a/b', 'a\\b', 'a:b', 'a*b', 'a?b', 'a"b', 'a<b', 'a>b', 'a|b', 'a\u0000b']) {
+    assert.match(validateProjectName(name), /must not contain/, name)
+  }
+  assert.match(validateProjectName('x'.repeat(121)), /at most 120/)
+})
+
+test('create: writes an empty chart staff (and an optional storyboard) and opens the project', () => {
+  const root = tempDir('gorge-create-root-')
+  const created = createProjectFiles({ name: 'NewChart', parent: root, minLength: 45 }, { projectRoot: root })
+  assert.equal(created.ok, true)
+  assert.equal(created.dir, path.join(root, 'NewChart'))
+  assert.equal(created.template, 'chart')
+  const chartFile = path.join(created.dir, 'DremuStaff.g')
+  assert.ok(fs.existsSync(chartFile), 'the chart staff was not written')
+  const text = fs.readFileSync(chartFile, 'utf8')
+  assert.match(text, /class DremuStaff/)
+  assert.match(text, /displayName = "NewChart"/)
+  assert.match(text, /minLength : 45\.0/)
+  assert.match(text, /return new GorgeFramework\.Element\^\[0\]\{ , \};/)
+  assert.ok(!fs.existsSync(path.join(created.dir, 'Storyboard.g')), 'chart template wrote a storyboard')
+  assert.deepEqual(created.written.map((file) => path.basename(file)), ['DremuStaff.g'])
+
+  const both = createProjectFiles({ name: 'WithStory', parent: root, template: 'storyboard' }, { projectRoot: root })
+  assert.equal(both.ok, true)
+  assert.equal(both.template, 'storyboard')
+  assert.ok(fs.existsSync(path.join(both.dir, 'DremuStaff.g')))
+  const storyboardText = fs.readFileSync(path.join(both.dir, 'Storyboard.g'), 'utf8')
+  assert.match(storyboardText, /class Storyboard/)
+  assert.match(storyboardText, /form = "DeentyStoryboard"/)
+  assert.match(text.includes('minLength : 45.0') ? text : storyboardText, /minLength/)
+  assert.match(storyboardText, /minLength : 180\.0/)
+
+  // An existing empty folder is adopted; a non-empty one is a conflict.
+  const empty = path.join(root, 'EmptyFolder')
+  fs.mkdirSync(empty)
+  assert.equal(createProjectFiles({ name: 'EmptyFolder', parent: root }, { projectRoot: root }).ok, true)
+  const conflict = createProjectFiles({ name: 'EmptyFolder', parent: root }, { projectRoot: root })
+  assert.equal(conflict.ok, false)
+  assert.equal(conflict.status, 409)
+
+  // Bad input is reported with an HTTP-ish status, never thrown.
+  assert.equal(createProjectFiles({ name: '', parent: root }).status, 400)
+  assert.equal(createProjectFiles({ name: 'a/b', parent: root }).status, 400)
+  assert.equal(createProjectFiles({ name: 'X', parent: path.join(root, 'missing') }).status, 400)
+  assert.equal(createProjectFiles({ name: 'X', parent: chartFile }).status, 400)
+  assert.equal(createProjectFiles({ name: 'X', parent: root, template: 'nope' }).status, 400)
+  assert.equal(createProjectFiles({ name: 'X', parent: root, minLength: -1 }).status, 400)
+  assert.equal(createProjectFiles({ name: 'X', parent: root, minLength: 'abc' }).status, 400)
+})
+
+test('store: create opens the new project, remembers it, and preserves the previous one on disk', () => {
+  const copy = freshFixture()
+  const { store } = createTestStore({ projectRoot: copy.root, autoSave: true })
+  store.open(copy.project)
+  const target = findElement(store.state())
+  const edited = store.applyOps(store.view().rev, [patchOp(target.element.id, 'hitTime', target.element.fields.hitTime + 0.25)])
+  assert.equal(edited.ok, true)
+
+  const created = store.create({ name: 'BrandNew', template: 'storyboard', minLength: 30 })
+  assert.equal(created.ok, true)
+  assert.equal(created.openPath, path.join(copy.root, 'BrandNew'))
+  assert.equal(created.dirty, false, 'a freshly created project starts clean on disk')
+  assert.equal(created.project.staffs.length, 2)
+  assert.deepEqual(
+    created.project.staffs.map((staff) => staff.kind),
+    ['chart', 'storyboard'],
+  )
+  assert.equal(created.project.staffs[0].periods[0].minLength, 30)
+  assert.equal(created.project.duration, 30, 'the declared period length is the new project duration')
+  assert.equal(created.project.staffs.every((staff) => (staff.periods[0].elements || []).length === 0), true)
+  assert.equal(created.recent[0], created.openPath)
+  assert.ok(store.projects(true).some((entry) => entry.dir === created.openPath), 'the new project is in the library scan')
+  assert.deepEqual(created.created.files.map((file) => path.basename(file)).sort(), ['DremuStaff.g', 'Storyboard.g'])
+  assert.equal(fs.existsSync(path.join(created.openPath, 'DremuStaff.g')), true)
+  assert.equal(fs.existsSync(path.join(created.openPath, 'Storyboard.g')), true)
+
+  // The previous project was auto-saved before the switch.
+  const savedText = fs.readFileSync(path.join(copy.project, target.staff.id), 'utf8')
+  assert.equal(store.view().openPath, created.openPath)
+  assert.ok(savedText.length > 0)
+
+  const conflict = store.create({ name: 'BrandNew' })
+  assert.equal(conflict.ok, false)
+  assert.equal(conflict.status, 409)
+
+  // Creation with a relative parent resolves against the project root.
+  const relative = store.create({ name: 'RelativeChild', parent: '.' })
+  assert.equal(relative.ok, true)
+  assert.equal(relative.openPath, path.join(copy.root, 'RelativeChild'))
 })
 
 // ---------------------------------------------------------------------------
@@ -997,6 +1165,70 @@ test('files: Range parsing covers full, partial, suffix, and invalid ranges', ()
 })
 
 // ---------------------------------------------------------------------------
+// Chart package export (gorge-zip.js)
+// ---------------------------------------------------------------------------
+
+test('zip: packages live staffs, referenced assets, README, and skips the rest', async () => {
+  const copy = freshFixture()
+  // An unreferenced asset and a README must make the "referenced" policy
+  // visible; the .bak file must never enter the package.
+  fs.copyFileSync(path.join(copy.project, 'Background1.png'), path.join(copy.project, 'unused.png'))
+  fs.copyFileSync(path.join(copy.project, 'DremuStaff.g'), path.join(copy.project, 'DremuStaff.g.bak'))
+  fs.writeFileSync(path.join(copy.project, 'README.md'), '# DremuTest package\n', 'utf8')
+
+  const store = openedStore(copy)
+  const chartStaff = store.state().project.staffs.find((staff) => staff.kind === 'chart')
+  assert.ok(chartStaff, 'fixture has a chart staff')
+  // An unsaved rename must show up in the archive's staff file even though the
+  // .g on disk still has the old header.
+  const edit = store.applyOps(store.view().rev, [
+    { op: 'setStaffName', staffId: chartStaff.id, displayName: '导出测试谱表' },
+  ])
+  assert.equal(edit.ok, true)
+  assert.equal(store.view().dirty, true)
+  assert.ok(!fs.readFileSync(path.join(copy.project, chartStaff.id), 'utf8').includes('导出测试谱表'))
+
+  const referenced = await buildProjectZip(store.view().project, { assets: 'referenced' })
+  assert.equal(referenced.filename, 'DremuTest.zip')
+  assert.equal(referenced.root, 'DremuTest')
+  const files = readZip(referenced.buffer)
+  assert.ok(files.has('DremuTest/'), 'the archive carries a project folder entry')
+  assert.ok(files.has(`DremuTest/${chartStaff.id}`), 'chart staff is missing')
+  assert.ok(files.get(`DremuTest/${chartStaff.id}`).toString('utf8').includes('导出测试谱表'), 'unsaved edit is not in the package')
+  assert.ok(files.has('DremuTest/Song.wav'), 'referenced audio (Song.wav) is missing')
+  assert.ok(files.has('DremuTest/Background1.png'), 'referenced storyboard image is missing')
+  assert.ok(files.has('DremuTest/README.md'), 'README.md is missing')
+  assert.ok(!files.has('DremuTest/unused.png'), 'unreferenced asset was packed')
+  assert.ok(!files.has('DremuTest/DremuStaff.g.bak'), '.bak backup was packed')
+  assert.ok(
+    referenced.skipped.some((entry) => entry.name === 'DremuTest/unused.png' && /not referenced/.test(entry.reason)),
+    'the skipped unreferenced asset is not reported',
+  )
+  assert.ok(referenced.counts.staffs >= 1 && referenced.counts.assets >= 2 && referenced.counts.readme === 1)
+
+  // `all` is a full project copy (minus backups); `none` drops every asset.
+  const everything = readZip((await buildProjectZip(store.view().project, { assets: 'all' })).buffer)
+  assert.ok(everything.has('DremuTest/unused.png'), 'assets=all dropped an unreferenced asset')
+  assert.ok(!everything.has('DremuTest/DremuStaff.g.bak'), '.bak backup was packed')
+  const chartOnly = readZip((await buildProjectZip(store.view().project, { assets: 'none' })).buffer)
+  assert.ok(chartOnly.has(`DremuTest/${chartStaff.id}`))
+  assert.ok(!chartOnly.has('DremuTest/Song.wav'), 'assets=none still packed audio')
+  assert.ok(!chartOnly.has('DremuTest/Background1.png'), 'assets=none still packed images')
+})
+
+test('zip: UTF-8 entry names and directory entries round-trip', async () => {
+  const { createZipBuffer } = await import('../gorge-zip.js')
+  const archive = await createZipBuffer([
+    { name: '曲包/', data: '', mtime: new Date('2026-11-07T00:00:00') },
+    { name: '曲包/测试 - 歌曲.wav', data: Buffer.alloc(64, 7), mtime: new Date('2026-11-07T00:00:00') },
+  ])
+  const files = readZip(archive)
+  assert.ok(files.has('曲包/测试 - 歌曲.wav'))
+  assert.equal(files.get('曲包/测试 - 歌曲.wav').length, 64)
+  assert.equal(files.get('曲包/').length, 0)
+})
+
+// ---------------------------------------------------------------------------
 // HTTP handlers
 // ---------------------------------------------------------------------------
 
@@ -1368,14 +1600,99 @@ test('handler open/projects/save/reload: full project lifecycle over HTTP', asyn
   const noProjectReload = await callHandler(createReloadHandler(noProjectStore), localRequest({ method: 'POST', url: ENDPOINTS.reload }))
   assert.equal(noProjectReload.statusCode, 400)
 
-  assert.equal(createHandlers(store).length, 9)
+  assert.equal(createHandlers(store).length, 11)
+})
+
+test('handler create: makes and opens a project, and reports bad input as 400/409', async () => {
+  const root = tempDir('gorge-create-http-')
+  const { store } = createTestStore({ projectRoot: root })
+  const handler = createCreateHandler(store, { resolveDirectory: () => root })
+
+  const created = await callHandler(
+    handler,
+    localJsonRequest(ENDPOINTS.create, { name: 'HttpChart', template: 'storyboard', minLength: 12 }),
+  )
+  assert.equal(created.statusCode, 200)
+  const body = created.json()
+  assert.equal(body.ok, true)
+  assert.equal(body.openPath, path.join(root, 'HttpChart'))
+  assert.equal(body.project.staffs.length, 2)
+  assert.equal(body.created.name, 'HttpChart')
+  assert.deepEqual(body.created.files.map((file) => path.basename(file)).sort(), ['DremuStaff.g', 'Storyboard.g'])
+  assert.ok(Array.isArray(body.projects) && body.projects.some((entry) => entry.dir === body.openPath))
+  assert.ok(fs.existsSync(path.join(root, 'HttpChart', 'DremuStaff.g')))
+
+  const duplicate = await callHandler(handler, localJsonRequest(ENDPOINTS.create, { name: 'HttpChart' }))
+  assert.equal(duplicate.statusCode, 409)
+  assert.match(duplicate.json().error, /already exists/)
+
+  const badName = await callHandler(handler, localJsonRequest(ENDPOINTS.create, { name: '../escape' }))
+  assert.equal(badName.statusCode, 400)
+
+  const badBody = await callHandler(handler, localJsonRequest(ENDPOINTS.create, null))
+  assert.equal(badBody.statusCode, 400)
+
+  const wrongMethod = await callHandler(handler, localRequest({ url: ENDPOINTS.create }))
+  assert.equal(wrongMethod.statusCode, 405)
+
+  const remote = await callHandler(handler, localJsonRequest(ENDPOINTS.create, { name: 'Remote' }, { remoteAddress: '10.0.0.9' }))
+  assert.equal(remote.statusCode, 403)
+
+  // A second http-level create still isolates the parent path relative to the
+  // session directory when it is not under the project root.
+  const elsewhere = tempDir('gorge-create-cwd-')
+  const fromCwd = await callHandler(handler, localJsonRequest(ENDPOINTS.create, { name: 'CwdChild', parent: 'nested-parent' }))
+  assert.equal(fromCwd.statusCode, 400, 'a relative parent must exist under the project root or cwd')
+  fs.mkdirSync(path.join(elsewhere, 'nested-parent'), { recursive: true })
+  const cwdHandler = createCreateHandler(store, { resolveDirectory: () => elsewhere })
+  const viaCwd = await callHandler(cwdHandler, localJsonRequest(ENDPOINTS.create, { name: 'CwdChild', parent: 'nested-parent' }))
+  assert.equal(viaCwd.statusCode, 200)
+  assert.equal(viaCwd.json().openPath, path.join(elsewhere, 'nested-parent', 'CwdChild'))
+})
+
+test('handler export: streams the live project as a zip package', async () => {
+  const copy = freshFixture()
+  fs.copyFileSync(path.join(copy.project, 'Background1.png'), path.join(copy.project, 'unused.png'))
+  const store = openedStore(copy)
+  const handler = createExportHandler(store)
+
+  const res = await callHandler(handler, localRequest({ url: ENDPOINTS.export }))
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.headers['content-type'], 'application/zip')
+  assert.equal(res.headers['cache-control'], 'no-store')
+  const payload = Buffer.concat(res.chunks)
+  assert.equal(Number(res.headers['content-length']), payload.length, 'content-length does not match the body')
+  assert.match(res.headers['content-disposition'], /attachment; filename="DremuTest\.zip"; filename\*=UTF-8''DremuTest\.zip/)
+  assert.equal(decodeURIComponent(res.headers['x-export-filename']), 'DremuTest.zip')
+  assert.ok(Number(res.headers['x-export-count']) >= 3)
+  assert.equal(res.headers['x-export-assets'], 'referenced')
+  const files = readZip(payload)
+  assert.ok(files.has('DremuTest/DremuStaff.g'))
+  assert.ok(files.has('DremuTest/Song.wav'))
+  assert.ok(!files.has('DremuTest/unused.png'), 'default export packed an unreferenced asset')
+
+  const all = await callHandler(handler, localRequest({ url: ENDPOINTS.export + '?assets=all' }))
+  assert.equal(all.statusCode, 200)
+  assert.equal(all.headers['x-export-assets'], 'all')
+  assert.ok(readZip(Buffer.concat(all.chunks)).has('DremuTest/unused.png'), 'assets=all dropped a file')
+
+  const none = await callHandler(handler, localRequest({ url: ENDPOINTS.export + '?assets=none' }))
+  assert.equal(none.statusCode, 200)
+  assert.ok(!readZip(Buffer.concat(none.chunks)).has('DremuTest/Song.wav'), 'assets=none packed audio')
+
+  const noProject = await callHandler(createExportHandler(createTestStore().store), localRequest({ url: ENDPOINTS.export }))
+  assert.equal(noProject.statusCode, 409)
+  const wrongMethod = await callHandler(handler, localRequest({ method: 'POST', url: ENDPOINTS.export }))
+  assert.equal(wrongMethod.statusCode, 405)
+  const remote = await callHandler(handler, localRequest({ url: ENDPOINTS.export, remoteAddress: '10.9.9.9' }))
+  assert.equal(remote.statusCode, 403)
 })
 
 // ---------------------------------------------------------------------------
 // Agent tools
 // ---------------------------------------------------------------------------
 
-test('tools: seven tools registered with JSON-Schema parameters', () => {
+test('tools: nine tools registered with JSON-Schema parameters', () => {
   const copy = copyFixture()
   const store = openedStore(copy)
   const tools = createTools(store, { logger: SILENT_LOGGER, resolveDirectory: () => copy.root })
@@ -1383,9 +1700,11 @@ test('tools: seven tools registered with JSON-Schema parameters', () => {
   assert.deepEqual(names, [
     'gorge_project_list',
     'gorge_project_open',
+    'gorge_project_create',
     'gorge_chart_get',
     'gorge_chart_edit',
     'gorge_chart_save',
+    'gorge_chart_export',
     'gorge_chart_validate',
     'gorge_element_schema',
   ])
@@ -1399,6 +1718,8 @@ test('tools: seven tools registered with JSON-Schema parameters', () => {
   }
   const byName = new Map(tools.map((definition) => [definition.name, definition]))
   assert.deepEqual(byName.get('gorge_project_open').parameters.required, ['dir'])
+  assert.deepEqual(byName.get('gorge_project_create').parameters.required, ['name'])
+  assert.deepEqual(byName.get('gorge_project_create').parameters.properties.template.enum, ['chart', 'storyboard'])
   assert.deepEqual(byName.get('gorge_chart_edit').parameters.required, ['ops'])
   assert.equal(byName.get('gorge_chart_edit').parameters.properties.ops.type, 'array')
   assert.equal(byName.get('gorge_chart_save').parameters.properties && Object.keys(byName.get('gorge_chart_save').parameters.properties).length, 0)
@@ -1552,7 +1873,7 @@ test('tools: save/open/errors with real data', async () => {
   const noProject = createTestStore().store
   const emptyTools = createTools(noProject, { logger: SILENT_LOGGER, resolveDirectory: () => os.tmpdir() })
   const emptyByName = new Map(emptyTools.map((definition) => [definition.name, definition]))
-  for (const name of ['gorge_chart_get', 'gorge_chart_save', 'gorge_chart_validate']) {
+  for (const name of ['gorge_chart_get', 'gorge_chart_save', 'gorge_chart_export', 'gorge_chart_validate']) {
     const result = await emptyByName.get(name).execute({})
     assert.equal(result.ok, false, `${name} must report the missing project instead of throwing`)
     assert.equal(typeof result.error, 'string')
@@ -1562,11 +1883,94 @@ test('tools: save/open/errors with real data', async () => {
   assert.equal(typeof openMissing.error, 'string')
 })
 
+test('tools: gorge_project_create makes a new project and opens it', async () => {
+  const root = tempDir('gorge-create-tool-')
+  const { store } = createTestStore({ projectRoot: root })
+  const tools = createTools(store, { logger: SILENT_LOGGER, resolveDirectory: () => root })
+  const byName = new Map(tools.map((definition) => [definition.name, definition]))
+
+  const created = await byName.get('gorge_project_create').execute({
+    name: 'AgentChart',
+    parent: root,
+    template: 'storyboard',
+    minLength: 60,
+  })
+  assert.equal(created.ok, true)
+  assert.equal(created.openPath, path.join(root, 'AgentChart'))
+  assert.equal(created.title, 'AgentChart')
+  assert.equal(created.staffCount, 2)
+  assert.equal(created.elementCount, 0)
+  assert.equal(created.duration, 60)
+  assert.deepEqual(created.files.map((file) => path.basename(file)).sort(), ['DremuStaff.g', 'Storyboard.g'])
+  assert.deepEqual(created.warnings, [])
+
+  const summary = await byName.get('gorge_chart_get').execute({})
+  assert.equal(summary.ok, true)
+  assert.equal(summary.openPath, created.openPath)
+  assert.equal(summary.project.staffCount, 2)
+  assert.equal(summary.project.elementCount, 0)
+
+  const listed = await byName.get('gorge_project_list').execute({})
+  assert.ok(listed.projects.some((entry) => entry.dir === created.openPath))
+
+  // The new empty project accepts edits right away.
+  const staff = store.state().project.staffs.find((item) => item.kind === 'chart')
+  const added = await byName.get('gorge_chart_edit').execute({
+    ops: [{ op: 'add', staffId: staff.id, element: { type: 'MainLane', start: 0, fields: { name: 'Main1', keepTime: 5 } } }],
+  })
+  assert.equal(added.ok, true)
+  assert.equal(added.created.length, 1)
+
+  const duplicate = await byName.get('gorge_project_create').execute({ name: 'AgentChart' })
+  assert.equal(duplicate.ok, false)
+  assert.match(duplicate.error, /already exists/)
+
+  const badName = await byName.get('gorge_project_create').execute({ name: 'a/b' })
+  assert.equal(badName.ok, false)
+  assert.match(badName.error, /must not contain/)
+})
+
+test('tools: gorge_chart_export writes a zip package next to the project', async () => {
+  const copy = freshFixture()
+  fs.copyFileSync(path.join(copy.project, 'Background1.png'), path.join(copy.project, 'unused.png'))
+  const store = openedStore(copy)
+  const tools = createTools(store, { logger: SILENT_LOGGER, resolveDirectory: () => copy.root })
+  const byName = new Map(tools.map((definition) => [definition.name, definition]))
+  const target = findElement(store.state())
+  const edited = await byName.get('gorge_chart_edit').execute({
+    ops: [patchOp(target.element.id, 'hitTime', target.element.fields.hitTime + 0.25)],
+  })
+  assert.equal(edited.ok, true)
+  assert.equal(store.view().dirty, true)
+
+  const result = await byName.get('gorge_chart_export').execute({})
+  assert.equal(result.ok, true)
+  assert.equal(result.path, path.join(copy.project, 'DremuTest.zip'))
+  assert.equal(result.filename, 'DremuTest.zip')
+  assert.equal(result.assets, 'referenced')
+  assert.ok(result.fileCount >= 3)
+  assert.ok(result.counts.staffs >= 1)
+  assert.ok(result.skippedCount >= 1, 'unreferenced assets are reported')
+  assert.equal(result.dirty, true, 'exporting must not save the project')
+  assert.equal(fs.statSync(result.path).size, result.bytes)
+  const files = readZip(fs.readFileSync(result.path))
+  assert.ok(files.has('DremuTest/Song.wav'), 'the export has no referenced audio')
+  assert.ok(!files.has('DremuTest/unused.png'), 'the export packed an unreferenced asset')
+
+  const everything = await byName.get('gorge_chart_export').execute({ assets: 'all' })
+  assert.equal(everything.ok, true)
+  assert.ok(readZip(fs.readFileSync(everything.path)).has('DremuTest/unused.png'), 'assets=all dropped a file')
+  const fallback = await byName.get('gorge_chart_export').execute({ assets: 'bogus' })
+  assert.equal(fallback.ok, true)
+  assert.equal(fallback.assets, 'referenced', 'unknown policies fall back to referenced')
+  assert.equal(fallback.bytes, result.bytes)
+})
+
 // ---------------------------------------------------------------------------
 // Plugin entry point: tools, routes, prompt context, cleanup
 // ---------------------------------------------------------------------------
 
-test('apply: registers seven tools, nine routes, and the prompt context', () => {
+test('apply: registers nine tools, eleven routes, and the prompt context', () => {
   const copy = copyFixture()
   const stateDirectory = tempDir('gorge-chart-apply-')
   const host = createFakeHost()
@@ -1578,10 +1982,12 @@ test('apply: registers seven tools, nine routes, and the prompt context', () => 
 
   assert.deepEqual([...host.tools.keys()].sort(), [
     'gorge_chart_edit',
+    'gorge_chart_export',
     'gorge_chart_get',
     'gorge_chart_save',
     'gorge_chart_validate',
     'gorge_element_schema',
+    'gorge_project_create',
     'gorge_project_list',
     'gorge_project_open',
   ])
@@ -1618,7 +2024,7 @@ test('apply: tools load without a web server or system prompt', () => {
     autoSave: false,
     statePath: path.join(stateDirectory, 'state', 'project.json'),
   })
-  assert.equal(host.tools.size, 7)
+  assert.equal(host.tools.size, 9)
   assert.equal(host.routes.size, 0)
   assert.equal(host.contexts.size, 0)
   assert.equal(host.skillProviders.size, 0, 'no skill registry in this composition')
@@ -1639,6 +2045,7 @@ test('prompt: workspace summary reports project, staffs, elements, and revision'
   const empty = workspaceSummary(createTestStore().store)
   assert.ok(empty.includes('no project is open'))
   assert.ok(empty.includes('gorge_project_list'))
+  assert.ok(empty.includes('gorge_project_create'))
 })
 
 // ---------------------------------------------------------------------------

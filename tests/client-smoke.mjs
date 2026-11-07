@@ -34,6 +34,33 @@ const clientPath = path.join(here, '..', 'client.js');
 const canvasContexts = [];
 
 /**
+ * Window listeners captured so tests can dispatch real `keydown` events. The
+ * page installs one window keydown listener; dialogs use capture listeners.
+ */
+const windowEventListeners = new Map();
+function addWindowEventListener(type, listener, options) {
+  if (typeof listener !== 'function') return;
+  const capture = options === true || !!(options && options.capture);
+  if (!windowEventListeners.has(type)) windowEventListeners.set(type, []);
+  const list = windowEventListeners.get(type);
+  if (list.some((entry) => entry.listener === listener && entry.capture === capture)) return;
+  list.push({ listener, capture });
+}
+function removeWindowEventListener(type, listener, options) {
+  const list = windowEventListeners.get(type);
+  if (!list) return;
+  const capture = options === true || !!(options && options.capture);
+  const index = list.findIndex((entry) => entry.listener === listener && entry.capture === capture);
+  if (index !== -1) list.splice(index, 1);
+}
+function dispatchWindowEvent(type, event) {
+  const list = (windowEventListeners.get(type) || []).slice();
+  for (const entry of list) if (entry.capture) entry.listener(event);
+  for (const entry of list) if (!entry.capture) entry.listener(event);
+  return event;
+}
+
+/**
  * Deferred animation frames. A browser runs rAF callbacks; this harness must
  * not let the page animate on its own (that would make the assertions
  * nondeterministic), so callbacks are queued and only a test may flush them.
@@ -305,8 +332,12 @@ function installGlobals() {
     devicePixelRatio: 2,
     innerWidth: 1440,
     innerHeight: 900,
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, listener, options) {
+      addWindowEventListener(type, listener, options);
+    },
+    removeEventListener(type, listener, options) {
+      removeWindowEventListener(type, listener, options);
+    },
     getComputedStyle() {
       return { getPropertyValue: () => '' };
     },
@@ -671,6 +702,44 @@ const CATALOG = {
       ],
     },
     {
+      type: 'Dremu.DremuDrag',
+      shortName: 'Drag',
+      category: 'note',
+      color: '#38bdf8',
+      timing: { start: 'hitTime', duration: null, lane: 'laneName' },
+      fields: [
+        { name: 'laneName', type: 'string', default: '' },
+        { name: 'hitTime', type: 'number', default: 0 },
+        { name: 'leadTime', type: 'number', default: 0.6 },
+        {
+          name: 'position',
+          type: 'VariableFloat',
+          default: { t: 'obj', type: 'GorgeFramework.VariableFloat', fields: { baseValue: 0 } },
+          schema: VARIABLE_FLOAT_VALUE_TYPE,
+          fields: VARIABLE_FLOAT_VALUE_TYPE.fields,
+        },
+      ],
+    },
+    {
+      type: 'Dremu.DremuTaplik',
+      shortName: 'Taplik',
+      category: 'note',
+      color: '#2dd4bf',
+      timing: { start: 'hitTime', duration: null, lane: 'laneName' },
+      fields: [
+        { name: 'laneName', type: 'string', default: '' },
+        { name: 'hitTime', type: 'number', default: 0 },
+        { name: 'leadTime', type: 'number', default: 0.6 },
+        {
+          name: 'position',
+          type: 'VariableFloat',
+          default: { t: 'obj', type: 'GorgeFramework.VariableFloat', fields: { baseValue: 0 } },
+          schema: VARIABLE_FLOAT_VALUE_TYPE,
+          fields: VARIABLE_FLOAT_VALUE_TYPE.fields,
+        },
+      ],
+    },
+    {
       type: 'Dremu.DremuHold',
       shortName: 'Hold',
       category: 'hold',
@@ -867,6 +936,7 @@ async function loadRealState() {
     dirty: false,
     openPath: '/Users/daxingyi/Music/DremuTest',
     recent: ['/Users/daxingyi/Music/DremuTest'],
+    projectRoot: '/Users/daxingyi/Music',
     project: wire.project,
     catalog: wire.catalog || model.CATALOG,
   };
@@ -915,7 +985,16 @@ function makeClickWav(bpm = 128, seconds = 12, sampleRate = 8000) {
 const CLICK_WAV = makeClickWav();
 
 /** fetch stub keyed by URL. */
-let stateResponse = { ok: true, rev: 3, dirty: false, openPath: PROJECT.dir, recent: [PROJECT.dir], project: PROJECT, catalog: CATALOG };
+let stateResponse = {
+  ok: true,
+  rev: 3,
+  dirty: false,
+  openPath: PROJECT.dir,
+  recent: [PROJECT.dir],
+  projectRoot: '/tmp/gorge-library',
+  project: PROJECT,
+  catalog: CATALOG,
+};
 if (process.env.GORGE_SMOKE_REAL === '1') {
   stateResponse = await loadRealState();
 }
@@ -923,6 +1002,7 @@ let projectsResponse = { ok: true, projectRoot: '/tmp', count: 1, projects: [{ d
 const calls = [];
 
 const editBodies = [];
+const createBodies = [];
 function mockFetch(url, options) {
   const target = String(url);
   calls.push(target);
@@ -936,11 +1016,55 @@ function mockFetch(url, options) {
   if (target.indexOf('/plugins/gorge-chart/projects') !== -1) {
     return Promise.resolve({ ok: true, status: 200, json: async () => projectsResponse });
   }
+  if (target.indexOf('/plugins/gorge-chart/create') !== -1 && options && options.body) {
+    let request = null;
+    try {
+      request = JSON.parse(options.body);
+    } catch (error) {
+      request = null;
+    }
+    createBodies.push(request);
+    // Mirror the Host: the answered state is the newly opened project, the
+    // creation report rides along, and the library scan includes it.
+    const payload = JSON.parse(JSON.stringify(stateResponse));
+    const createdDir = path.join((request && request.parent) || '/tmp', (request && request.name) || 'Untitled');
+    payload.rev += 1;
+    payload.dirty = false;
+    payload.openPath = createdDir;
+    payload.recent = [createdDir].concat(Array.isArray(payload.recent) ? payload.recent : []);
+    payload.created = { name: request && request.name, dir: createdDir, template: request && request.template, files: [] };
+    if (payload.project) {
+      payload.project.title = (request && request.name) || payload.project.title;
+      payload.project.dir = createdDir;
+      payload.project.staffs = [];
+      payload.project.duration = Number(request && request.minLength);
+    }
+    projectsResponse = {
+      ok: true,
+      projectRoot: (request && request.parent) || '/tmp',
+      count: 1,
+      projects: [{ dir: createdDir, title: request && request.name, staffs: 1 }],
+    };
+    return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+  }
   if (target.indexOf('/plugins/gorge-chart/edit') !== -1) {
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ rev: 4, dirty: true, changed: true }) });
   }
   if (target.indexOf('/plugins/gorge-chart/save') !== -1) {
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, written: ['DremuStaff.g'], errors: [], rev: 5, dirty: false }) });
+  }
+  if (target.indexOf('/plugins/gorge-chart/export') !== -1) {
+    const headers = {
+      'x-export-filename': encodeURIComponent('DremuTest.zip'),
+      'x-export-count': '6',
+      'x-export-skipped': '2',
+    };
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: (name) => headers[String(name).toLowerCase()] || null },
+      blob: async () => ({ size: 4096, type: 'application/zip' }),
+    });
   }
   if (target.indexOf('/plugins/gorge-chart/file') !== -1) {
     const audioBuffer = target.indexOf('.wav') !== -1 ? CLICK_WAV : null;
@@ -1423,6 +1547,83 @@ assert.deepEqual(clientPlugin.inject, ['slots', 'locale'], 'client plugin inject
   assert.equal(finiteStart.segments[0].start, -2);
   const finiteStartBuilt = curve.buildCurveValue(finiteStart);
   assert.equal(finiteStartBuilt.fields.functionPieces.items[0].fields.startX, -2);
+}
+
+// ---- Judgement-line note editor helpers ------------------------------------
+{
+  const noteEditor = clientPlugin.__noteEditor;
+  assert.ok(noteEditor && typeof noteEditor.layout === 'function', 'client exposes no __noteEditor test helpers');
+  for (const name of ['layout', 'positionToX', 'xToPosition', 'timeToY', 'yToTime', 'snapPosition', 'toolForKey', 'buildLaneEditorModel', 'positionOf', 'positionPatch', 'holdTimeOf']) {
+    assert.equal(typeof noteEditor[name], 'function', '__noteEditor.' + name + ' is not a function');
+  }
+  const layout = noteEditor.layout(800, 420);
+  assert.equal(layout.spectrumW, 54);
+  assert.equal(layout.rulerW, 46);
+  assert.equal(layout.left, 100);
+  assert.equal(layout.laneW, 682);
+  assert.equal(layout.judgeY, 370);
+  assert.ok(Math.abs(noteEditor.positionToX(0, layout) - 441) < 1e-9, 'position 0 must land on the lane centre');
+  assert.ok(Math.abs(noteEditor.xToPosition(441, layout)) < 1e-9, 'x -> position round trip');
+  assert.ok(Math.abs(noteEditor.timeToY(2, 0, 160, layout) - 50) < 1e-9, 'time -> y (future above the judgement line)');
+  assert.ok(Math.abs(noteEditor.yToTime(50, 0, 160, layout) - 2) < 1e-9, 'y -> time round trip');
+  assert.equal(noteEditor.snapPosition(2.27, true), 2.5);
+  assert.equal(noteEditor.snapPosition(-2.27, true), -2.5);
+  assert.equal(noteEditor.snapPosition(2.27, false), 2.27);
+  assert.equal(noteEditor.snapPosition(99, true), 5.5, 'position snapping must clamp to the lane');
+  assert.equal(noteEditor.toolForKey('q'), 'tap');
+  assert.equal(noteEditor.toolForKey('w'), 'drag');
+  assert.equal(noteEditor.toolForKey('e'), 'taplik');
+  assert.equal(noteEditor.toolForKey('r'), 'hold');
+  assert.equal(noteEditor.toolForKey('v'), 'select');
+  assert.equal(noteEditor.toolForKey('t'), null, 'T is not a note-editor tool');
+
+  const model = noteEditor.buildLaneEditorModel(PROJECT, 'DremuStaff.g', 'Main1');
+  assert.ok(model, 'Main1 lane model missing');
+  assert.equal(model.laneElements.length, 1);
+  assert.equal(model.windows.length, 1);
+  assert.equal(model.windows[0].start, 0);
+  assert.equal(model.windows[0].end, 20);
+  assert.equal(model.notes.length, 3, 'Main1 notes across both periods');
+  assert.deepEqual(model.notes.map((item) => item.element.start), [2, 6, 21.71053]);
+  const tap = model.notes[0].element;
+  assert.equal(noteEditor.positionOf(tap), -1);
+  const nestedPatch = noteEditor.positionPatch(tap, 2.5);
+  assert.deepEqual(nestedPatch.path, ['position', 'fields', 'baseValue']);
+  assert.equal(nestedPatch.value, 2.5);
+  const freshPatch = noteEditor.positionPatch({ fields: {} }, 2.5);
+  assert.deepEqual(freshPatch.path, ['position']);
+  assert.equal(freshPatch.value.type, 'GorgeFramework.VariableFloat');
+  assert.equal(freshPatch.value.fields.baseValue, 2.5);
+  assert.equal(noteEditor.holdTimeOf(model.notes[1].element), 2);
+  assert.equal(noteEditor.holdTimeOf({ fields: {} }), 1, 'holdTime default');
+  assert.equal(noteEditor.pickLanePeriodId(PROJECT, 'DremuStaff.g', 'Main1', 1), 'p0');
+  assert.equal(noteEditor.pickLanePeriodId(PROJECT, 'DremuStaff.g', 'Main1', 21.8), 'p1', 'creation must follow the lane period');
+}
+
+// The real corpus must also produce a usable lane model (the fixture catalog
+// has a much smaller element set); this guards against field-shape drift.
+if (process.env.GORGE_SMOKE_REAL === '1') {
+  const noteEditor = clientPlugin.__noteEditor;
+  let checkedRealLane = false;
+  for (const staff of stateResponse.project.staffs) {
+    for (const period of staff.periods || []) {
+      for (const element of period.elements || []) {
+        if (!element || element.category !== 'lane') continue;
+        const laneName = element.fields && element.fields.name;
+        if (typeof laneName !== 'string' || laneName.length === 0) continue;
+        const model = noteEditor.buildLaneEditorModel(stateResponse.project, staff.id, laneName);
+        assert.ok(model && model.laneElements.length > 0, 'real lane model missing for ' + staff.id + '/' + laneName);
+        assert.ok(model.staff === staff, 'real lane model points at the wrong staff');
+        if (model.notes.length === 0) continue;
+        assert.ok(model.notes.every((item) => item.element.lane === laneName), 'real lane model leaked notes from another lane');
+        checkedRealLane = true;
+        break;
+      }
+      if (checkedRealLane) break;
+    }
+    if (checkedRealLane) break;
+  }
+  assert.ok(checkedRealLane, 'no real lane with notes was modeled');
 }
 
 // ---------------------------------------------------------------------------
@@ -2293,6 +2494,50 @@ if (saveButton) {
   assert.ok(calls.some((url) => url.indexOf('/plugins/gorge-chart/save') !== -1), 'save button did not POST /save');
 }
 
+// 5b. Export button must GET /export and hand the zip to the browser as a download.
+const exportButton = findHost(
+  tree,
+  (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'exportHint',
+);
+assert.ok(exportButton, 'header has no export button');
+{
+  const originalCreateObjectURL = URL.createObjectURL;
+  const originalRevokeObjectURL = URL.revokeObjectURL;
+  const originalCreateElement = document.createElement;
+  const objectUrls = [];
+  const downloads = [];
+  URL.createObjectURL = (blob) => {
+    const url = 'blob:mock-' + (objectUrls.length + 1);
+    objectUrls.push({ url, blob });
+    return url;
+  };
+  URL.revokeObjectURL = () => {};
+  document.createElement = (tag) => {
+    const node = originalCreateElement(tag);
+    if (String(tag).toLowerCase() === 'a') downloads.push(node);
+    return node;
+  };
+  try {
+    exportButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: exportButton });
+    tree = await settle();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    tree = await settle();
+  } finally {
+    URL.createObjectURL = originalCreateObjectURL;
+    URL.revokeObjectURL = originalRevokeObjectURL;
+    document.createElement = originalCreateElement;
+  }
+  assert.ok(calls.some((url) => url.indexOf('/plugins/gorge-chart/export') !== -1), 'export button did not GET /export');
+  assert.equal(downloads.length, 1, 'export did not create a download link');
+  assert.equal(downloads[0].download, 'DremuTest.zip', 'download did not use the Host file name');
+  assert.equal(downloads[0].href, 'blob:mock-1', 'download did not point at the zip blob');
+  assert.equal(objectUrls.length, 1, 'export did not create a blob URL');
+  const exportText = flattenText(tree, []).join(' ');
+  assert.ok(exportText.includes('导出完成'), 'export success notice is missing');
+  assert.ok(exportText.includes('DremuTest.zip'), 'export notice does not name the package');
+  assert.ok(exportText.includes('2 个未引用素材未打包'), 'export notice does not report skipped assets');
+}
+
 // ---------------------------------------------------------------------------
 // Timeline direct manipulation: drag a note, then undo it.
 //
@@ -2352,17 +2597,34 @@ if (!isRealMode) {
     const laneCanvas = timelineCanvas();
     pointer(laneCanvas, 'PointerMove', 746, 112);
     const laneContext = laneCanvas.getContext('2d');
-    const laneBar = laneContext.rects.find(
-      (rect) =>
-        rect.kind === 'fillRect' &&
-        rect.w > 100 &&
-        Math.abs(rect.y - 98) < 1 &&
-        Math.abs(rect.x - (148 + 46)) < 2,
-    );
+    /** Bounding box of a recorded path (rounded lane bars are path fills). */
+    const pathBox = (path) => {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const part of path || []) {
+        if (!Number.isFinite(part.x) || !Number.isFinite(part.y)) continue;
+        minX = Math.min(minX, part.x);
+        maxX = Math.max(maxX, part.x);
+        minY = Math.min(minY, part.y);
+        maxY = Math.max(maxY, part.y);
+      }
+      return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    };
+    const laneBar = laneContext.ops
+      .filter((op) => op.op === 'fill')
+      .map((op) => pathBox(op.path))
+      .find((box) => box.w > 100 && Math.abs(box.y - 98) < 1 && Math.abs(box.x - (148 + 46)) < 2);
     assert.ok(
       laneBar,
-      'lane bar did not follow the pointer during a drag; wide rects in the last frame: ' +
-        JSON.stringify(laneContext.rects.filter((rect) => rect.w > 100)),
+      'lane bar did not follow the pointer during a drag; wide path fills in the last frame: ' +
+        JSON.stringify(
+          laneContext.ops
+            .filter((op) => op.op === 'fill')
+            .map((op) => pathBox(op.path))
+            .filter((box) => box.w > 100),
+        ),
     );
     pointer(timelineCanvas(), 'PointerCancel', 746, 112);
   }
@@ -2441,6 +2703,254 @@ if (!isRealMode) {
   assert.equal(addOp.element.fields.laneName, 'Main1', 'placed note must join the row lane');
   assert.ok(Math.abs(addOp.element.fields.hitTime - 5) < 0.2, 'placed note hitTime should be ~5, got ' + addOp.element.fields.hitTime);
   assert.ok(addOp.periodId, 'add op carries no periodId');
+
+  // -------------------------------------------------------------------------
+  // Judgement-line note editor: open from the lane strip, place notes with
+  // Q/W/E/R, drag a note, resize a hold, box-delete and close again.
+  // -------------------------------------------------------------------------
+  {
+    /** Dispatch a real window keydown through the captured listener. */
+    function editorKey(key, extra) {
+      const event = Object.assign(
+        {
+          key,
+          target: { tagName: 'CANVAS' },
+          preventDefault() {},
+          stopPropagation() {},
+          shiftKey: false,
+          metaKey: false,
+          ctrlKey: false,
+          altKey: false,
+        },
+        extra || {},
+      );
+      dispatchWindowEvent('keydown', event);
+      return event;
+    }
+    /** The note editor canvas (the timeline canvas stays mounted below it). */
+    function noteCanvas() {
+      const host = findHost(
+        tree,
+        (node) => node.tagName === 'CANVAS' && String(node.className || '').indexOf('dgc-noteCanvas') !== -1,
+      );
+      assert.ok(host, 'note editor canvas not found');
+      return host;
+    }
+    /** aria-pressed state of a toolbar tool button. */
+    function toolPressed(label) {
+      const button = findHost(
+        tree,
+        (host) => host.props && typeof host.props.onClick === 'function' && flattenText(host.rendered, []).join('').trim() === label,
+      );
+      return !!(button && button.props && button.props['aria-pressed']);
+    }
+    /** Last edit body, settled. */
+    async function latestEdit(previousCount, message) {
+      tree = await settle();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.ok(editBodies.length > previousCount, message);
+      return editBodies[editBodies.length - 1];
+    }
+    const noteLayout = clientPlugin.__noteEditor.layout(800, 420);
+
+    // The select tool is active after placement; its double-click on the lane
+    // strip (0…20 s) is the note-editor entry point.
+    assert.ok(toolPressed('toolSelect'), 'select tool should be active before opening the note editor');
+    pointer(timelineCanvas(), 'DoubleClick', 700, 112);
+    tree = await settle();
+    assert.ok(noteCanvas(), 'double-clicking the lane strip did not open the note editor');
+    assert.ok(flattenText(tree, []).join(' ').includes('Main1'), 'note editor does not name its lane');
+    const noteContext = noteCanvas().getContext('2d');
+    assert.ok(
+      noteContext.drawn.some((item) => item.x === 5 && item.y === 5 && item.text.length > 0),
+      'note editor did not paint the spectrum strip caption',
+    );
+    assert.ok(
+      noteContext.drawn.some((item) => item.text.indexOf('noteEditorJudge') !== -1),
+      'note editor did not paint the judgement line label',
+    );
+    assert.ok(
+      noteContext.drawn.some((item) => /^-?\d+(\.\d+)?$/.test(item.text)),
+      'note editor did not paint beat numbers',
+    );
+
+    // Q -> Tap at (0.75 s, position -2.5).
+    editorKey('q');
+    tree = await settle();
+    assert.ok(toolPressed('toolTap'), 'Q did not select the tap tool');
+    let before = editBodies.length;
+    pointer(noteCanvas(), 'PointerDown', 300, 250);
+    pointer(noteCanvas(), 'PointerUp', 300, 250);
+    let batch = await latestEdit(before, 'Q/tap did not POST an add op');
+    let add = batch.ops.find((op) => op.op === 'add');
+    assert.ok(add, 'tap placement produced no add op: ' + JSON.stringify(batch.ops));
+    assert.equal(add.element.type, 'Dremu.DremuTap');
+    assert.equal(add.element.fields.laneName, 'Main1');
+    assert.equal(add.periodId, 'p0');
+    assert.ok(Math.abs(add.element.fields.hitTime - 0.75) < 1e-6, 'tap hitTime: ' + add.element.fields.hitTime);
+    assert.ok(Math.abs(add.element.fields.position.fields.baseValue - -2.5) < 1e-6, 'tap position: ' + JSON.stringify(add.element.fields.position));
+
+    // W -> Drag at (0.375 s, position 0).
+    editorKey('w');
+    tree = await settle();
+    assert.ok(toolPressed('toolDrag'), 'W did not select the drag tool');
+    before = editBodies.length;
+    pointer(noteCanvas(), 'PointerDown', 441, 310);
+    pointer(noteCanvas(), 'PointerUp', 441, 310);
+    batch = await latestEdit(before, 'W/drag did not POST an add op');
+    add = batch.ops.find((op) => op.op === 'add');
+    assert.equal(add.element.type, 'Dremu.DremuDrag');
+    assert.ok(Math.abs(add.element.fields.hitTime - 0.375) < 1e-6, 'drag hitTime: ' + add.element.fields.hitTime);
+    assert.ok(Math.abs(add.element.fields.position.fields.baseValue) < 1e-6, 'drag position: ' + JSON.stringify(add.element.fields.position));
+
+    // E -> Taplik at (0.625 s, position 2).
+    editorKey('e');
+    tree = await settle();
+    assert.ok(toolPressed('toolTaplik'), 'E did not select the taplik tool');
+    before = editBodies.length;
+    pointer(noteCanvas(), 'PointerDown', 560, 270);
+    pointer(noteCanvas(), 'PointerUp', 560, 270);
+    batch = await latestEdit(before, 'E/taplik did not POST an add op');
+    add = batch.ops.find((op) => op.op === 'add');
+    assert.equal(add.element.type, 'Dremu.DremuTaplik');
+    assert.ok(Math.abs(add.element.fields.hitTime - 0.625) < 1e-6, 'taplik hitTime: ' + add.element.fields.hitTime);
+    assert.ok(Math.abs(add.element.fields.position.fields.baseValue - 2) < 1e-6, 'taplik position: ' + JSON.stringify(add.element.fields.position));
+
+    // R -> Hold: press at (0.375 s, position 3.5) and drag up to 0.875 s.
+    editorKey('r');
+    tree = await settle();
+    assert.ok(toolPressed('toolHold'), 'R did not select the hold tool');
+    before = editBodies.length;
+    pointer(noteCanvas(), 'PointerDown', 650, 310);
+    pointer(noteCanvas(), 'PointerMove', 650, 230);
+    pointer(noteCanvas(), 'PointerUp', 650, 230);
+    batch = await latestEdit(before, 'R/hold did not POST an add op');
+    add = batch.ops.find((op) => op.op === 'add');
+    assert.equal(add.element.type, 'Dremu.DremuHold');
+    assert.ok(Math.abs(add.element.fields.hitTime - 0.375) < 1e-6, 'hold hitTime: ' + add.element.fields.hitTime);
+    assert.ok(Math.abs(add.element.fields.position.fields.baseValue - 3.5) < 1e-6, 'hold position: ' + JSON.stringify(add.element.fields.position));
+    assert.ok(Math.abs(add.element.fields.holdTime - 0.5) < 1e-6, 'hold length: ' + add.element.fields.holdTime);
+
+    // Select and drag the Q tap by (+1 position, +0.125 s).
+    editorKey('v');
+    tree = await settle();
+    const tapX = clientPlugin.__noteEditor.positionToX(-2.5, noteLayout);
+    const tapY = clientPlugin.__noteEditor.timeToY(0.75, 0, 160, noteLayout);
+    before = editBodies.length;
+    pointer(noteCanvas(), 'PointerDown', tapX, tapY);
+    pointer(noteCanvas(), 'PointerMove', tapX + 59, tapY - 20);
+    pointer(noteCanvas(), 'PointerUp', tapX + 59, tapY - 20);
+    batch = await latestEdit(before, 'dragging a note did not POST an edit');
+    const timePatch = batch.ops.find((op) => op.op === 'patch' && op.path[0] === 'hitTime');
+    const positionPatch = batch.ops.find((op) => op.op === 'patch' && op.path[0] === 'position');
+    assert.ok(timePatch, 'note drag produced no hitTime patch: ' + JSON.stringify(batch.ops));
+    assert.ok(positionPatch, 'note drag produced no position patch: ' + JSON.stringify(batch.ops));
+    assert.ok(Math.abs(timePatch.value - 0.875) < 0.02, 'dragged hitTime: ' + timePatch.value);
+    assert.deepEqual(positionPatch.path, ['position', 'fields', 'baseValue']);
+    assert.ok(Math.abs(positionPatch.value - -1.5) < 0.02, 'dragged position: ' + positionPatch.value);
+
+    // Drag the hold tail from 0.875 s to 1.25 s (holdTime 0.5 -> 0.875).
+    const holdX = clientPlugin.__noteEditor.positionToX(3.5, noteLayout);
+    const holdTailY = clientPlugin.__noteEditor.timeToY(0.875, 0, 160, noteLayout);
+    before = editBodies.length;
+    pointer(noteCanvas(), 'PointerDown', holdX, holdTailY);
+    pointer(noteCanvas(), 'PointerMove', holdX, holdTailY - 50);
+    pointer(noteCanvas(), 'PointerUp', holdX, holdTailY - 50);
+    batch = await latestEdit(before, 'resizing the hold tail did not POST an edit');
+    const holdPatch = batch.ops.find((op) => op.op === 'patch' && op.path[0] === 'holdTime');
+    assert.ok(holdPatch, 'hold resize produced no holdTime patch: ' + JSON.stringify(batch.ops));
+    assert.ok(Math.abs(holdPatch.value - 0.875) < 0.02, 'resized holdTime: ' + holdPatch.value);
+
+    // Box-select the hold + taplik and delete them.
+    before = editBodies.length;
+    pointer(noteCanvas(), 'PointerDown', 590, 160);
+    pointer(noteCanvas(), 'PointerMove', 710, 330);
+    pointer(noteCanvas(), 'PointerUp', 710, 330);
+    tree = await settle();
+    editorKey('Delete');
+    batch = await latestEdit(before, 'deleting the box selection did not POST an edit');
+    const removed = batch.ops.filter((op) => op.op === 'remove');
+    assert.ok(removed.length >= 1, 'box delete produced no remove op: ' + JSON.stringify(batch.ops));
+
+    // Escape clears the selection first, then leaves the editor.
+    editorKey('Escape');
+    tree = await settle();
+    if (findHost(tree, (node) => node.tagName === 'CANVAS' && String(node.className || '').indexOf('dgc-noteCanvas') !== -1)) {
+      editorKey('Escape');
+      tree = await settle();
+    }
+    assert.ok(
+      !findHost(tree, (node) => node.tagName === 'CANVAS' && String(node.className || '').indexOf('dgc-noteCanvas') !== -1),
+      'Escape did not close the note editor',
+    );
+    assert.ok(flattenText(tree, []).join(' ').indexOf('toolLane') !== -1, 'timeline toolbar did not return');
+
+    // With a placement tool active, the gutter double-click still enters the
+    // note editor (the lane strip itself keeps the placement behavior).
+    const tapToolAgain = findHost(
+      tree,
+      (host) => host.props && typeof host.props.onClick === 'function' && flattenText(host.rendered, []).join('').trim() === 'toolTap',
+    );
+    assert.ok(tapToolAgain, 'chart tap tool missing after closing the editor');
+    tapToolAgain.props.onClick({ preventDefault() {}, stopPropagation() {}, target: tapToolAgain });
+    tree = await settle();
+    // The lane's label area (first ~110 px of the strip) opens even with a
+    // placement tool active; the rest of the strip still places notes.
+    pointer(timelineCanvas(), 'DoubleClick', 220, 112);
+    tree = await settle();
+    assert.ok(noteCanvas(), 'lane label double-click did not open the note editor with a placement tool active');
+
+    // Scrubbing uses the pointer-down anchor: seeking in pointerdown and then
+    // moving at the same y must not feed the new playhead back into y -> time
+    // (which would run away toward 2 s, 3 s, ...).
+    pointer(noteCanvas(), 'PointerDown', 20, 210);
+    pointer(noteCanvas(), 'PointerMove', 20, 210);
+    pointer(noteCanvas(), 'PointerUp', 20, 210);
+    tree = await settle();
+    const scrubText = flattenText(tree, []).join(' ');
+    assert.ok(
+      scrubText.indexOf('0:01.000') !== -1,
+      'note editor scrub did not seek to ~1 s (runaway anchor?): ' + scrubText.slice(0, 220),
+    );
+    const rewindButton = findHost(
+      tree,
+      (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'jumpToStart',
+    );
+    assert.ok(rewindButton, 'transport rewind button not found');
+    rewindButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: rewindButton });
+    tree = await settle();
+    assert.ok(flattenText(tree, []).join(' ').indexOf('0:00.000') !== -1, 'rewind did not reset the transport');
+
+    const backButton = findHost(
+      tree,
+      (host) => host.props && typeof host.props.onClick === 'function' && flattenText(host.rendered, []).join('').trim() === 'noteEditorBack',
+    );
+    assert.ok(backButton, 'note editor has no back button');
+    backButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: backButton });
+    tree = await settle();
+    assert.ok(
+      !findHost(tree, (node) => node.tagName === 'CANVAS' && String(node.className || '').indexOf('dgc-noteCanvas') !== -1),
+      'back button did not close the note editor',
+    );
+    // The gutter label is mode-independent as well.
+    pointer(timelineCanvas(), 'DoubleClick', 50, 112);
+    tree = await settle();
+    assert.ok(noteCanvas(), 'gutter double-click did not open the note editor');
+    const backButton2 = findHost(
+      tree,
+      (host) => host.props && typeof host.props.onClick === 'function' && flattenText(host.rendered, []).join('').trim() === 'noteEditorBack',
+    );
+    if (backButton2) backButton2.props.onClick({ preventDefault() {}, stopPropagation() {}, target: backButton2 });
+    tree = await settle();
+    const selectAgain = findHost(
+      tree,
+      (host) => host.props && typeof host.props.onClick === 'function' && flattenText(host.rendered, []).join('').trim() === 'toolSelect',
+    );
+    if (selectAgain) {
+      selectAgain.props.onClick({ preventDefault() {}, stopPropagation() {}, target: selectAgain });
+      tree = await settle();
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Left pane: create a staff from the header "+", then add an element to it.
@@ -3081,6 +3591,102 @@ playbackCloseButton.props.onClick({
 tree = await settle();
 assert.ok(!findHost(tree, (host) => hasClassToken(host, 'dgc-player')), 'playback overlay (.dgc-player) did not unmount after close');
 
+// ---- Create-project dialog: header button -> inline validation -> POST /create
+{
+  const expectedParent = stateResponse.projectRoot;
+  const newProjectButton = findHost(
+    tree,
+    (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'newProjectHint',
+  );
+  assert.ok(newProjectButton, 'header has no newProject button');
+  newProjectButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: newProjectButton });
+  tree = await settle();
+
+  const dialog = findHost(tree, (host) => hasClassToken(host, 'dgc-modal'));
+  assert.ok(dialog, 'new-project dialog did not open');
+  const nameInput = findHost(
+    dialog,
+    (host) => host.tagName === 'INPUT' && host.props.placeholder === 'projectNamePlaceholder',
+  );
+  assert.ok(nameInput, 'new-project dialog has no project-name input');
+  const parentInput = findHost(
+    dialog,
+    (host) => host.tagName === 'INPUT' && String(host.className).split(/\s+/).indexOf('is-mono') !== -1,
+  );
+  assert.ok(parentInput, 'new-project dialog has no location input');
+  assert.equal(parentInput.props.value, expectedParent, 'the location must default to the project root');
+  const lengthInput = findHost(dialog, (host) => host.tagName === 'INPUT' && host.props.type === 'number');
+  assert.ok(lengthInput, 'new-project dialog has no initial-length input');
+
+  // Invalid names are rejected inline, without a request.
+  nameInput.props.onChange({ target: { value: 'a/b' } });
+  tree = await settle();
+  const invalidSubmit = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join('').trim() === 'create';
+  });
+  assert.ok(invalidSubmit, 'new-project dialog has no create button');
+  invalidSubmit.props.onClick({ preventDefault() {}, stopPropagation() {}, target: invalidSubmit });
+  tree = await settle();
+  assert.equal(createBodies.length, 0, 'an invalid project name must not reach POST /create');
+  assert.ok(
+    flattenText(tree, []).join(' ').includes('projectNameInvalid'),
+    'an invalid project name must show the inline hint',
+  );
+
+  // Pick the storyboard template and a custom length, then create for real.
+  const storyboardCard = findHost(
+    tree,
+    (host) =>
+      hasClassToken(host, 'dgc-kindCard') &&
+      typeof host.props.onClick === 'function' &&
+      flattenText(host.rendered, []).join(' ').indexOf('projectTemplateStoryboard') !== -1,
+  );
+  assert.ok(storyboardCard, 'new-project dialog has no storyboard template card');
+  storyboardCard.props.onClick({ preventDefault() {}, stopPropagation() {}, target: storyboardCard });
+  tree = await settle();
+  const armedStoryboardCard = findHost(
+    tree,
+    (host) => hasClassToken(host, 'dgc-kindCard') && host.props['aria-pressed'] === true,
+  );
+  assert.ok(
+    armedStoryboardCard && flattenText(armedStoryboardCard.rendered, []).join(' ').indexOf('projectTemplateStoryboard') !== -1,
+    'choosing the storyboard template did not arm its card',
+  );
+  const nameAgain = findHost(
+    tree,
+    (host) => host.tagName === 'INPUT' && host.props.placeholder === 'projectNamePlaceholder',
+  );
+  nameAgain.props.onChange({ target: { value: 'NewSong' } });
+  tree = await settle();
+  const lengthAgain = findHost(tree, (host) => host.tagName === 'INPUT' && host.props.type === 'number');
+  lengthAgain.props.onChange({ target: { value: '45' } });
+  tree = await settle();
+  const submit = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join('').trim() === 'create';
+  });
+  assert.ok(submit, 'new-project dialog lost its create button');
+  submit.props.onClick({ preventDefault() {}, stopPropagation() {}, target: submit });
+  tree = await settle();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  tree = await settle();
+
+  assert.equal(createBodies.length, 1, 'the create button must POST /create once');
+  assert.deepEqual(createBodies[0], {
+    name: 'NewSong',
+    parent: expectedParent,
+    template: 'storyboard',
+    minLength: 45,
+  });
+  assert.ok(!findHost(tree, (host) => hasClassToken(host, 'dgc-modal')), 'the dialog must close after creation');
+  assert.ok(
+    flattenText(tree, []).join(' ').includes('已创建项目'),
+    'creation must show the success notice',
+  );
+  assert.ok(flattenText(tree, []).join(' ').includes('NewSong'), 'the created project name is not visible');
+}
+
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
@@ -3102,10 +3708,13 @@ console.log('  slots: sidebar.panellist#gorge-chart + main#gorge-chart');
 console.log('  verified: page chrome, project/lane/element data, timeline paint, element selection,');
 console.log('            inspector fields, docked curve panel (beat grid + segments + type/parameter editors),');
 console.log('            curve Apply / right-click segment creation / type change / delete / boundary drag,');
-console.log('            apply/undo/save round trips,');
+console.log('            apply/undo/save round trips, header export -> GET /export -> one download link,');
 console.log('            note drag -> patch(hitTime), undo -> inverse patch, redo, tap placement -> add op,');
+console.log('            note editor double-click/gutter entry, spectrum+beat paint, Q/W/E/R adds,');
+console.log('            note drag -> hitTime+position patch, hold-tail resize, box delete, scrub anchor, back/Esc,');
 console.log('            addStaff dialog -> addStaff op (chart + storyboard), the element palette -> add op,');
 console.log('            the staff right-click menu -> setStaffName / removeStaff(deleteFile) ops,');
 console.log('            the audio-period dialog -> addAudioPeriod / clip drag -> patchAudioPeriod ops,');
 console.log('            the audio-strip right-click menu -> waveform/spectrum mode,');
-console.log('            and auto-BPM detection -> setMeta.tempo.');
+console.log('            auto-BPM detection -> setMeta.tempo,');
+console.log('            and the new-project dialog -> inline validation -> POST /create -> opened project.');

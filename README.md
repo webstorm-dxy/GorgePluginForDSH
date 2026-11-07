@@ -2,7 +2,7 @@
 
 A DeepSeek Harness bundle that adds a **full-page chart editor for Gorge / Dremu
 `.g` chart projects** to the Harness Web UI, plus Host tools so the agent can
-read, edit, and generate the same chart.
+read, edit, generate, and package the same chart.
 
 Editing logic and layout follow [rpe-next](https://github.com/kclg-YSJ/rpe-next)
 (Re:PhiEdit Next, a Phigros chart editor): a horizontal time axis with a snapping
@@ -20,6 +20,14 @@ Gorge framework declarative `.g` format used by the Dremu chart projects on this
 * **Opens a chart project folder** — every `.g` staff file is parsed, the periods
   are flattened onto one absolute-time axis, and assets (WAV/MP3/PNG) are served
   to the page with HTTP Range support so audio scrubs and plays.
+* **Creates a brand-new project** — **新建项目 / New project** in the header
+  (also on the empty page and in the 打开项目 dialog) asks for a folder name, an
+  existing parent folder (defaults to `projectRoot`), a starter template (blank
+  chart, or chart + storyboard) and the initial period length. The Host writes
+  `DremuStaff.g` (plus `Storyboard.g`) immediately, so the new project opens
+  clean and its next save already has a real folder. An existing **empty**
+  folder is adopted; a non-empty one is refused instead of overwritten. The same
+  flow is available to the agent as `gorge_project_create`.
 * **Grouped by staff (谱表)** — the timeline gutter and the element list are grouped by
   staff: one header per `.g` staff (`表演 · DremuStaff`, `Storyboard · DeentyStoryboardStaff`, …)
   with its lane/file counts, and the lanes indented underneath. Click a header to
@@ -57,6 +65,17 @@ Gorge framework declarative `.g` format used by the Dremu chart projects on this
 * **Direct manipulation** — drag an element to move it in time, drag its right
   edge to change `keepTime` / `holdTime`, box-select, ⇧-click to extend the
   selection, double-click empty space to place the current tool.
+* **Judgement-line note editor (判定线音符编辑器)** — double-click a lane strip
+  (select tool) or its gutter/label to open a vertical editor for that one lane:
+  horizontal note `position` on a 0.5-column grid, vertical `hitTime` on the
+  project BPM/offset beat grid, a fixed judgement line near the bottom (future
+  above it), and the audio spectrogram down the far-left edge. `Q` / `W` / `E` /
+  `R` pick Tap / Drag / Taplik / Hold, click to place (drag a Hold to set its
+  length); drag notes to retime and reposition, drag a Hold's tail to resize,
+  box-select/delete, nudge with the arrow keys, or edit the selected note in the
+  inspector. The lane strip's label also opens the editor while a placement tool
+  is active; every gesture is one undo step, and the header back button / `Esc`
+  returns to the timeline without losing its view.
 * **Inspector** — every field of the selected element, rendered from the catalog
   (numbers, strings, booleans, enums, `VariableFloat`, `Vector2`, `ColorArgb`,
   function curves, arrays of `FunctionPiece`, and a raw "other fields" section
@@ -136,11 +155,20 @@ Gorge framework declarative `.g` format used by the Dremu chart projects on this
 * **Saves the real `.g` files** — atomic writes with a `.g.bak` of the original
   content on the first save of a session. The codec is byte-exact: opening and
   saving an untouched project reproduces every file byte for byte.
+* **Exports a shareable chart ZIP (导出 ZIP)** — the header button packages the
+  **live** document as `<project>.zip`, so unsaved edits are included without
+  saving first. The archive holds a `<project>/` folder with every `.g` staff,
+  `README.md`, and the audio/images the chart actually references (storyboard
+  `image:<name>` references and `@Song` clip paths are resolved); unreferenced
+  files are reported as skipped instead of bloating the package. The browser
+  streams it to the download folder with a progress readout; `gorge_chart_export`
+  does the same for the agent and writes the zip next to the project.
 * **Agent tools** — the same document is exposed as
-  `gorge_project_list` / `gorge_project_open` / `gorge_chart_get` /
-  `gorge_chart_edit` / `gorge_chart_save` / `gorge_chart_validate` /
-  `gorge_element_schema`, and a one-line workspace summary is injected into the
-  system context. Agent edits appear live in the open editor.
+  `gorge_project_list` / `gorge_project_open` / `gorge_project_create` /
+  `gorge_chart_get` / `gorge_chart_edit` / `gorge_chart_save` /
+  `gorge_chart_export` / `gorge_chart_validate` / `gorge_element_schema`, and a
+  one-line workspace summary is injected into the system context. Agent edits
+  appear live in the open editor.
 * **Bundled agent skill** — `dremu-chart-editing` ships with the bundle and is
   registered on the Harness `skills` service: when to use it, the
   absolute-vs-period-relative timing rules, typed value trees and patch paths,
@@ -159,15 +187,19 @@ plugin_manager { action: "install_bundle", target: "<path to this checkout>" }
 
 Installation links the checkout, so later edits in this directory are live after
 a page refresh (a replaced JavaScript module needs a restart, as with any
-bundle). In particular, adding/importing audio periods needs the **new Host
-half**: after upgrading this bundle, quit and reopen the app before using the
-audio buttons. The plugin appears in **Settings → Plugins** as “Dremu 谱面工坊” and in
-the sidebar panel list (a golden lane glyph); clicking it opens the studio in the
-main panel.
+bundle). In particular, new-project creation, adding/importing audio periods and
+the ZIP export need the **new Host half**: after upgrading this bundle, quit and
+reopen the app before using the 新建项目, audio or export buttons. The plugin
+appears in **Settings → Plugins** as “Dremu 谱面工坊” and in the sidebar panel
+list (a golden lane glyph); clicking it opens the studio in the main panel.
 
 ## Use
 
-1. Click the sidebar glyph → **打开项目** → pick a folder (`~/Music/DremuTest`,
+1. Click the sidebar glyph. To start from scratch, click **新建项目**: enter a
+   folder name, the existing parent folder (prefilled with `projectRoot`), the
+   starter template (blank chart or chart + storyboard) and the initial length;
+   the Host writes the `.g` files and opens the project. To open an existing
+   chart, click **打开项目** → pick a folder (`~/Music/DremuTest`,
    `~/Music/Chart/Chart 2`, …) or type an absolute path. The library list is
    scanned from the configured `projectRoot` (default `~/Music`).
 2. Click **+** next to 谱表 to create a new staff, **+** on an audio staff row to
@@ -175,13 +207,20 @@ main panel.
    playhead; the left list updates immediately.
 3. Pick tools in the toolbar (or `V` select, `Q` tap, `W` drag, `E` hold,
    `T` lane), set the snap division, and double-click the timeline to place.
+   To edit one judgement line note-by-note, select a lane strip and
+   double-click it (or double-click the lane's gutter/label) to open the note
+   editor; `Esc` or 返回时间轴 goes back.
 4. Select something and edit it in the right-hand inspector; optional fields
    (for example a `VariableFloat`'s `variationCurve`) are enabled with their
    checkbox, and a curve field's curve button opens the docked curve panel in
    the center pane (apply/cancel returns to the timeline).
 5. `Ctrl/Cmd+S` saves. Autosave is on by default (`autoSave` in the plugin
    config) and debounces to the same atomic writer.
-6. Click **播放预览 / Play preview** in the header: the Autoplay playfield
+6. Click **导出 ZIP / Export ZIP** in the header to download the current chart as
+   a `<project>.zip` package. No save is needed first: staff files come from the
+   live document, referenced assets and `README.md` are copied in, and the toast
+   reports the file name, size and how many unreferenced assets were left out.
+7. Click **播放预览 / Play preview** in the header: the Autoplay playfield
    (audio + canvas) replaces the timeline pane, while the editor header and side
    panes stay visible. `Space` play/pause, `Esc` closes; the preview bar below the
    canvas has restart, seek, rate, mute and a storyboard-background toggle.
@@ -205,11 +244,19 @@ main panel.
 | `Esc` | clear selection / select tool |
 | `Space` / `Esc` (playback preview) | play/pause, close the preview |
 | `←` / `→` (playback preview) | seek backwards / forwards |
+| `Q` / `W` / `E` / `R` (note editor) | Tap / Drag / Taplik / Hold tool |
+| `↑` / `↓` (note editor) | nudge selected notes in time (Shift ×4) |
+| `←` / `→` (note editor) | nudge selected notes in position (Shift ×2) |
+| `+` / `-` / `0` (note editor) | zoom in / out / reset |
+| `Esc` (note editor) | clear selection, then close the editor |
 
 Mouse: wheel scrolls lane rows, `Shift`+wheel scrolls time, `Ctrl`+wheel zooms
 around the pointer, middle-drag or `Alt`+drag pans, drag on the ruler scrubs.
-Right-click a 谱表 row (or a staff group header in the element list) to rename
-its alias or delete it.
+In the note editor: wheel seeks, `Ctrl`+wheel zooms, click the spectrum/ruler to
+seek, `Alt` temporarily disables snapping, and dragging a Hold's tail changes
+its length. Double-click a lane strip (select tool, or its label/gutter in any
+mode) to open the note editor. Right-click a 谱表 row (or a staff group header
+in the element list) to rename its alias or delete it.
 
 ## Plugin configuration
 
@@ -233,20 +280,23 @@ package.json          bundle manifest (dsh.bundle.patch + dsh.client)
 cordis.patch.yml      inserts the loader row
 index.js              Host half: project store, HTTP/SSE, agent tools, prompt context
 gorge-codec.js        .g text <-> typed value tree, byte-exact writer (no I/O)
-dremu-model.js        chart model: catalog, project load/save, timing, op application
+dremu-model.js        chart model: catalog, project create/load/save, timing, op application
+gorge-zip.js          chart package export: dependency-free ZIP writer + asset selection
 skills.js             bundled skill provider registered on ctx.skills
 skills/dremu-chart-editing/  agent skill: SKILL.md + references (tools/ops,
                       element fields, recipes)
 client.js             browser half: the whole editor UI (one self-contained file)
 locale/{zh,en}.json   display metadata
 docs/                 gorge-format-spec.md (the .g text format),
-                      playback-model.md (the Unity → Canvas playback port)
+                      playback-model.md (the Unity → Canvas playback port),
+                      note-editor.md (judgement-line note editor geometry/ops)
 tests/                codec / model / host / skill / client smoke tests (plain node scripts)
 ```
 
 `client.js` stays one file because the bundle loader serves exactly one client
-module per package. It is organized as 20 numbered sections (`// 07 · Audio`,
-`// 15 · Timeline canvas`, …). `index.js`, `dremu-model.js` and `gorge-codec.js`
+module per package. It is organized as numbered sections (`// 07 · Audio`,
+`// 15 · Timeline canvas`, `// 15.5 · Judgement-line note editor`, …).
+`index.js`, `dremu-model.js` and `gorge-codec.js`
 follow the same convention — numbered section banners plus a section map in the
 file header — so each file's top comment tells you where to jump.
 
@@ -256,6 +306,9 @@ locally and POSTed to `/plugins/gorge-chart/edit` with `{baseRev, ops}`; the Hos
 applies it to the canonical model, bumps the revision, autosaves and notifies SSE
 subscribers. When the revision was not produced by this tab (an agent edit), the
 page refetches `/state`. `.g` serialization always happens on the Host.
+`GET /export` reuses that live model: it serialises every staff (unsaved edits
+included), packs the referenced assets from the project folder and returns one
+ZIP, so the download and the agent tool share the same package builder.
 
 ## Format notes
 
@@ -300,8 +353,8 @@ class DremuStaff
 
 ```
 node tests/codec.test.mjs        # 12/12 corpus files byte-exact + 37 codec checks
-node tests/model.test.mjs        # 69 checks: load/save fidelity (CRLF + LF), ops, audio periods, catalog
-node tests/host.test.mjs         # 34 checks: store, HTTP handlers, audio import, tools, Range, recovery
+node tests/model.test.mjs        # 71 checks: load/save fidelity (CRLF + LF), create, ops, audio periods, catalog
+node tests/host.test.mjs         # 43 checks: store, create/open, HTTP handlers, export ZIP, audio import, tools, Range, recovery
 node tests/skill.test.mjs        # 15 checks: skill document, examples, provider, registration
 node tests/client-smoke.mjs      # mounts the page in a tiny React runtime (fixture project)
 GORGE_SMOKE_REAL=1 node tests/client-smoke.mjs
@@ -318,20 +371,48 @@ applies, right-click segment creation/type change/delete and boundary drags emit
 the expected piecewise patches, the client curve sampler matches the Host
 `evaluateCurve`, dragging a note emits `patch(hitTime)`, undo emits the inverse
 patch, redo restores it, and placing a Tap emits an `add` op with the row's lane.
+The judgement-line note editor is exercised end-to-end too: the lane strip's
+double-click (and the label/gutter shortcuts) opens it, the canvas paints the
+spectrum caption, judgement-line label and beat numbers, `Q`/`W`/`E`/`R` create
+the four note types with snapped `hitTime`/`position`/`holdTime`, dragging a note
+patches both time and position, a Hold tail drag patches `holdTime`, box-delete
+emits `remove` ops, a spectrum scrub keeps the pointer-down time anchor (so the
+playhead cannot run away while scrubbing), and `Esc`/the back button return to
+the timeline. The new-project flow is also mounted end-to-end: the header button
+opens the dialog with `projectRoot` prefilled, an invalid name is rejected inline
+without a request, choosing the storyboard template and a custom length posts
+`{ name, parent, template, minLength }` to `POST /create`, and the answered state
+closes the dialog, shows the success notice and adopts the new project.
 
 ## Verification status
 
 * **Host half is live in this profile** (`plugin_manager` reports the bundle
-  enabled; `application: applied`). Host-side changes (new audio ops and the
-  `/import-audio` route) take effect on the next Host start; the client half
-  loads on a page refresh. Verified over HTTP from a shell:
-  `/state` returns the catalog, `/projects` lists 6 chart folders, `/edit`
-  round-trips, `/file` serves Range requests.
+  enabled; `application: applied`). Host-side changes (new create/audio ops and
+  the `/create`, `/import-audio` and `/export` routes) take effect on the next
+  Host start; the client half loads on a page refresh. Verified over HTTP from a
+  shell: `/state` returns the catalog, `/projects` lists 6 chart folders,
+  `/create` writes and opens a starter project, `/edit` round-trips, `/file`
+  serves Range requests, and `/export` streams a zip that `unzip -t` reports as
+  valid.
+* **New-project creation is covered by the Node and client suites**:
+  `validateProjectName` rejects separators, hidden/trailing-dot names and long
+  names; `create: ...` writes `DremuStaff.g` (and optionally `Storyboard.g`),
+  adopts an existing empty folder, refuses a non-empty one with 409, and rolls
+  back a failed empty folder; the HTTP handler answers 200/400/409 and the agent
+  tool creates, opens and immediately edits a project; the client smoke test
+  covers the dialog, inline validation, POST body and adopted state.
 * **Audio periods are covered by the Node suites**: `addAudioPeriod` writes a
   second `@Song` (save → reload keeps both clips and the 32 s duration),
   external files are copied under unique project-relative names, patch/remove
   round-trips, auto-creating `Song.g` works, and the HTTP import endpoint is
   limited to local requests, audio extensions and a bounded body.
+* **Chart ZIP export is covered by the Node and client suites**: `gorge-zip.js`
+  round-trips through a central-directory reader that checks both headers, the
+  UTF-8 name flag and every CRC; the package carries unsaved staff edits, the
+  referenced storyboard images and `@Song` audio, the README, and never a `.bak`;
+  `assets=all|none` are honoured; the HTTP handler answers `application/zip`
+  with download headers; and the page smoke test turns the response into one
+  `download` link with the Host-provided name and the success notice.
 * **Agent tools verified live**: `gorge_project_open` opened
   `~/Music/DremuTest` (5 staffs / 506 elements / 137.421 s), `gorge_chart_get`
   returned the flattened chart, `gorge_chart_validate` returned 0 issues.
@@ -410,6 +491,11 @@ and dark themes.
   holds, storyboard, `DremuRespondHint` diamonds/hearts and `RespondEffect.wav`),
   but not the game's **UI layer** (score/combo/judgement HUD/pause menu) or
   Unity's bloom/shader pass. It is a visual preview, not a playable build.
+* The judgement-line note editor is a focused 1D view: it positions notes from
+  `VariableFloat.baseValue` (a `variationCurve` is editable in the inspector but
+  not previewed on the canvas), draws future above a fixed bottom judgement
+  line, and shows positions only in ±5.5 world units. It is an authoring view,
+  not the playfield; use the playback preview for the rendered chart.
 * The timeline is a chart editor, not the game renderer: it shows element
   time extents, not the playfield. The playback preview draws the playfield, but
   as a **Canvas-2D approximation** — line caps/joins follow the CurveSprite
@@ -444,3 +530,7 @@ and dark themes.
   `StoryboardVideo` is not supported.
 * On a Host restart the last project is reopened from the recovery snapshot and
   accepted-but-unsaved op batches are replayed when `autoSave` is false.
+* ZIP export inventories top-level project files only (like the editor's asset
+  list). A referenced asset in a subfolder, or one named only inside an unknown
+  element type, is not auto-detected; use `gorge_chart_export { assets: "all" }`
+  (or `/plugins/gorge-chart/export?assets=all`) for a full folder copy.

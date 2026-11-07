@@ -7,7 +7,10 @@
  *
  * Editing model follows rpe-next (Re:PhiEdit Next): horizontal time axis with a
  * snapping beat grid, multi-select, a property inspector with per-field editors
- * and a docked, beat-aligned curve panel, undo/redo, and audio playback.
+ * and a docked, beat-aligned curve panel, undo/redo, and audio playback. A
+ * lane strip can also open a vertical judgement-line note editor: horizontal
+ * note position, vertical time with a BPM beat grid, a fixed judgement line and
+ * a left-hand spectrogram (see §15.5).
  *
  * The Host half owns the project (parsing/serializing `.g`, saving to disk,
  * revisions, agent tools). This half mirrors it over
@@ -28,11 +31,12 @@
  *   03 curve sampling             13 transport bar
  *   04 optimistic op application  14 timeline layout model
  *   05 stylesheet                 15 timeline canvas
- *   06 host bridge (HTTP + SSE)   16 open-project dialog
- *   07 audio (waveforms + clips)  17 playback scene
- *   08 UI primitives              18 page assembly
- *   09 generic value editor         19 sidebar panel icon
- *   10 curve editor panel          20 client plugin entry
+ *   06 host bridge (HTTP + SSE)  15.5 note editor
+ *   07 audio (waveforms + clips)  16 open-project dialog
+ *   08 UI primitives              17 playback scene
+ *   09 generic value editor       18 page assembly
+ *   10 curve editor panel         19 sidebar panel icon
+ *   11 left pane                  20 client plugin entry
  */
 window.__ModuleLoader__.load({
   id: '@local/gorge-chart-studio',
@@ -50,7 +54,9 @@ window.__ModuleLoader__.load({
     const EDIT_URL = API + '/edit';
     const EVENTS_URL = API + '/events';
     const OPEN_URL = API + '/open';
+    const CREATE_URL = API + '/create';
     const SAVE_URL = API + '/save';
+    const EXPORT_URL = API + '/export';
     const FILE_URL = API + '/file';
     const PROJECTS_URL = API + '/projects';
     const RELOAD_URL = API + '/reload';
@@ -100,11 +106,37 @@ window.__ModuleLoader__.load({
       openProject: '打开项目',
       openProjectPlaceholder: '项目目录绝对路径，或 “谱面库” 中的名称',
       open: '打开',
+      newProject: '新建项目',
+      newProjectHint: '创建一个全新的谱面工程目录：写入一个空白谱表（可选再加一个剧情谱表），然后立即打开。',
+      projectNameLabel: '项目名称',
+      projectNamePlaceholder: '例如 MySong',
+      projectParentLabel: '创建位置',
+      projectParentHint: '必须是已存在的目录；项目会创建为该目录下的同名文件夹。',
+      projectTemplateLabel: '初始谱表',
+      projectTemplateChart: '空白谱面',
+      projectTemplateChartDesc: '一个空谱表，先写轨道和音符',
+      projectTemplateStoryboard: '谱面 + 剧情',
+      projectTemplateStoryboardDesc: '再加一个空的剧情谱表',
+      projectLengthLabel: '初始长度（秒）',
+      projectLengthHint: '新谱表 period 的最小长度（minLength），之后可随时修改。',
+      projectNameRequired: '请输入项目名称',
+      projectNameInvalid: '名称不能包含 \\ / : * ? " < > |，也不能以 “.” 开头或结尾',
+      projectParentRequired: '请输入创建位置',
+      projectLengthInvalid: '初始长度必须是 0 或正数',
+      projectPathPreview: '即将创建',
+      projectCreating: '正在创建…',
+      projectCreated: '已创建项目',
       reload: '重新载入',
       save: '保存',
       saveAll: '保存全部',
       saved: '已保存',
       saving: '正在保存…',
+      export: '导出 ZIP',
+      exporting: '正在导出…',
+      exportHint: '把当前谱面包成 ZIP（含未保存修改与引用素材）并下载到本机',
+      exported: '导出完成',
+      exportFailed: '导出失败',
+      exportSkipped: '个未引用素材未打包',
       unsaved: '未保存',
       clean: '已同步',
       project: '项目',
@@ -332,7 +364,7 @@ window.__ModuleLoader__.load({
       autoScrollOff: '已关闭跟随播放',
       helpTitle: '操作说明',
       helpBody:
-        '滚轮上下滚动谱表，Shift+滚轮横向滚动，Ctrl+滚轮缩放。在空白处拖动框选，拖动元素改变时间，拖动右边缘改变长度。空格播放/暂停，Delete 删除，Ctrl+Z 撤销，Ctrl+Shift+Z 重做，Ctrl+S 保存。',
+        '滚轮上下滚动谱表，Shift+滚轮横向滚动，Ctrl+滚轮缩放。在空白处拖动框选，拖动元素改变时间，拖动右边缘改变长度。空格播放/暂停，Delete 删除，Ctrl+Z 撤销，Ctrl+Shift+Z 重做，Ctrl+S 保存。选择工具下双击轨道条（或双击轨道名称栏）进入判定线音符编辑器；编辑器内 Q/W/E/R 放置 Tap/Drag/Taplik/Hold。',
       editTime: '时间（秒）',
       laneName: '轨道',
       innerNotes: '长条内点',
@@ -363,6 +395,17 @@ window.__ModuleLoader__.load({
       errorGeneric: '操作失败',
       unsupportedValue: '（不支持的数值）',
       unnamed: '未命名',
+      toolTaplik: '放置 Taplik',
+      noteEditor: '判定线音符编辑器',
+      noteEditorBack: '返回时间轴',
+      noteEditorHint: 'Q Tap · W Drag · E Taplik · R Hold · 拖动移动 · 拖 Hold 尾部改长度 · Alt 关闭吸附',
+      noteEditorEmpty: '这条判定线还没有音符；按 Q/W/E/R 选择类型后点击放置',
+      noteEditorOpenHint: '双击进入音符编辑器',
+      noteEditorPosition: '位置',
+      noteEditorJudge: '判定线',
+      noteEditorSpectrumShort: '频谱',
+      noteEditorNotesCount: '{count} 个音符',
+      noteEditorNoLane: '该判定线已不存在',
     };
 
     const en = {
@@ -372,11 +415,38 @@ window.__ModuleLoader__.load({
       openProject: 'Open project',
       openProjectPlaceholder: 'Absolute folder path, or a library name',
       open: 'Open',
+      newProject: 'New project',
+      newProjectHint:
+        'Create a brand-new chart project folder: one empty chart staff (optionally a storyboard staff) is written and opened immediately.',
+      projectNameLabel: 'Project name',
+      projectNamePlaceholder: 'e.g. MySong',
+      projectParentLabel: 'Location',
+      projectParentHint: 'An existing folder; the project is created as a same-named folder inside it.',
+      projectTemplateLabel: 'Starter staffs',
+      projectTemplateChart: 'Blank chart',
+      projectTemplateChartDesc: 'One empty staff for lanes and notes',
+      projectTemplateStoryboard: 'Chart + storyboard',
+      projectTemplateStoryboardDesc: 'Also add an empty storyboard staff',
+      projectLengthLabel: 'Initial length (s)',
+      projectLengthHint: 'The new period minLength; you can change it later.',
+      projectNameRequired: 'Enter a project name',
+      projectNameInvalid: 'The name must not contain \\ / : * ? " < > | or start/end with a dot',
+      projectParentRequired: 'Enter a location',
+      projectLengthInvalid: 'The initial length must be 0 or a positive number',
+      projectPathPreview: 'Will create',
+      projectCreating: 'Creating…',
+      projectCreated: 'Project created',
       reload: 'Reload from disk',
       save: 'Save',
       saveAll: 'Save all',
       saved: 'Saved',
       saving: 'Saving…',
+      export: 'Export ZIP',
+      exporting: 'Exporting…',
+      exportHint: 'Package the chart as a ZIP (unsaved edits and referenced assets included) and download it',
+      exported: 'Export complete',
+      exportFailed: 'Export failed',
+      exportSkipped: 'unreferenced assets left out',
       unsaved: 'Unsaved',
       clean: 'In sync',
       project: 'Project',
@@ -604,7 +674,7 @@ window.__ModuleLoader__.load({
       autoScrollOff: 'Follow playback off',
       helpTitle: 'How to edit',
       helpBody:
-        'Wheel scrolls staff rows, Shift+wheel scrolls time, Ctrl+wheel zooms. Drag empty space to box-select, drag an element to move it, drag its right edge to resize. Space plays/pauses, Delete deletes, Ctrl+Z undoes, Ctrl+Shift+Z redoes, Ctrl+S saves.',
+        'Wheel scrolls staff rows, Shift+wheel scrolls time, Ctrl+wheel zooms. Drag empty space to box-select, drag an element to move it, drag its right edge to resize. Space plays/pauses, Delete deletes, Ctrl+Z undoes, Ctrl+Shift+Z redoes, Ctrl+S saves. With the select tool, double-click a lane strip (or a lane name) to open the judgement-line note editor; Q/W/E/R place Tap/Drag/Taplik/Hold there.',
       editTime: 'Time (s)',
       laneName: 'Lane',
       innerNotes: 'Inner notes',
@@ -635,6 +705,17 @@ window.__ModuleLoader__.load({
       errorGeneric: 'Operation failed',
       unsupportedValue: '(unsupported value)',
       unnamed: 'unnamed',
+      toolTaplik: 'Place Taplik',
+      noteEditor: 'Judgement-line note editor',
+      noteEditorBack: 'Back to timeline',
+      noteEditorHint: 'Q Tap · W Drag · E Taplik · R Hold · drag to move · drag a hold tail to resize · Alt disables snapping',
+      noteEditorEmpty: 'No notes on this judgement line — pick a type with Q/W/E/R and click to place one',
+      noteEditorOpenHint: 'Double-click to open the note editor',
+      noteEditorPosition: 'Position',
+      noteEditorJudge: 'Judgement line',
+      noteEditorSpectrumShort: 'Spec',
+      noteEditorNotesCount: '{count} notes',
+      noteEditorNoLane: 'This judgement line no longer exists',
     };
 
     // ========================================================================
@@ -1706,6 +1787,13 @@ window.__ModuleLoader__.load({
       '.dgc-curveNote{margin:8px 0 2px;padding:6px 8px;border-radius:7px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
       '.dgc-curveFoot{display:flex;align-items:center;gap:10px;padding:6px 12px;flex:0 0 auto;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);font-size:11.5px;color:var(--dsw-alias-label-secondary);min-width:0}',
       '.dgc-curveHint{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.dgc-noteEditor{position:absolute;inset:0;z-index:30;display:flex;flex-direction:column;min-height:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}',
+      '.dgc-noteEditorHead{flex:0 0 auto;min-height:34px;display:flex;align-items:center;gap:8px;padding:0 8px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0}',
+      '.dgc-noteEditorTitle{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:38%}',
+      '.dgc-noteEditorMeta{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;max-width:34%}',
+      '.dgc-noteEditorHint{flex:1 1 auto;min-width:0;text-align:right;font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.dgc-noteCanvasWrap{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}',
+      '.dgc-noteCanvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:default}',
     ].join('\n');
 
     /** Stylesheet element rendered by the page (removed with the page). */
@@ -1755,6 +1843,47 @@ window.__ModuleLoader__.load({
       return body;
     }
 
+    /** `1234567` -> `1.2 MB` for export notices. */
+    function formatByteSize(bytes) {
+      if (!Number.isFinite(bytes) || bytes < 0) return '';
+      if (bytes < 1024) return bytes + ' B';
+      const units = ['KB', 'MB', 'GB', 'TB'];
+      let value = bytes / 1024;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      return (value >= 100 ? value.toFixed(0) : value.toFixed(1)) + ' ' + units[unit];
+    }
+
+    /** Hand a Blob to the browser as a file download (hidden anchor). */
+    function saveBlobAsFile(blob, filename) {
+      if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+        throw new Error('this browser cannot create a download');
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.rel = 'noopener';
+      link.style.display = 'none';
+      if (document.body && typeof document.body.appendChild === 'function') document.body.appendChild(link);
+      link.click();
+      if (document.body && typeof document.body.removeChild === 'function') document.body.removeChild(link);
+      // Revoking immediately can cancel the download in some browsers; a
+      // minute is far longer than navigation to the blob URL takes.
+      const timer = window.setTimeout(() => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch (error) {
+          /* the browser may already have revoked it */
+        }
+      }, 60000);
+      // Node-based harnesses must not wait a minute for the process to exit.
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    }
+
     /**
      * One shared chart document session: server state plus the local optimistic
      * copy, the edit queue, and the undo/redo stacks.
@@ -1765,11 +1894,15 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null);
       const [connection, setConnection] = useState('connecting');
       const [saving, setSaving] = useState(false);
+      const [exporting, setExporting] = useState(false);
+      /** Download progress in whole percent, or null before bytes arrive. */
+      const [exportPercent, setExportPercent] = useState(null);
       const [notice, setNotice] = useState(null);
 
       const stateRef = useRef(null);
       /** Latest optimistic project: the base for every local op application. */
       const projectRef = useRef(null);
+      const exportingRef = useRef(false);
       const serverRevRef = useRef(0);
       const queueRef = useRef(Promise.resolve());
       const historyRef = useRef({ past: [], future: [] });
@@ -2002,6 +2135,30 @@ window.__ModuleLoader__.load({
         [acceptState],
       );
 
+      /**
+       * POST /create and adopt the new project. Answers `{ ok: true }` or
+       * `{ ok: false, error }` so the dialog can show the Host's validation
+       * message inline instead of closing.
+       */
+      const createProject = useCallback(
+        async (request) => {
+          try {
+            const payload = await fetchJson(CREATE_URL, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(request || {}),
+            });
+            acceptState(payload);
+            const name = payload && payload.created && payload.created.name ? payload.created.name : (request && request.name) || '';
+            setNotice({ kind: 'ok', text: noticeText('projectCreated') + (name ? ' · ' + name : '') });
+            return { ok: true };
+          } catch (failure) {
+            return { ok: false, error: String((failure && failure.message) || failure) };
+          }
+        },
+        [acceptState],
+      );
+
       /** Force a Host-side save of the open project. */
       const save = useCallback(async () => {
         if (!stateRef.current || !stateRef.current.project) return false;
@@ -2026,6 +2183,88 @@ window.__ModuleLoader__.load({
         }
       }, []);
 
+      /**
+       * Download the open project as a chart `.zip` package.
+       *
+       * The Host builds the archive from its live document, so unsaved edits
+       * are included; the client only waits for its pending edit queue so the
+       * package matches what the editor shows. The response is streamed into a
+       * Blob (with a percent readout) and saved through a hidden anchor.
+       */
+      const exportProject = useCallback(async () => {
+        const current = stateRef.current;
+        if (!current || !current.project || exportingRef.current) return false;
+        exportingRef.current = true;
+        setExporting(true);
+        setExportPercent(null);
+        try {
+          await queueRef.current;
+          const response = await fetch(EXPORT_URL, { cache: 'no-store' });
+          if (!response.ok) {
+            let message = 'HTTP ' + response.status;
+            try {
+              const payload = await response.json();
+              if (payload && (payload.error || payload.message)) message = payload.error || payload.message;
+            } catch (error) {
+              /* keep the HTTP status text */
+            }
+            throw new Error(message);
+          }
+          const header = (name) => (response.headers && typeof response.headers.get === 'function' ? response.headers.get(name) : null);
+          let filename = '';
+          const encodedName = header('x-export-filename');
+          if (encodedName) {
+            try {
+              filename = decodeURIComponent(encodedName);
+            } catch (error) {
+              filename = encodedName;
+            }
+          }
+          if (!filename) {
+            const dir = typeof current.project.dir === 'string' ? current.project.dir.replace(/[\\/]+$/, '') : '';
+            const base = dir.slice(Math.max(dir.lastIndexOf('/'), dir.lastIndexOf('\\')) + 1) || 'chart';
+            filename = base + '.zip';
+          }
+          let blob;
+          const total = Number(header('content-length')) || 0;
+          if (response.body && typeof response.body.getReader === 'function' && typeof Blob === 'function') {
+            const reader = response.body.getReader();
+            const chunks = [];
+            let received = 0;
+            let shownPercent = -1;
+            for (;;) {
+              const step = await reader.read();
+              if (step.done) break;
+              if (!step.value) continue;
+              chunks.push(step.value);
+              received += step.value.length;
+              if (total > 0) {
+                const percent = Math.min(100, Math.floor((received / total) * 100));
+                if (percent !== shownPercent) {
+                  shownPercent = percent;
+                  setExportPercent(percent);
+                }
+              }
+            }
+            blob = new Blob(chunks, { type: 'application/zip' });
+          } else {
+            blob = await response.blob();
+          }
+          saveBlobAsFile(blob, filename);
+          const skipped = Number(header('x-export-skipped'));
+          const skippedText = Number.isFinite(skipped) && skipped > 0 ? ' · ' + skipped + ' ' + noticeText('exportSkipped') : '';
+          setNotice({ kind: 'ok', text: noticeText('exported') + ' · ' + filename + ' · ' + formatByteSize(blob.size) + skippedText });
+          return true;
+        } catch (failure) {
+          setNotice({ kind: 'error', text: noticeText('exportFailed') + ': ' + String((failure && failure.message) || failure) });
+          return false;
+        } finally {
+          exportingRef.current = false;
+          setExporting(false);
+          setExportPercent(null);
+        }
+      }, []);
+
       /** Re-read the project from disk. */
       const reload = useCallback(async () => {
         try {
@@ -2043,6 +2282,8 @@ window.__ModuleLoader__.load({
         error,
         connection,
         saving,
+        exporting,
+        exportPercent,
         notice,
         setNotice,
         refresh,
@@ -2053,7 +2294,9 @@ window.__ModuleLoader__.load({
         canRedo: () => historyRef.current.future.length > 0,
         historyRef,
         openProject,
+        createProject,
         save,
+        exportProject,
         reload,
       };
     }
@@ -2917,6 +3160,7 @@ window.__ModuleLoader__.load({
       stop: ['M4.5 4.5h7v7h-7z'],
       rewind: ['M10.5 3.5L4 8l6.5 4.5z'],
       save: ['M3.5 3.5h7.2l2 2v7H3.5z', 'M5.5 3.5v3.2h4.2V3.5'],
+      export: ['M8 2.8v7.2', 'M5.3 7.4L8 10.1l2.7-2.7', 'M3.4 10.6v2.2h9.2v-2.2'],
       folder: ['M2.5 5.2h4l1.1 1.4h5.9v6.2h-11z'],
       undo: ['M6.4 4.2L3.2 7.4l3.2 3.2', 'M3.4 7.4h6.1a3.7 3.7 0 0 1 0 7.4H6.2'],
       redo: ['M9.6 4.2l3.2 3.2-3.2 3.2', 'M12.6 7.4H6.5a3.7 3.7 0 0 0 0 7.4h3.3'],
@@ -2929,7 +3173,9 @@ window.__ModuleLoader__.load({
       zoomOut: ['M7.9 3.4a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9z', 'M11.2 11.2l2.4 2.4', 'M5.9 7.9h4'],
       fit: ['M3.2 6.2V3.4h3', 'M12.8 6.2V3.4h-3', 'M3.2 9.8v2.8h3', 'M12.8 9.8v2.8h-3'],
       select: ['M3.4 3.4l9 4-4 1.2-1.2 4z'],
+      back: ['M9.6 3.4L5 8l4.6 4.6', 'M5.2 8h7.2'],
       tap: ['M8 3.4l3 4.6-3 4.6-3-4.6z'],
+      taplik: ['M8 2.8l1.3 3.9 3.9 1.3-3.9 1.3L8 13.2l-1.3-3.9L2.8 8l3.9-1.3z'],
       drag: ['M3.4 8h9.2', 'M9.9 5.2L12.6 8l-2.7 2.8', 'M3.4 5.2h2.4', 'M3.4 10.8h2.4'],
       hold: ['M5 3.6h6v8.8H5z', 'M5 8h6'],
       lane: ['M2.6 10.6C5 10.6 5.6 5.4 8 5.4s3 5.2 5.4 5.2'],
@@ -7926,6 +8172,7 @@ window.__ModuleLoader__.load({
         waves,
         waveStatus,
         audioClips,
+        onOpenNoteEditor,
       } = props;
 
       const wrapRef = useRef(null);
@@ -8552,35 +8799,47 @@ window.__ModuleLoader__.load({
           const x1 = Math.min(width, xForTime(laneEnd, currentView));
           if (x1 <= x0) return;
           const color = elementColor(catalog, laneElement.type);
-          ctx.fillStyle = color + (laneIndex === 0 ? '22' : '14');
-          ctx.fillRect(x0, top + 3, x1 - x0, rowH - 6);
-          ctx.strokeStyle = color + '66';
+          const barTop = top + 3;
+          const barHeight = rowH - 6;
+          const barWidth = x1 - x0;
+          const radius = Math.min(7, barHeight / 2, barWidth / 2);
+          // Rounded lane strip: a click target for the lane itself and a
+          // double-click target for the judgement-line note editor.
+          noteRoundedPath(ctx, x0, barTop, barWidth, barHeight, radius);
+          ctx.fillStyle = color + (laneIndex === 0 ? '1f' : '12');
+          ctx.fill();
+          ctx.strokeStyle = color + (laneIndex === 0 ? '77' : '44');
           ctx.lineWidth = 1;
-          ctx.strokeRect(x0 + 0.5, top + 3.5, Math.max(0, x1 - x0 - 1), rowH - 7);
+          ctx.stroke();
           if (selectionRef.current.indexOf(laneElement.id) !== -1) {
+            noteRoundedPath(ctx, x0 + 1, barTop + 1, Math.max(1, barWidth - 2), Math.max(1, barHeight - 2), Math.max(1, radius - 1));
             ctx.strokeStyle = '#ffffff';
             ctx.lineWidth = 2;
-            ctx.strokeRect(x0 + 1, top + 4, Math.max(0, x1 - x0 - 2), rowH - 8);
+            ctx.stroke();
           }
           // Type label lives INSIDE its bar: clipped to the bar rect and
           // ellipsized to the bar width, so a short bar never spills text over
           // its neighbours (most Dremu lanes are ~50 px wide at 1x zoom).
           if (laneIndex !== 0) return;
-          const barWidth = x1 - x0;
-          const labelBudget = barWidth - 12;
-          // Below ~60 px there is no room for anything readable: the bar's
+          const labelBudget = barWidth - 26;
+          // Below ~70 px there is no room for anything readable: the bar's
           // colour + the gutter row already identify it, and the hover
           // tooltip shows the type, so draw nothing rather than noise.
-          if (labelBudget < 48) return;
+          if (labelBudget < 44) return;
           ctx.save();
           ctx.beginPath();
-          ctx.rect(x0, top + 3, barWidth, rowH - 6);
+          ctx.rect(x0, barTop, barWidth, barHeight);
           ctx.clip();
+          // Small lane-colour dot before the type name (the reference strip).
           ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(x0 + 10, top + rowH / 2, 2.6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = colors.labelPrimary;
           ctx.font = '10.5px sans-serif';
           ctx.textBaseline = 'middle';
           const label = laneElementCount > 1 ? shortType(laneElement.type) + ' ×' + laneElementCount : shortType(laneElement.type);
-          ctx.fillText(fitText(ctx, label, labelBudget), x0 + 5, top + rowH / 2);
+          ctx.fillText(fitText(ctx, label, labelBudget), x0 + 18, top + rowH / 2);
           ctx.restore();
         }
 
@@ -8718,7 +8977,8 @@ window.__ModuleLoader__.load({
         function paintHoverTooltip() {
           if (!hoverRef.current || !hoverRef.current.element) return;
           const element = hoverRef.current.element;
-          const text = shortType(element.type) + ' · ' + formatTime(element.start || 0) + (element.lane ? ' · ' + element.lane : '');
+          const laneHint = element.category === 'lane' ? ' · ' + t('noteEditorOpenHint') : '';
+          const text = shortType(element.type) + ' · ' + formatTime(element.start || 0) + (element.lane ? ' · ' + element.lane : '') + laneHint;
           ctx.font = '11px sans-serif';
           const textWidth = ctx.measureText(text).width + 12;
           let bx = hoverRef.current.x + 10;
@@ -9138,7 +9398,7 @@ window.__ModuleLoader__.load({
       const onDoubleClick = useCallback(
         (event) => {
           const point = localPoint(event);
-          if (point.y < headerH || point.x < GUTTER_W) return;
+          if (point.y < headerH) return;
           const currentView = viewRef.current;
           const currentRows = rowsRef.current;
           const rowIndex = rowIndexAt(point.y, currentView);
@@ -9147,7 +9407,32 @@ window.__ModuleLoader__.load({
             transport.seek(Math.max(0, row.clip.offset || 0));
             return;
           }
-          if (tool === 'select') return;
+          if (!row || row.kind === 'group') return;
+          const openNoteEditor = () => {
+            if (typeof onOpenNoteEditor !== 'function' || !row.lane) return false;
+            onOpenNoteEditor({ staffId: row.staffId, lane: row.lane, laneElement: (row.laneElements && row.laneElements[0]) || row.laneElement || null });
+            return true;
+          };
+          // The gutter label is a mode-independent shortcut; the lane bar is
+          // the reference double-click target while the select tool is active
+          // (with a placement tool the historical "double-click to place"
+          // behavior is preserved below).
+          if (point.x < GUTTER_W) {
+            openNoteEditor();
+            return;
+          }
+          const hitNow = hitTest(point);
+          if (hitNow && hitNow.element && hitNow.element.category !== 'lane') return;
+          if (tool === 'select') {
+            if (hitNow && hitNow.lane) openNoteEditor();
+            return;
+          }
+          // The lane's label area doubles as an explicit editor target while a
+          // placement tool is active; the rest of the strip keeps placing.
+          if (hitNow && hitNow.lane && hitNow.box && point.x <= hitNow.box.x + 110) {
+            openNoteEditor();
+            return;
+          }
           const type = typeForTool(catalog, tool);
           if (!row || row.kind === 'group' || !type) return;
           const time = Math.max(0, snapTime(timeForX(point.x, currentView), tempoRef.current, snapDiv, snapOn));
@@ -9179,7 +9464,7 @@ window.__ModuleLoader__.load({
           setSelection([id]);
           setTool('select');
         },
-        [catalog, headerH, localPoint, onEdit, onNotice, project, rowIndexAt, setSelection, setTool, snapDiv, snapOn, t, timeForX, tool, transport],
+        [catalog, headerH, hitTest, localPoint, onEdit, onNotice, onOpenNoteEditor, project, rowIndexAt, setSelection, setTool, snapDiv, snapOn, t, timeForX, tool, transport],
       );
 
       /** Wheel: zoom (ctrl), pan time (shift), scroll rows (default). */
@@ -9269,7 +9554,7 @@ window.__ModuleLoader__.load({
           ref: canvasRef,
           className: 'dgc-canvas',
           tabIndex: 0,
-          style: { cursor: tool !== 'select' ? 'crosshair' : 'default' },
+          style: { cursor: tool !== 'select' ? 'crosshair' : hover && hover.lane ? 'pointer' : 'default' },
           onPointerDown,
           onPointerMove,
           onPointerUp,
@@ -9297,12 +9582,1434 @@ window.__ModuleLoader__.load({
     }
 
     // ========================================================================
-    // 16 · Open-project dialog.
+    // 15.5 · Judgement-line note editor.
+    //
+    // The timeline edits time horizontally, one row per lane. This view flips
+    // the axes for one lane: time is vertical (future above a fixed judgement
+    // line), the note's `position` is horizontal, and the audio spectrum runs
+    // down the far-left edge. It is a pure client-side view: every gesture
+    // mutates the same element fields (hitTime / position / holdTime) through
+    // the existing `add` / `patch` ops.
     // ========================================================================
+
+    const NOTE_SPECTRUM_W = 54;
+    const NOTE_RULER_W = 46;
+    const NOTE_RIGHT_PAD = 18;
+    /** World units shown from the centre to either side (±5.75). */
+    const NOTE_WORLD_HALF = 5.75;
+    /** Horizontal snapping step and the usable position range. */
+    const NOTE_POS_STEP = 0.5;
+    const NOTE_POS_LIMIT = 5.5;
+    /** Note sprite width in world units (matches the playback renderer). */
+    const NOTE_NOTE_WORLD = 2.0;
+    const NOTE_CHIP_H = 17;
+    const NOTE_PPS_DEFAULT = 160;
+    const NOTE_PPS_MIN = 40;
+    const NOTE_PPS_MAX = 900;
+
+    /** Layout of the vertical editor for one canvas size. */
+    function noteEditorLayout(width, height) {
+      const w = Math.max(160, Math.round(Number.isFinite(width) ? width : 800));
+      const h = Math.max(140, Math.round(Number.isFinite(height) ? height : 420));
+      const spectrumW = Math.min(NOTE_SPECTRUM_W, Math.max(34, Math.round(w * 0.08)));
+      const rulerW = Math.min(NOTE_RULER_W, Math.max(28, Math.round(w * 0.06)));
+      const rightPad = Math.min(NOTE_RIGHT_PAD, Math.max(10, Math.round(w * 0.03)));
+      const left = spectrumW + rulerW;
+      const laneW = Math.max(60, w - left - rightPad);
+      const judgeGap = clamp(Math.round(h * 0.12), 48, 112);
+      const chipW = clamp((NOTE_NOTE_WORLD / (NOTE_WORLD_HALF * 2)) * laneW, 36, 156);
+      return {
+        w,
+        h,
+        spectrumW,
+        rulerW,
+        left,
+        laneW,
+        right: left + laneW,
+        judgeY: h - judgeGap,
+        judgeGap,
+        chipW,
+      };
+    }
+
+    /** World position -> canvas x. */
+    function notePositionToX(position, layout) {
+      const value = Number.isFinite(position) ? position : 0;
+      return layout.left + ((value + NOTE_WORLD_HALF) / (NOTE_WORLD_HALF * 2)) * layout.laneW;
+    }
+
+    /** Canvas x -> world position (unclamped; callers may clamp). */
+    function noteXToPosition(x, layout) {
+      return ((x - layout.left) / Math.max(1, layout.laneW)) * (NOTE_WORLD_HALF * 2) - NOTE_WORLD_HALF;
+    }
+
+    /** Absolute time -> canvas y (future is above the fixed judgement line). */
+    function noteTimeToY(time, anchorTime, pps, layout) {
+      return layout.judgeY - (time - anchorTime) * pps;
+    }
+
+    /** Canvas y -> absolute time. */
+    function noteYToTime(y, anchorTime, pps, layout) {
+      return anchorTime + (layout.judgeY - y) / Math.max(1e-6, pps);
+    }
+
+    /** Snap a horizontal position to the 0.5 column grid. */
+    function snapNotePosition(position, enabled) {
+      const value = clamp(Number.isFinite(position) ? position : 0, -NOTE_POS_LIMIT, NOTE_POS_LIMIT);
+      if (!enabled) return value;
+      return clamp(Math.round(value / NOTE_POS_STEP) * NOTE_POS_STEP, -NOTE_POS_LIMIT, NOTE_POS_LIMIT);
+    }
+
+    /** Note-editor tool for a keyboard key, or null when the key is not a tool. */
+    function noteToolForKey(key) {
+      switch (String(key || '').toLowerCase()) {
+        case 'q':
+          return 'tap';
+        case 'w':
+          return 'drag';
+        case 'e':
+          return 'taplik';
+        case 'r':
+          return 'hold';
+        case 'v':
+          return 'select';
+        default:
+          return null;
+      }
+    }
+
+    /** Read a note's horizontal `position` (VariableFloat baseValue), default 0. */
+    function notePositionOf(element) {
+      const value = element && element.fields ? element.fields.position : null;
+      if (isTypedValue(value) && value.t === 'obj' && value.fields && typeof value.fields === 'object') {
+        const number = valueAsNumber(value.fields.baseValue);
+        if (number !== null && Number.isFinite(number)) return number;
+      }
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      return 0;
+    }
+
+    /**
+     * Patch that writes a note's horizontal position without dropping an
+     * authored VariableFloat variation curve. Notes whose `position` field is
+     * absent get a complete typed value (a dead nested path is never emitted).
+     */
+    function notePositionPatch(element, position) {
+      const value = round(clamp(position, -NOTE_POS_LIMIT, NOTE_POS_LIMIT), 6);
+      const current = element && element.fields ? element.fields.position : null;
+      if (
+        isTypedValue(current) &&
+        current.t === 'obj' &&
+        current.fields &&
+        typeof current.fields === 'object' &&
+        Object.prototype.hasOwnProperty.call(current.fields, 'baseValue')
+      ) {
+        return { path: ['position', 'fields', 'baseValue'], value };
+      }
+      if (typeof current === 'number') return { path: ['position'], value };
+      return {
+        path: ['position'],
+        value: { t: 'obj', type: 'GorgeFramework.VariableFloat', fields: { baseValue: value } },
+      };
+    }
+
+    /** New typed position value with `baseValue` replaced. */
+    function notePositionValue(existing, position) {
+      const value = round(clamp(position, -NOTE_POS_LIMIT, NOTE_POS_LIMIT), 6);
+      if (isTypedValue(existing) && existing.t === 'obj') {
+        return {
+          t: 'obj',
+          type: typeof existing.type === 'string' && existing.type ? existing.type : 'GorgeFramework.VariableFloat',
+          fields: Object.assign({}, existing.fields || {}, { baseValue: value }),
+        };
+      }
+      return { t: 'obj', type: 'GorgeFramework.VariableFloat', fields: { baseValue: value } };
+    }
+
+    /** Hold length in seconds (engine default 1 when the field is absent). */
+    function noteHoldTimeOf(element) {
+      const raw = element && element.fields ? valueAsNumber(element.fields.holdTime) : null;
+      if (raw !== null && Number.isFinite(raw) && raw >= 0) return raw;
+      if (element && Number.isFinite(element.duration)) return element.duration;
+      return 1;
+    }
+
+    /** True for DremuHold (catalog category or a hold-ish type name). */
+    function isHoldNote(element) {
+      if (!element) return false;
+      if (element.category === 'hold') return true;
+      return /hold/i.test(shortType(element.type));
+    }
+
+    /** Lane + note model for one judgement line. */
+    function buildLaneEditorModel(project, staffId, laneName) {
+      const staff = ((project && project.staffs) || []).find((item) => item && item.id === staffId) || null;
+      if (!staff || typeof laneName !== 'string' || laneName.length === 0) return null;
+      const laneElements = [];
+      const windows = [];
+      const notes = [];
+      for (const period of staff.periods || []) {
+        const offset = Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+        for (const element of period.elements || []) {
+          if (!element) continue;
+          if (element.category === 'lane') {
+            const name = element.fields && typeof element.fields.name === 'string' ? element.fields.name : '';
+            if (name !== laneName) continue;
+            laneElements.push(element);
+            const start = Number.isFinite(element.start) ? element.start : 0;
+            const duration = Number.isFinite(element.duration) ? Math.max(0, element.duration) : 10;
+            windows.push({ start, end: start + duration, element });
+          } else if (element.category === 'note' || element.category === 'hold') {
+            const noteLane = element.lane || (element.fields && typeof element.fields.laneName === 'string' ? element.fields.laneName : '');
+            if (noteLane === laneName) notes.push({ element, period, periodOffset: offset });
+          }
+        }
+      }
+      laneElements.sort((a, b) => (a.start || 0) - (b.start || 0));
+      windows.sort((a, b) => a.start - b.start);
+      notes.sort((a, b) => (a.element.start || 0) - (b.element.start || 0) || String(a.element.id).localeCompare(String(b.element.id)));
+      return {
+        staff,
+        laneName,
+        laneElements,
+        windows,
+        notes,
+        staffLabel: staff.displayName || staff.className || staff.id,
+      };
+    }
+
+    /** The period that owns the lane instance covering `time` (creation target). */
+    function pickLanePeriodId(project, staffId, laneName, time) {
+      const staff = ((project && project.staffs) || []).find((item) => item && item.id === staffId) || null;
+      if (!staff) return null;
+      let covering = null;
+      for (const period of staff.periods || []) {
+        for (const element of period.elements || []) {
+          if (!element || element.category !== 'lane') continue;
+          const name = element.fields && typeof element.fields.name === 'string' ? element.fields.name : '';
+          if (name !== laneName) continue;
+          const start = Number.isFinite(element.start) ? element.start : 0;
+          const duration = Number.isFinite(element.duration) ? Math.max(0, element.duration) : 10;
+          const end = start + duration;
+          if (time >= start - 1e-6 && time < end + 1e-6) {
+            if (!covering || start > (covering.start || 0)) covering = { start, period };
+          }
+        }
+      }
+      if (covering) return covering.period.id;
+      // No lane instance covers the click: fall back to the period at that
+      // time (the timeline's own placement rule).
+      return pickPeriod(project, staffId, time);
+    }
+
+    /** Rounded-rectangle path (no CanvasRenderingContext2D.roundRect dependency). */
+    function noteRoundedPath(ctx, x, y, width, height, radius) {
+      const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + width - r, y);
+      ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+      ctx.lineTo(x + width, y + height - r);
+      ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+      ctx.lineTo(x + r, y + height);
+      ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    }
+
+    /**
+     * The vertical note editor for one lane. Rendered as an overlay over the
+     * timeline (which stays mounted, preserving its zoom/scroll state).
+     */
+    function NoteEditorLayer(props) {
+      const {
+        t,
+        project,
+        catalog,
+        target,
+        tempo,
+        transport,
+        waves,
+        waveStatus,
+        audioClips,
+        selection,
+        setSelection,
+        tool,
+        snapOn,
+        snapDiv,
+        pps,
+        setPps,
+        onEdit,
+        onClose,
+      } = props;
+
+      const wrapRef = useRef(null);
+      const canvasRef = useRef(null);
+      const [size, setSize] = useState({ w: 0, h: 0 });
+      const [cursor, setCursor] = useState('default');
+      const dragRef = useRef(null);
+      const paintRef = useRef(null);
+      /** Hover lives in a ref: only the canvas needs it and every pointer move
+       * already schedules a repaint, so it must not re-render the page. */
+      const hoverRef = useRef(null);
+
+      const model = useMemo(
+        () => buildLaneEditorModel(project, target.staffId, target.lane),
+        [project, target.staffId, target.lane],
+      );
+      const notes = model ? model.notes : [];
+      const layout = useMemo(() => noteEditorLayout(size.w || 800, size.h || 420), [size.w, size.h]);
+
+      const layoutRef = useRef(layout);
+      layoutRef.current = layout;
+      const modelRef = useRef(model);
+      modelRef.current = model;
+      const notesRef = useRef(notes);
+      notesRef.current = notes;
+      const selectionRef = useRef(selection);
+      selectionRef.current = selection;
+      const toolRef = useRef(tool);
+      toolRef.current = tool;
+      const ppsRef = useRef(pps);
+      ppsRef.current = pps;
+      const tempoRef = useRef(tempo);
+      tempoRef.current = tempo;
+      const snapRef = useRef({ on: snapOn, div: snapDiv });
+      snapRef.current = { on: snapOn, div: snapDiv };
+      const projectRef = useRef(project);
+      projectRef.current = project;
+      const wavesRef = useRef(waves);
+      wavesRef.current = waves || {};
+      const audioClipsRef = useRef(audioClips || []);
+      audioClipsRef.current = audioClips || [];
+      const transportRef = useRef(transport);
+      transportRef.current = transport;
+
+      // --- Size tracking -----------------------------------------------------
+      useEffect(() => {
+        const measure = () => {
+          const node = wrapRef.current;
+          if (!node) return;
+          const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
+          const width = Math.round((rect && rect.width) || node.clientWidth || 0);
+          const height = Math.round((rect && rect.height) || node.clientHeight || 0);
+          if (width <= 0 || height <= 0) return;
+          setSize((previous) => (previous.w === width && previous.h === height ? previous : { w: width, h: height }));
+        };
+        // Measure synchronously as well: the smoke harness's ResizeObserver
+        // never fires, and the first frame still needs real geometry.
+        measure();
+        if (typeof ResizeObserver === 'function') {
+          const observer = new ResizeObserver(measure);
+          observer.observe(wrapRef.current);
+          return () => observer.disconnect();
+        }
+        window.addEventListener('resize', measure);
+        return () => window.removeEventListener('resize', measure);
+      }, []);
+
+      /** Snap a time using the shared editor grid. */
+      const snapEditorTime = useCallback((time, loose) => {
+        const settings = snapRef.current;
+        const tempoNow = tempoRef.current || { bpm: 120, offset: 0 };
+        return snapTime(time, tempoNow, settings.div, settings.on && !loose);
+      }, []);
+
+      /** Snap a horizontal position. */
+      const snapEditorPosition = useCallback((position, loose) => {
+        return snapNotePosition(position, snapRef.current.on && !loose);
+      }, []);
+
+      // --- Painting ----------------------------------------------------------
+      const paint = useCallback(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const currentView = layoutRef.current;
+        const width = Math.max(160, currentView.w);
+        const height = Math.max(140, currentView.h);
+        const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+        if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+          canvas.width = Math.round(width * dpr);
+          canvas.height = Math.round(height * dpr);
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+
+        const colors = {
+          background: cssToken('--dsw-alias-bg-base', '#10131a'),
+          layerOne: cssToken('--dsw-alias-bg-layer-1', '#171b24'),
+          layerTwo: cssToken('--dsw-alias-bg-layer-2', '#1e2330'),
+          border: cssToken('--dsw-alias-border-l1', '#2b3244'),
+          labelPrimary: cssToken('--dsw-alias-label-primary', '#eef1f7'),
+          labelSecondary: cssToken('--dsw-alias-label-secondary', '#8b93a7'),
+          brand: cssToken('--dsw-alias-brand-primary', '#5b8cff'),
+        };
+        const now = transportRef.current ? transportRef.current.time : 0;
+        const currentPps = Math.max(1, ppsRef.current);
+        const currentModel = modelRef.current;
+        const currentNotes = notesRef.current;
+        const selectedIds = selectionRef.current || [];
+        const currentTool = toolRef.current;
+        const currentHover = hoverRef.current;
+        const currentDrag = dragRef.current;
+        const bpm = tempoRef.current && Number.isFinite(tempoRef.current.bpm) && tempoRef.current.bpm > 0 ? tempoRef.current.bpm : 120;
+        const secondsPerBeat = 60 / bpm;
+        const origin = tempoRef.current && Number.isFinite(tempoRef.current.offset) ? tempoRef.current.offset : 0;
+        const xOf = (position) => notePositionToX(position, currentView);
+        const yOf = (time) => noteTimeToY(time, now, currentPps, currentView);
+        const timeOf = (y) => noteYToTime(y, now, currentPps, currentView);
+
+        ctx.fillStyle = colors.background;
+        ctx.fillRect(0, 0, width, height);
+
+        // --- Spectrum strip (far left, aligned with the time axis) ---------
+        paintSpectrum();
+
+        // --- Lane lifetime bands -------------------------------------------
+        if (currentModel) {
+          for (const laneWindow of currentModel.windows) {
+            const y1 = yOf(laneWindow.start);
+            const y2 = yOf(laneWindow.end);
+            const top = Math.min(y1, y2);
+            const bottom = Math.max(y1, y2);
+            if (bottom < 0 || top > height) continue;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(currentView.left, 0, currentView.laneW, height);
+            ctx.clip();
+            ctx.fillStyle = 'rgba(91,140,255,0.045)';
+            ctx.fillRect(currentView.left, top, currentView.laneW, Math.max(1, bottom - top));
+            ctx.strokeStyle = 'rgba(91,140,255,0.2)';
+            ctx.setLineDash([4, 4]);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(currentView.left, Math.round(top) + 0.5);
+            ctx.lineTo(currentView.right, Math.round(top) + 0.5);
+            ctx.moveTo(currentView.left, Math.round(bottom) + 0.5);
+            ctx.lineTo(currentView.right, Math.round(bottom) + 0.5);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.restore();
+          }
+        }
+
+        // --- Horizontal (position) columns ---------------------------------
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(currentView.left, 0, currentView.laneW, height);
+        ctx.clip();
+        const columns = [];
+        for (let position = -NOTE_WORLD_HALF + (NOTE_WORLD_HALF % NOTE_POS_STEP); position <= NOTE_WORLD_HALF; position += NOTE_POS_STEP) {
+          columns.push(round(position, 6));
+        }
+        for (const position of columns) {
+          const x = xOf(position);
+          const centre = Math.abs(position) < 1e-9;
+          const edge = Math.abs(Math.abs(position) - 5) < 1e-9;
+          ctx.strokeStyle = centre ? 'rgba(210,218,235,0.34)' : edge ? 'rgba(170,180,205,0.26)' : 'rgba(120,130,155,0.12)';
+          ctx.lineWidth = centre ? 1.4 : 1;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(x) + 0.5, 0);
+          ctx.lineTo(Math.round(x) + 0.5, height);
+          ctx.stroke();
+        }
+        // Frame edges.
+        ctx.strokeStyle = 'rgba(150,160,185,0.28)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(currentView.left + 0.5, 0.5, Math.max(1, currentView.laneW - 1), height - 1);
+        ctx.restore();
+
+        // --- Beat grid + labels --------------------------------------------
+        const targetBeatSpacing = 12;
+        let beatStep = 1 / (snapRef.current.on ? Math.max(1, snapRef.current.div) : 4);
+        while (secondsPerBeat * currentPps * beatStep < targetBeatSpacing) beatStep *= 2;
+        const topTime = timeOf(0);
+        const bottomTime = timeOf(height);
+        const firstBeat = Math.floor(((bottomTime - origin) / secondsPerBeat) / beatStep) * beatStep - beatStep;
+        const lastBeat = Math.ceil(((topTime - origin) / secondsPerBeat) / beatStep) + beatStep;
+        const beatPixel = secondsPerBeat * currentPps;
+        const labelEvery = beatPixel >= 130 ? 1 : beatPixel >= 64 ? 2 : 4;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(currentView.left, 0, currentView.laneW, height);
+        ctx.clip();
+        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.textBaseline = 'middle';
+        for (let beat = firstBeat; beat <= lastBeat + 1e-9; beat += beatStep) {
+          const time = origin + beat * secondsPerBeat;
+          const y = yOf(time);
+          if (y < -20 || y > height + 20) continue;
+          const whole = Math.abs(beat - Math.round(beat)) < 1e-9;
+          const bar = whole && Math.abs(beat % 4) < 1e-9;
+          ctx.strokeStyle = bar ? 'rgba(225,230,245,0.3)' : whole ? 'rgba(165,175,200,0.2)' : 'rgba(115,125,150,0.1)';
+          ctx.lineWidth = bar ? 1.25 : 1;
+          ctx.beginPath();
+          ctx.moveTo(currentView.left, Math.round(y) + 0.5);
+          ctx.lineTo(currentView.right, Math.round(y) + 0.5);
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // Beat numbers live in the narrow ruler between spectrum and grid.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(currentView.spectrumW, 0, currentView.rulerW, height);
+        ctx.clip();
+        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        const firstLabel = Math.ceil(firstBeat / labelEvery) * labelEvery;
+        for (let beat = firstLabel; beat <= lastBeat + 1e-9; beat += labelEvery) {
+          const y = yOf(origin + beat * secondsPerBeat);
+          if (y < -10 || y > height + 10) continue;
+          ctx.fillStyle = colors.labelSecondary;
+          ctx.fillText(formatNum(beat, 0), currentView.left - 7, y - 1);
+          ctx.strokeStyle = 'rgba(139,147,167,0.35)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(currentView.left - 4, Math.round(y) + 0.5);
+          ctx.lineTo(currentView.left - 0.5, Math.round(y) + 0.5);
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // --- Hold bodies first, then note heads ----------------------------
+        const chipW = currentView.chipW;
+        const previewFor = (item) => {
+          if (!currentDrag || !currentDrag.ids || currentDrag.ids.indexOf(item.element.id) === -1) return null;
+          const original = currentDrag.originals && currentDrag.originals[item.element.id];
+          if (!original) return null;
+          if (currentDrag.mode === 'move') {
+            return {
+              start: original.start + (currentDrag.deltaTime || 0),
+              position: original.position + (currentDrag.deltaPos || 0),
+              holdTime: noteHoldTimeOf(item.element),
+            };
+          }
+          if (currentDrag.mode === 'resize') {
+            return {
+              start: original.start,
+              position: original.position,
+              holdTime: Math.max(currentDrag.minHold || 0.05, original.holdTime + (currentDrag.deltaTime || 0)),
+            };
+          }
+          return null;
+        };
+
+        function noteGeometry(item, override) {
+          const element = item.element;
+          const position = override && Number.isFinite(override.position) ? override.position : notePositionOf(element);
+          const holdTime = override && Number.isFinite(override.holdTime) ? override.holdTime : noteHoldTimeOf(element);
+          return {
+            element,
+            item,
+            x: xOf(position),
+            y: yOf(override && Number.isFinite(override.start) ? override.start : element.start || 0),
+            start: override && Number.isFinite(override.start) ? override.start : element.start || 0,
+            holdTime,
+            position,
+            hold: isHoldNote(element),
+            selected: selectedIds.indexOf(element.id) !== -1,
+          };
+        }
+
+        /** Draw a hold body + inner-note ticks. */
+        function paintHoldBody(note) {
+          if (!note.hold || !(note.holdTime > 0)) return;
+          const tailTime = note.start + note.holdTime;
+          const tailY = yOf(tailTime);
+          const top = Math.min(tailY, note.y);
+          const bottom = Math.max(tailY, note.y);
+          if (bottom < -30 || top > height + 30) return;
+          const bodyW = clamp(chipW * 0.22, 8, 26);
+          const color = elementColor(catalog, note.element.type);
+          ctx.save();
+          ctx.globalAlpha = note.selected ? 0.45 : 0.3;
+          ctx.fillStyle = color;
+          noteRoundedPath(ctx, note.x - bodyW / 2, top, bodyW, Math.max(2, bottom - top), bodyW / 2);
+          ctx.fill();
+          ctx.globalAlpha = note.selected ? 0.95 : 0.7;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = note.selected ? 1.6 : 1;
+          ctx.stroke();
+          // Inner-note ticks (hitTime is relative to the hold head).
+          const inner = note.element.fields && note.element.fields.innerNotes;
+          if (inner && Array.isArray(inner.items)) {
+            for (const entry of inner.items) {
+              const relative = entry && entry.fields ? valueAsNumber(entry.fields.hitTime) : null;
+              if (relative === null || relative < 0 || relative > note.holdTime) continue;
+              const tickY = yOf(note.start + relative);
+              ctx.globalAlpha = 0.85;
+              ctx.strokeStyle = 'rgba(255,255,255,0.82)';
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.moveTo(note.x - bodyW / 2 - 3, Math.round(tickY) + 0.5);
+              ctx.lineTo(note.x + bodyW / 2 + 3, Math.round(tickY) + 0.5);
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+        }
+
+        /** Draw one note chip: pill, centre diamond and a type glyph. */
+        function paintNoteChip(note, ghost) {
+          if (!note || !Number.isFinite(note.x) || !Number.isFinite(note.y)) return;
+          const halfW = chipW / 2;
+          if (note.x + halfW < currentView.left || note.x - halfW > currentView.right) return;
+          if (note.y + NOTE_CHIP_H < -20 || note.y - NOTE_CHIP_H > height + 20) return;
+          const color = elementColor(catalog, note.element.type);
+          const type = shortType(note.element.type);
+          const isDrag = /drag/i.test(type);
+          const isTaplik = /taplik|flick/i.test(type);
+          const inWindow = laneAliveAt(currentModel, note.start);
+          const alpha = ghost ? 0.45 : inWindow ? 1 : 0.42;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.beginPath();
+          ctx.rect(currentView.left, 0, currentView.laneW, height);
+          ctx.clip();
+          const left = note.x - halfW;
+          const top = note.y - NOTE_CHIP_H / 2;
+          noteRoundedPath(ctx, left, top, chipW, NOTE_CHIP_H, NOTE_CHIP_H / 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.lineWidth = ghost ? 1.5 : 1;
+          if (ghost) {
+            ctx.setLineDash([4, 3]);
+            ctx.strokeStyle = '#ffffff';
+          } else {
+            ctx.strokeStyle = note.selected ? '#ffffff' : 'rgba(0,0,0,0.42)';
+            if (note.selected) ctx.lineWidth = 2;
+          }
+          ctx.stroke();
+          ctx.setLineDash([]);
+          // Outward arrowheads mark a drag note.
+          if (isDrag) {
+            ctx.fillStyle = 'rgba(255,255,255,0.92)';
+            const size = Math.min(7, NOTE_CHIP_H / 2);
+            ctx.beginPath();
+            ctx.moveTo(left + 2, note.y);
+            ctx.lineTo(left + size + 2, note.y - size);
+            ctx.lineTo(left + size + 2, note.y + size);
+            ctx.closePath();
+            ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(left + chipW - 2, note.y);
+            ctx.lineTo(left + chipW - size - 2, note.y - size);
+            ctx.lineTo(left + chipW - size - 2, note.y + size);
+            ctx.closePath();
+            ctx.fill();
+          }
+          // Centre glyph: diamond for tap/hold, star for taplik.
+          ctx.fillStyle = 'rgba(255,255,255,0.92)';
+          ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+          ctx.lineWidth = 1;
+          if (isTaplik) {
+            const r = Math.min(6, NOTE_CHIP_H / 2.6);
+            ctx.beginPath();
+            for (let index = 0; index < 8; index += 1) {
+              const radius = index % 2 === 0 ? r : r * 0.4;
+              const angle = (Math.PI / 4) * index - Math.PI / 2;
+              const px = note.x + Math.cos(angle) * radius;
+              const py = note.y + Math.sin(angle) * radius;
+              if (index === 0) ctx.moveTo(px, py);
+              else ctx.lineTo(px, py);
+            }
+            ctx.closePath();
+            ctx.fill();
+          } else {
+            const r = Math.min(6, NOTE_CHIP_H / 2.6);
+            ctx.beginPath();
+            ctx.moveTo(note.x, note.y - r);
+            ctx.lineTo(note.x + r, note.y);
+            ctx.lineTo(note.x, note.y + r);
+            ctx.lineTo(note.x - r, note.y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        const painted = [];
+        for (const item of currentNotes) {
+          const note = noteGeometry(item, previewFor(item));
+          painted.push(note);
+        }
+        // Holds first so a head chip always sits above its body.
+        for (const note of painted) paintHoldBody(note);
+        for (const note of painted) if (!note.selected) paintNoteChip(note, false);
+        for (const note of painted) if (note.selected) paintNoteChip(note, false);
+
+        // --- Creation ghost -------------------------------------------------
+        const ghost = creationGhost();
+        if (ghost) {
+          const element = { type: typeForNoteTool(ghost.type), fields: {} };
+          if (ghost.type === 'hold') {
+            paintHoldBody({
+              element,
+              x: xOf(ghost.position),
+              y: yOf(ghost.start),
+              start: ghost.start,
+              holdTime: ghost.holdTime,
+              hold: true,
+              selected: false,
+            });
+          }
+          paintNoteChip(
+            {
+              element,
+              x: xOf(ghost.position),
+              y: yOf(ghost.start),
+              start: ghost.start,
+              position: ghost.position,
+              hold: ghost.type === 'hold',
+              holdTime: ghost.holdTime,
+              selected: false,
+            },
+            true,
+          );
+        }
+
+        // --- Box selection --------------------------------------------------
+        if (currentDrag && currentDrag.mode === 'box' && currentDrag.box) {
+          const box = currentDrag.box;
+          ctx.fillStyle = 'rgba(91,140,255,0.16)';
+          ctx.strokeStyle = colors.brand;
+          ctx.lineWidth = 1;
+          ctx.fillRect(Math.min(box.x0, box.x1), Math.min(box.y0, box.y1), Math.abs(box.x1 - box.x0), Math.abs(box.y1 - box.y0));
+          ctx.strokeRect(Math.min(box.x0, box.x1) + 0.5, Math.min(box.y0, box.y1) + 0.5, Math.abs(box.x1 - box.x0), Math.abs(box.y1 - box.y0));
+        }
+
+        // --- Top position labels -------------------------------------------
+        if (currentView.laneW > 180) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(currentView.left, 0, currentView.laneW, height);
+          ctx.clip();
+          ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          const labelStep = currentView.laneW >= 520 ? 1 : 2.5;
+          for (let position = -5; position <= 5 + 1e-9; position += labelStep) {
+            const x = xOf(position);
+            const strong = Math.abs(position) < 1e-9 || Math.abs(Math.abs(position) - 5) < 1e-9;
+            ctx.fillStyle = strong ? 'rgba(210,218,235,0.62)' : 'rgba(150,160,185,0.42)';
+            ctx.fillText(formatNum(position, Number.isInteger(position) ? 0 : 1), x, 5);
+          }
+          ctx.restore();
+        }
+
+        // --- Judgement line + label ----------------------------------------
+        ctx.save();
+        ctx.strokeStyle = colors.labelPrimary;
+        ctx.globalAlpha = 0.92;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(0, Math.round(currentView.judgeY) + 0.5);
+        ctx.lineTo(width, Math.round(currentView.judgeY) + 0.5);
+        ctx.stroke();
+        ctx.globalAlpha = 0.16;
+        ctx.strokeStyle = colors.brand;
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(0, Math.round(currentView.judgeY) + 0.5);
+        ctx.lineTo(width, Math.round(currentView.judgeY) + 0.5);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        const judgeBeat = (now - origin) / secondsPerBeat;
+        const judgeLabel = t('noteEditorJudge') + ' · ' + formatTime(now) + ' · ♪' + formatNum(judgeBeat, 2);
+        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        const judgeLabelWidth = ctx.measureText(judgeLabel).width;
+        ctx.fillStyle = 'rgba(8,10,18,0.7)';
+        ctx.fillRect(currentView.spectrumW + 2, currentView.judgeY - 17, Math.min(width - currentView.spectrumW - 4, judgeLabelWidth + 8), 15);
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.fillText(judgeLabel, currentView.spectrumW + 6, currentView.judgeY - 4);
+        ctx.restore();
+
+        // --- Hover tooltip --------------------------------------------------
+        if (currentHover && currentHover.noteId) {
+          const hovered = painted.find((note) => note.element.id === currentHover.noteId);
+          if (hovered) {
+            const position = hovered.position;
+            const type = shortType(hovered.element.type);
+            const text = type + ' · ' + t('noteEditorPosition') + ' ' + formatNum(position, 2) + ' · ' + formatTime(hovered.start);
+            ctx.font = '11px sans-serif';
+            const textWidth = ctx.measureText(text).width + 12;
+            let bx = currentHover.x + 12;
+            if (bx + textWidth > width - 6) bx = currentHover.x - textWidth - 12;
+            const by = clamp(currentHover.y - 30, 4, height - 24);
+            ctx.fillStyle = 'rgba(0,0,0,0.82)';
+            ctx.fillRect(bx, by, textWidth, 19);
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, bx + 6, by + 10);
+          }
+        }
+
+        // --- Empty state ----------------------------------------------------
+        if (!currentModel) {
+          ctx.fillStyle = colors.labelSecondary;
+          ctx.font = '12px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(t('noteEditorNoLane'), currentView.left + currentView.laneW / 2, height / 2);
+        } else if (currentNotes.length === 0) {
+          ctx.fillStyle = colors.labelSecondary;
+          ctx.font = '12px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const message = fitText(ctx, t('noteEditorEmpty'), Math.max(80, currentView.laneW - 24));
+          ctx.fillText(message, currentView.left + currentView.laneW / 2, Math.max(80, currentView.judgeY / 2));
+        }
+
+        // --- Small helpers used by the painters above ----------------------
+        function paintSpectrum() {
+          const left = 0;
+          const stripW = currentView.spectrumW;
+          const topTime = timeOf(0);
+          const bottomTime = timeOf(height);
+          const fromLimit = Math.max(0, bottomTime);
+          const toLimit = Math.max(fromLimit, topTime);
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(left, 0, stripW, height);
+          ctx.clip();
+          ctx.fillStyle = colors.layerTwo;
+          ctx.fillRect(left, 0, stripW, height);
+
+          let drew = false;
+          let missingStatus = '';
+          for (const clip of audioClipsRef.current || []) {
+            if (!clip) continue;
+            const key = clip.file || clip.relativePath || '';
+            const wave = key ? wavesRef.current[key] : null;
+            const clipStart = Number.isFinite(clip.offset) ? clip.offset : 0;
+            const clipDuration = Number.isFinite(clip.duration) && clip.duration > 0 ? clip.duration : wave && wave.duration ? wave.duration : 0;
+            if (!(clipDuration > 0)) {
+              missingStatus = missingStatus || (clip.missing ? t('waveUnavailable') : t('audioMissing'));
+              continue;
+            }
+            const start = Math.max(fromLimit, clipStart);
+            const end = Math.min(toLimit, clipStart + clipDuration);
+            if (end - start <= 1e-6) continue;
+            const yStart = yOf(start);
+            const yEnd = yOf(end);
+            const drawTop = Math.min(yStart, yEnd);
+            const drawHeight = Math.max(1, Math.abs(yStart - yEnd));
+            const spectrum = wave && wave.spectrum;
+            const source = spectrum ? spectrumCanvasFor(spectrum) : null;
+            if (source) {
+              const sx = clamp(((start - clipStart) / clipDuration) * spectrum.columns, 0, spectrum.columns - 1);
+              const sw = Math.max(1, Math.min(spectrum.columns - sx, ((end - start) / clipDuration) * spectrum.columns));
+              ctx.save();
+              ctx.beginPath();
+              ctx.rect(left, drawTop, stripW, drawHeight);
+              ctx.clip();
+              ctx.translate(left, drawTop + drawHeight);
+              ctx.rotate(-Math.PI / 2);
+              ctx.drawImage(source, sx, 0, sw, spectrum.bands, 0, 0, drawHeight, stripW);
+              ctx.restore();
+              drew = true;
+            } else if (spectrum && spectrum.data && spectrum.columns > 0) {
+              // Canvas creation unavailable: coarse time/frequency cells.
+              const rows = Math.max(4, Math.floor(drawHeight / 3));
+              const bands = spectrum.bands;
+              const steps = 18;
+              for (let row = 0; row < rows; row += 1) {
+                const time = start + ((end - start) * (row + 0.5)) / rows;
+                const column = clamp(Math.floor(((time - clipStart) / clipDuration) * spectrum.columns), 0, spectrum.columns - 1);
+                const y = yOf(time);
+                for (let band = 0; band < bands; band += steps) {
+                  const level = spectrum.data[column * bands + band] / 255;
+                  if (!(level > 0.035)) continue;
+                  const rgb = spectrumColorRgb(level);
+                  ctx.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+                  const cellW = Math.max(1, (stripW * steps) / bands);
+                  ctx.fillRect((band / bands) * stripW, y, cellW, Math.max(2, drawHeight / rows + 1));
+                }
+              }
+              drew = true;
+            } else if (wave && wave.peaks && wave.peaks.length > 0) {
+              ctx.fillStyle = 'rgba(124,140,255,0.5)';
+              const sampleDuration = wave.duration && wave.duration > 0 ? wave.duration : clipDuration;
+              for (let y = Math.floor(drawTop); y < Math.ceil(drawTop + drawHeight); y += 1) {
+                const time = timeOf(y);
+                const relative = time - clipStart;
+                if (relative < 0 || relative > sampleDuration) continue;
+                const bin = clamp(Math.floor((relative / sampleDuration) * wave.peaks.length), 0, wave.peaks.length - 1);
+                const amplitude = Math.max(1, wave.peaks[bin] * stripW * 0.85);
+                ctx.fillRect(left, y, amplitude, 1);
+              }
+              drew = true;
+            } else {
+              missingStatus = missingStatus || (waveStatus === 'loading' ? t('spectrumLoading') : t('spectrumUnavailable'));
+            }
+          }
+          ctx.strokeStyle = colors.border;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(stripW + 0.5, 0);
+          ctx.lineTo(stripW + 0.5, height);
+          ctx.stroke();
+          ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'top';
+          ctx.fillStyle = colors.labelSecondary;
+          ctx.fillText(fitText(ctx, t('noteEditorSpectrumShort'), stripW - 8), 5, 5);
+          if (!drew) {
+            ctx.save();
+            ctx.globalAlpha = 0.55;
+            ctx.font = '9px sans-serif';
+            ctx.fillStyle = colors.labelSecondary;
+            ctx.fillText(fitText(ctx, missingStatus || t('audioMissing'), stripW - 8), 5, 19);
+            ctx.restore();
+          }
+          ctx.restore();
+        }
+
+        function laneAliveAt(currentModelValue, time) {
+          if (!currentModelValue || !Array.isArray(currentModelValue.windows) || currentModelValue.windows.length === 0) return true;
+          for (const laneWindow of currentModelValue.windows) {
+            if (time >= laneWindow.start - 1e-6 && time < laneWindow.end + 1e-6) return true;
+          }
+          return false;
+        }
+
+        function creationGhost() {
+          const currentToolNow = currentTool;
+          if (!currentToolNow || currentToolNow === 'select') return null;
+          const drag = currentDrag;
+          if (drag) {
+            if (drag.mode !== 'create') return null;
+            return { type: drag.type, start: drag.curTime, position: drag.curPos, holdTime: drag.holdTime };
+          }
+          const hovered = currentHover;
+          if (!hovered || hovered.area !== 'lane' || !Number.isFinite(hovered.x) || !Number.isFinite(hovered.y)) return null;
+          const rawTime = timeOf(hovered.y);
+          const time = Math.max(0, snapEditorTime(rawTime, hovered.alt));
+          const position = snapEditorPosition(noteXToPosition(hovered.x, currentView), hovered.alt);
+          return { type: currentToolNow, start: time, position, holdTime: Math.max(1e-3, 60 / bpm) };
+        }
+      }, [audioClips, catalog, layout, model, notes, pps, selection, snapDiv, snapOn, t, tempo, tool, transport.time, waves, waveStatus]);
+
+      paintRef.current = paint;
+
+      useEffect(() => {
+        paint();
+      }, [paint]);
+
+      // --- Pointer helpers ---------------------------------------------------
+      const localPoint = useCallback((event) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return { x: 0, y: 0 };
+        const rect = canvas.getBoundingClientRect();
+        return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      }, []);
+
+      const currentAnchorTime = useCallback(() => {
+        const transportNow = transportRef.current;
+        if (!transportNow) return 0;
+        if (transportNow.timeRef && Number.isFinite(transportNow.timeRef.current)) return transportNow.timeRef.current;
+        return Number.isFinite(transportNow.time) ? transportNow.time : 0;
+      }, []);
+
+      /** Note / ruler hit-testing at a canvas point. */
+      const hitTest = useCallback((point, layoutNow, anchorNow) => {
+        const currentModel = modelRef.current;
+        if (!currentModel) return { area: 'outside' };
+        if (point.x < layoutNow.left) return { area: 'ruler' };
+        if (point.x > layoutNow.right) return { area: 'outside' };
+        const currentNotes = notesRef.current;
+        const chipW = layoutNow.chipW;
+        const selectedIds = selectionRef.current || [];
+        // Selected notes are painted last; reverse iteration must therefore
+        // see them first so an overlapping selected chip is preferred.
+        const ordered = [];
+        for (const item of currentNotes) if (selectedIds.indexOf(item.element.id) === -1) ordered.push(item);
+        for (const item of currentNotes) if (selectedIds.indexOf(item.element.id) !== -1) ordered.push(item);
+        for (let index = ordered.length - 1; index >= 0; index -= 1) {
+          const item = ordered[index];
+          const element = item.element;
+          const x = notePositionToX(notePositionOf(element), layoutNow);
+          const y = noteTimeToY(element.start || 0, anchorNow, ppsRef.current, layoutNow);
+          if (isHoldNote(element)) {
+            const holdTime = noteHoldTimeOf(element);
+            const tailY = noteTimeToY((element.start || 0) + holdTime, anchorNow, ppsRef.current, layoutNow);
+            const top = Math.min(tailY, y);
+            const bottom = Math.max(tailY, y);
+            if (Math.abs(point.x - x) <= chipW / 2 + 2 && point.y >= y - NOTE_CHIP_H / 2 - 3 && point.y <= y + NOTE_CHIP_H / 2 + 3) {
+              return { area: 'note', item, mode: 'head', x, y };
+            }
+            const bodyHalf = Math.max(11, clamp(chipW * 0.22, 8, 26) / 2 + 4);
+            if (Math.abs(point.x - x) <= bodyHalf && point.y >= top - 8 && point.y <= bottom + 8) {
+              if (Math.abs(point.y - tailY) <= 9) return { area: 'note', item, mode: 'tail', x, y };
+              return { area: 'note', item, mode: 'body', x, y };
+            }
+          } else if (Math.abs(point.x - x) <= chipW / 2 + 2 && Math.abs(point.y - y) <= NOTE_CHIP_H / 2 + 4) {
+            return { area: 'note', item, mode: 'head', x, y };
+          }
+        }
+        return { area: 'lane' };
+      }, []);
+
+      /** Selection after clicking a note. */
+      const selectionForClick = useCallback((id, additive) => {
+        const current = selectionRef.current || [];
+        if (!additive) return current.indexOf(id) !== -1 ? current : [id];
+        if (current.indexOf(id) !== -1) return current;
+        return current.concat([id]);
+      }, []);
+
+      const seekTo = useCallback((time) => {
+        const transportNow = transportRef.current;
+        if (!transportNow) return;
+        const duration = Math.max(0, Number.isFinite(transportNow.duration) ? transportNow.duration : 0);
+        transportNow.seek(clamp(time, 0, Math.max(duration, 0)));
+      }, []);
+
+      // --- Gesture starts ----------------------------------------------------
+      const beginCreate = useCallback((point, type, anchorNow, loose) => {
+        const layoutNow = layoutRef.current;
+        const rawTime = noteYToTime(point.y, anchorNow, ppsRef.current, layoutNow);
+        const start = Math.max(0, snapEditorTime(rawTime, loose));
+        const position = snapEditorPosition(noteXToPosition(point.x, layoutNow), loose);
+        const beat = 60 / ((tempoRef.current && tempoRef.current.bpm) || 120);
+        const minHold = Math.max(0.05, beat / Math.max(1, snapRef.current.div));
+        dragRef.current = {
+          mode: 'create',
+          type,
+          startX: point.x,
+          startY: point.y,
+          anchorTime: rawTime,
+          startTime: start,
+          startPos: position,
+          curTime: start,
+          curPos: position,
+          holdTime: beat,
+          minHold,
+          moved: false,
+        };
+        if (transportRef.current && transportRef.current.playing) transportRef.current.pause();
+        paintRef.current && paintRef.current();
+      }, [snapEditorPosition, snapEditorTime]);
+
+      const beginMove = useCallback((point, hit, anchorNow, additive) => {
+        const layoutNow = layoutRef.current;
+        const element = hit.item.element;
+        const nextSelection = selectionForClick(element.id, additive);
+        setSelection(nextSelection);
+        const ids = nextSelection.indexOf(element.id) !== -1 ? nextSelection : [element.id];
+        const originals = {};
+        for (const item of notesRef.current) {
+          if (ids.indexOf(item.element.id) === -1) continue;
+          originals[item.element.id] = {
+            start: item.element.start || 0,
+            position: notePositionOf(item.element),
+            holdTime: noteHoldTimeOf(item.element),
+          };
+        }
+        dragRef.current = {
+          mode: 'move',
+          ids,
+          primaryId: element.id,
+          originals,
+          anchorTime: noteYToTime(point.y, anchorNow, ppsRef.current, layoutNow),
+          anchorPosition: noteXToPosition(point.x, layoutNow),
+          startX: point.x,
+          startY: point.y,
+          deltaTime: 0,
+          deltaPos: 0,
+          moved: false,
+        };
+        if (transportRef.current && transportRef.current.playing) transportRef.current.pause();
+        paintRef.current && paintRef.current();
+      }, [selectionForClick, setSelection]);
+
+      const beginResize = useCallback((point, hit, anchorNow) => {
+        const layoutNow = layoutRef.current;
+        const element = hit.item.element;
+        setSelection([element.id]);
+        const originals = {};
+        originals[element.id] = {
+          start: element.start || 0,
+          position: notePositionOf(element),
+          holdTime: noteHoldTimeOf(element),
+        };
+        dragRef.current = {
+          mode: 'resize',
+          ids: [element.id],
+          primaryId: element.id,
+          originals,
+          anchorTime: noteYToTime(point.y, anchorNow, ppsRef.current, layoutNow),
+          anchorPosition: noteXToPosition(point.x, layoutNow),
+          startX: point.x,
+          startY: point.y,
+          deltaTime: 0,
+          minHold: Math.max(0.05, 60 / ((tempoRef.current && tempoRef.current.bpm) || 120) / Math.max(1, snapRef.current.div)),
+          moved: false,
+        };
+        if (transportRef.current && transportRef.current.playing) transportRef.current.pause();
+        paintRef.current && paintRef.current();
+      }, [setSelection]);
+
+      const onPointerDown = useCallback((event) => {
+        if (event.button !== 0 && event.button !== 1) return;
+        const point = localPoint(event);
+        const layoutNow = layoutRef.current;
+        const anchorNow = currentAnchorTime();
+        const canvas = canvasRef.current;
+        if (canvas && canvas.focus) canvas.focus();
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch (error) {
+          /* ignore */
+        }
+        if (event.button === 1 || point.x < layoutNow.left) {
+          // Scrub against the pointer-down anchor: using the live transport
+          // time on every move would feed the seek back into y -> time and
+          // make the playhead run away from the pointer.
+          dragRef.current = { mode: 'scrub', anchorTime: anchorNow };
+          seekTo(noteYToTime(point.y, anchorNow, ppsRef.current, layoutNow));
+          event.preventDefault();
+          return;
+        }
+        if (point.x > layoutNow.right) {
+          dragRef.current = null;
+          return;
+        }
+        const hit = hitTest(point, layoutNow, anchorNow);
+        const additive = event.shiftKey || event.metaKey || event.ctrlKey;
+        if (hit.area === 'note' && hit.item) {
+          if (hit.mode === 'tail') beginResize(point, hit, anchorNow);
+          else beginMove(point, hit, anchorNow, additive);
+          return;
+        }
+        if (toolRef.current !== 'select') {
+          const rawType = toolRef.current;
+          const type = rawType === 'tap' || rawType === 'drag' || rawType === 'taplik' || rawType === 'hold' ? rawType : null;
+          if (!type) {
+            dragRef.current = { mode: 'box', box: { x0: point.x, y0: point.y, x1: point.x, y1: point.y }, additive: false, moved: false };
+            return;
+          }
+          beginCreate(point, type, anchorNow, !!event.altKey);
+          return;
+        }
+        if (!event.shiftKey && !event.metaKey && !event.ctrlKey) setSelection([]);
+        dragRef.current = {
+          mode: 'box',
+          box: { x0: point.x, y0: point.y, x1: point.x, y1: point.y },
+          additive: event.shiftKey || event.metaKey || event.ctrlKey,
+          moved: false,
+        };
+        event.preventDefault();
+      }, [beginCreate, beginMove, beginResize, currentAnchorTime, hitTest, localPoint, seekTo, setSelection]);
+
+      /** Update the hover readout/cursor and repaint the canvas directly. */
+      const updateHover = useCallback((point, altKey) => {
+        const layoutNow = layoutRef.current;
+        const anchorNow = currentAnchorTime();
+        const hit = hitTest(point, layoutNow, anchorNow);
+        let mode = 'default';
+        if (point.x < layoutNow.left) mode = 'pointer';
+        else if (hit.area === 'note') mode = hit.mode === 'tail' ? 'ns-resize' : 'grab';
+        else if (toolRef.current !== 'select') mode = 'crosshair';
+        else mode = 'default';
+        setCursor((previous) => (previous === mode ? previous : mode));
+        if (point.x < layoutNow.left) {
+          hoverRef.current = { area: 'ruler', x: point.x, y: point.y };
+        } else if (point.x > layoutNow.right) {
+          hoverRef.current = null;
+        } else if (hit.area === 'note' && hit.item) {
+          hoverRef.current = { area: 'note', noteId: hit.item.element.id, x: point.x, y: point.y };
+        } else {
+          hoverRef.current = { area: 'lane', x: point.x, y: point.y, alt: !!altKey };
+        }
+        paintRef.current && paintRef.current();
+      }, [currentAnchorTime, hitTest]);
+
+      const onPointerMove = useCallback((event) => {
+        const point = localPoint(event);
+        const drag = dragRef.current;
+        const layoutNow = layoutRef.current;
+        if (!drag) {
+          updateHover(point, event.altKey);
+          return;
+        }
+        if (drag.mode === 'scrub') {
+          seekTo(noteYToTime(point.y, drag.anchorTime, ppsRef.current, layoutNow));
+          return;
+        }
+        if (drag.mode === 'box') {
+          drag.box.x1 = point.x;
+          drag.box.y1 = point.y;
+          drag.moved = drag.moved || Math.abs(point.x - drag.startX) > 3 || Math.abs(point.y - drag.startY) > 3;
+          paintRef.current && paintRef.current();
+          return;
+        }
+        if (drag.mode === 'create') {
+          const loose = !!event.altKey;
+          const time = Math.max(0, snapEditorTime(noteYToTime(point.y, currentAnchorTime(), ppsRef.current, layoutNow), loose));
+          const position = snapEditorPosition(noteXToPosition(point.x, layoutNow), loose);
+          if (drag.type === 'hold') {
+            // The head stays where the gesture started; the tail follows up.
+            drag.curTime = drag.startTime;
+            drag.curPos = drag.startPos === undefined ? drag.curPos : drag.startPos;
+            drag.holdTime = Math.max(drag.minHold, time - drag.startTime);
+          } else {
+            drag.curTime = time;
+            drag.curPos = position;
+          }
+          drag.moved = drag.moved || Math.abs(point.x - drag.startX) > 2 || Math.abs(point.y - drag.startY) > 2;
+          paintRef.current && paintRef.current();
+          return;
+        }
+        const anchorNow = currentAnchorTime();
+        const deltaRaw = noteYToTime(point.y, anchorNow, ppsRef.current, layoutNow) - drag.anchorTime;
+        if (drag.mode === 'move') {
+          const primary = drag.originals[drag.primaryId];
+          if (!primary) return;
+          const loose = !!event.altKey;
+          const targetStart = Math.max(0, snapEditorTime(primary.start + deltaRaw, loose));
+          const targetPosition = snapEditorPosition(primary.position + (noteXToPosition(point.x, layoutNow) - drag.anchorPosition), loose);
+          drag.deltaTime = targetStart - primary.start;
+          drag.deltaPos = targetPosition - primary.position;
+          drag.moved = drag.moved || Math.abs(point.x - drag.startX) > 2 || Math.abs(point.y - drag.startY) > 2;
+          paintRef.current && paintRef.current();
+          return;
+        }
+        if (drag.mode === 'resize') {
+          const primary = drag.originals[drag.primaryId];
+          if (!primary) return;
+          const loose = !!event.altKey;
+          const targetEnd = snapEditorTime(primary.start + primary.holdTime + deltaRaw, loose);
+          const nextHold = Math.max(drag.minHold, targetEnd - primary.start);
+          drag.deltaTime = nextHold - primary.holdTime;
+          drag.moved = drag.moved || Math.abs(point.x - drag.startX) > 2 || Math.abs(point.y - drag.startY) > 2;
+          paintRef.current && paintRef.current();
+        }
+      }, [currentAnchorTime, localPoint, seekTo, snapEditorPosition, snapEditorTime, updateHover]);
+
+      /** Build and send one `add` for a finished creation gesture. */
+      const commitCreate = useCallback((drag) => {
+        const currentProject = projectRef.current;
+        const currentModel = modelRef.current;
+        if (!currentProject || !currentModel || !drag.type) return;
+        const type = typeForNoteTool(drag.type);
+        const entry = catalogEntry(catalog, type);
+        if (!entry) return;
+        const time = Math.max(0, drag.curTime);
+        const position = drag.curPos;
+        const periodId = pickLanePeriodId(currentProject, target.staffId, target.lane, time);
+        const staff = (currentProject.staffs || []).find((item) => item && item.id === target.staffId);
+        const period = staff && (staff.periods || []).find((item) => item.id === periodId);
+        if (!period) return;
+        const periodOffset = Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+        const fields = fieldsForNewElement(catalog, type);
+        const timing = entry.timing || {};
+        fields[timing.start || 'hitTime'] = round(time - periodOffset, 6);
+        fields[timing.lane || 'laneName'] = target.lane;
+        fields.position = notePositionValue(fields.position, position);
+        if (entry.category === 'hold' || /hold/i.test(shortType(type))) {
+          const holdTime = drag.type === 'hold' ? Math.max(0.05, drag.holdTime) : 1;
+          fields.holdTime = round(holdTime, 6);
+        }
+        const id = makeElementId(periodId);
+        onEdit([{ op: 'add', staffId: target.staffId, periodId, element: { id, type, fields } }]);
+        setSelection([id]);
+      }, [catalog, makeElementId, onEdit, setSelection, t, target.lane, target.staffId]);
+
+      const commitMove = useCallback((drag) => {
+        const currentProject = projectRef.current;
+        if (!currentProject || !drag.originals) return;
+        if (Math.abs(drag.deltaTime) < 1e-9 && Math.abs(drag.deltaPos) < 1e-9) return;
+        const ops = [];
+        for (const id of drag.ids) {
+          const original = drag.originals[id];
+          const found = findElement(currentProject, id);
+          if (!original || !found) continue;
+          const nextStart = Math.max(0, original.start + drag.deltaTime);
+          if (Math.abs(nextStart - original.start) > 1e-9) {
+            const startField = resolveStartField(catalog, found.element);
+            const periodOffset = Number.isFinite(found.period.timeOffset) ? found.period.timeOffset : 0;
+            if (startField) {
+              ops.push({ op: 'patch', elementId: id, path: [startField], value: round(nextStart - periodOffset, 6) });
+            }
+          }
+          if (Math.abs(drag.deltaPos) > 1e-9) {
+            const patch = notePositionPatch(found.element, original.position + drag.deltaPos);
+            ops.push({ op: 'patch', elementId: id, path: patch.path, value: patch.value });
+          }
+        }
+        if (ops.length > 0) onEdit(ops);
+      }, [catalog, onEdit]);
+
+      const commitResize = useCallback((drag) => {
+        const currentProject = projectRef.current;
+        const id = drag.primaryId;
+        const original = drag.originals && drag.originals[id];
+        const found = currentProject ? findElement(currentProject, id) : null;
+        if (!original || !found) return;
+        if (Math.abs(drag.deltaTime) < 1e-9) return;
+        const nextHold = Math.max(drag.minHold || 0.05, original.holdTime + drag.deltaTime);
+        if (Math.abs(nextHold - original.holdTime) < 1e-9) return;
+        onEdit([{ op: 'patch', elementId: id, path: ['holdTime'], value: round(nextHold, 6) }]);
+      }, [onEdit]);
+
+      const onPointerUp = useCallback((event) => {
+        const drag = dragRef.current;
+        dragRef.current = null;
+        if (!drag) {
+          paintRef.current && paintRef.current();
+          return;
+        }
+        try {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        } catch (error) {
+          /* ignore */
+        }
+        if (drag.mode === 'create') commitCreate(drag);
+        else if (drag.mode === 'move') commitMove(drag);
+        else if (drag.mode === 'resize') commitResize(drag);
+        else if (drag.mode === 'box') {
+          const currentModel = modelRef.current;
+          const layoutNow = layoutRef.current;
+          const anchorNow = currentAnchorTime();
+          const minX = Math.min(drag.box.x0, drag.box.x1);
+          const maxX = Math.max(drag.box.x0, drag.box.x1);
+          const minY = Math.min(drag.box.y0, drag.box.y1);
+          const maxY = Math.max(drag.box.y0, drag.box.y1);
+          const ids = [];
+          for (const item of currentModel ? currentModel.notes : []) {
+            const x = notePositionToX(notePositionOf(item.element), layoutNow);
+            const y = noteTimeToY(item.element.start || 0, anchorNow, ppsRef.current, layoutNow);
+            if (x + layoutNow.chipW / 2 < minX || x - layoutNow.chipW / 2 > maxX) continue;
+            if (y + NOTE_CHIP_H < minY || y - NOTE_CHIP_H > maxY) continue;
+            ids.push(item.element.id);
+          }
+          if (ids.length > 0) {
+            setSelection(drag.additive ? Array.from(new Set((selectionRef.current || []).concat(ids))) : ids);
+          }
+        }
+        paintRef.current && paintRef.current();
+      }, [commitCreate, commitMove, commitResize, currentAnchorTime, setSelection]);
+
+      const onPointerCancel = useCallback(() => {
+        dragRef.current = null;
+        hoverRef.current = null;
+        paintRef.current && paintRef.current();
+      }, []);
+
+      const onPointerLeave = useCallback(() => {
+        if (dragRef.current) return;
+        hoverRef.current = null;
+        setCursor('default');
+        paintRef.current && paintRef.current();
+      }, []);
+
+      const onWheel = useCallback((event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        const transportNow = transportRef.current;
+        if (!transportNow) return;
+        const layoutNow = layoutRef.current;
+        if (event.ctrlKey || event.metaKey) {
+          const factor = Math.exp(-event.deltaY * 0.0015);
+          // Functional update: several wheel ticks can arrive before React
+          // re-renders, and each one must compound on the previous zoom.
+          if (setPps) setPps((previous) => round(clamp(previous * factor, NOTE_PPS_MIN, NOTE_PPS_MAX), 2));
+          return;
+        }
+        const delta = event.deltaY / Math.max(1, ppsRef.current);
+        const currentTime = transportNow.timeRef && Number.isFinite(transportNow.timeRef.current) ? transportNow.timeRef.current : transportNow.time;
+        const duration = Math.max(
+          Number.isFinite(transportNow.duration) ? transportNow.duration : 0,
+          (projectRef.current && Number.isFinite(projectRef.current.duration)) ? projectRef.current.duration : 0,
+          currentTime,
+        );
+        transportNow.seek(clamp(currentTime + delta, 0, Math.max(0, duration)));
+        // Keep the pointer ghost current after a wheel seek.
+        const point = localPoint(event);
+        if (point.y >= 0 && point.y <= layoutNow.h && point.x >= layoutNow.left && point.x <= layoutNow.right) {
+          hoverRef.current = { area: 'lane', x: point.x, y: point.y, alt: !!event.altKey };
+        }
+        paintRef.current && paintRef.current();
+      }, [localPoint, setPps]);
+
+      // --- Render ------------------------------------------------------------
+      const staffLabel = model ? model.staffLabel : target.staffId;
+      const laneType = model && model.laneElements.length > 0 ? shortType(model.laneElements[0].type) : '';
+      const noteCount = notes.length;
+      return h(
+        'div',
+        { className: 'dgc-noteEditor', role: 'region', 'aria-label': t('noteEditor') },
+        h(
+          'div',
+          { className: 'dgc-noteEditorHead' },
+          h(Button, { variant: 'ghost', icon: 'back', onClick: onClose, title: t('noteEditorBack') }, t('noteEditorBack')),
+          h('strong', { className: 'dgc-noteEditorTitle', title: staffLabel + ' · ' + target.lane }, staffLabel + ' · ' + target.lane),
+          h(
+            'span',
+            { className: 'dgc-noteEditorMeta' },
+            target.staffId + (laneType ? ' · ' + laneType : '') + ' · ' + t('noteEditorNotesCount').replace('{count}', String(noteCount)),
+          ),
+          h('span', { className: 'dgc-spacer' }),
+          h('span', { className: 'dgc-noteEditorHint', title: t('noteEditorHint') }, t('noteEditorHint')),
+        ),
+        h(
+          'div',
+          { className: 'dgc-noteCanvasWrap', ref: wrapRef },
+          h('canvas', {
+            ref: canvasRef,
+            className: 'dgc-noteCanvas',
+            tabIndex: 0,
+            style: { cursor },
+            onPointerDown,
+            onPointerMove,
+            onPointerUp,
+            onPointerCancel,
+            onPointerLeave,
+            onWheel,
+            'aria-label': t('noteEditor') + ' · ' + target.lane,
+          }),
+        ),
+      );
+    }
+
+    /** Resolve a short note tool id to a catalog element type. */
+    function typeForNoteTool(tool) {
+      const wanted = { tap: 'DremuTap', drag: 'DremuDrag', taplik: 'DremuTaplik', hold: 'DremuHold' }[tool];
+      if (!wanted) return 'Dremu.DremuTap';
+      return 'Dremu.' + wanted;
+    }
+
+    // ========================================================================
+    // 16 · Open / create-project dialogs.
+    // ========================================================================
+
+    /** Characters a new project folder name may not contain (Host mirror). */
+    const PROJECT_NAME_FORBIDDEN = /[\\/:*?"<>|\u0000-\u001f]/;
+
+    /**
+     * Client-side mirror of the Host's folder-name rules.
+     * Returns `'required'`, `'invalid'` or null.
+     */
+    function projectNameProblem(value) {
+      const name = String(value || '').trim();
+      if (name.length === 0) return 'required';
+      if (name === '.' || name === '..' || name.startsWith('.') || name.endsWith('.')) return 'invalid';
+      if (PROJECT_NAME_FORBIDDEN.test(name)) return 'invalid';
+      return null;
+    }
 
     /** Modal listing the chart library and accepting a manual path. */
     function OpenProjectDialog(props) {
-      const { t, state, onOpen, onClose,
+      const { t, state, onOpen, onClose, onNewProject,
       } = props;
       const [path, setPath] = useState('');
       const [busy, setBusy] = useState(false);
@@ -9332,6 +11039,9 @@ window.__ModuleLoader__.load({
             { className: 'dgc-modalHead' },
             h(Icon, { name: 'folder' }),
             h('h3', null, t('openProject')),
+            onNewProject
+              ? h(Button, { icon: 'plus', onClick: onNewProject, title: t('newProjectHint') }, t('newProject'))
+              : null,
             h(Button, { variant: 'ghost', onClick: onClose, title: t('close') }, '×'),
           ),
           h(
@@ -9387,6 +11097,191 @@ window.__ModuleLoader__.load({
                       );
                     }),
               ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    /**
+     * Modal that creates a brand-new project folder.
+     *
+     * Fields: the folder name, its parent (defaults to the configured project
+     * root), the starter staff template and the initial period length. The
+     * resulting path is previewed; `onCreate(request)` posts to the Host and
+     * resolves `{ ok }` or `{ ok: false, error }` so validation failures stay
+     * inline instead of closing the dialog.
+     */
+    function CreateProjectDialog(props) {
+      const { t, projectRoot, onCreate, onClose } = props;
+      const [name, setName] = useState('');
+      const [parent, setParent] = useState(projectRoot || '');
+      const [template, setTemplate] = useState('chart');
+      const [length, setLength] = useState('180');
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState('');
+      useDialogEscape(() => {
+        if (!busy) onClose();
+      });
+      const trimmedParent = String(parent || '').trim().replace(/[\\/]+$/, '');
+      const preview = trimmedParent && String(name || '').trim() ? trimmedParent + '/' + String(name).trim() : '';
+      const submit = async () => {
+        if (busy) return;
+        const projectName = String(name || '').trim();
+        const problem = projectNameProblem(projectName);
+        if (problem === 'required') {
+          setError(t('projectNameRequired'));
+          return;
+        }
+        if (problem) {
+          setError(t('projectNameInvalid'));
+          return;
+        }
+        if (trimmedParent.length === 0) {
+          setError(t('projectParentRequired'));
+          return;
+        }
+        const rawLength = String(length || '').trim();
+        const seconds = rawLength === '' ? 180 : Number(rawLength);
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          setError(t('projectLengthInvalid'));
+          return;
+        }
+        setError('');
+        setBusy(true);
+        let result;
+        try {
+          result = await onCreate({ name: projectName, parent: trimmedParent, template, minLength: seconds });
+        } catch (failure) {
+          result = { ok: false, error: String((failure && failure.message) || failure) };
+        }
+        if (result && result.ok) {
+          onClose();
+          return;
+        }
+        setBusy(false);
+        setError((result && result.error) || t('loadFailed'));
+      };
+      const kindCard = (value, label, description) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dgc-kindCard' + (template === value ? ' is-active' : ''),
+            onClick: () => setTemplate(value),
+            'aria-pressed': template === value,
+          },
+          h('strong', null, label),
+          h('span', null, description),
+        );
+      return h(
+        'div',
+        {
+          className: 'dgc-modalBackdrop',
+          role: 'dialog',
+          'aria-modal': 'true',
+          onClick: (event) => {
+            if (event.target === event.currentTarget && !busy) onClose();
+          },
+        },
+        h(
+          'div',
+          { className: 'dgc-modal', style: { width: 'min(520px,94vw)' } },
+          h(
+            'div',
+            { className: 'dgc-modalHead' },
+            h(Icon, { name: 'plus' }),
+            h('h3', null, t('newProject')),
+            h(Button, { variant: 'ghost', onClick: onClose, title: t('close') }, '×'),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogBody' },
+            h(
+              'label',
+              { className: 'dgc-dialogField' },
+              t('projectNameLabel'),
+              h('input', {
+                className: 'dgc-input',
+                value: name,
+                autoFocus: true,
+                spellCheck: false,
+                placeholder: t('projectNamePlaceholder'),
+                onChange: (event) => {
+                  setName(event.target.value);
+                  setError('');
+                },
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') submit();
+                },
+              }),
+            ),
+            h(
+              'label',
+              { className: 'dgc-dialogField' },
+              t('projectParentLabel'),
+              h('input', {
+                className: 'dgc-input is-mono',
+                value: parent,
+                spellCheck: false,
+                onChange: (event) => {
+                  setParent(event.target.value);
+                  setError('');
+                },
+              }),
+            ),
+            h('div', { className: 'dgc-hint', style: { marginTop: -4 } }, t('projectParentHint')),
+            h(
+              'div',
+              { className: 'dgc-dialogField' },
+              t('projectTemplateLabel'),
+              h(
+                'div',
+                { className: 'dgc-kindGrid' },
+                kindCard('chart', t('projectTemplateChart'), t('projectTemplateChartDesc')),
+                kindCard('storyboard', t('projectTemplateStoryboard'), t('projectTemplateStoryboardDesc')),
+              ),
+            ),
+            h(
+              'label',
+              { className: 'dgc-dialogField', style: { maxWidth: 200 } },
+              t('projectLengthLabel'),
+              h('input', {
+                className: 'dgc-input',
+                type: 'number',
+                min: 0,
+                step: 1,
+                value: length,
+                onChange: (event) => {
+                  setLength(event.target.value);
+                  setError('');
+                },
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') submit();
+                },
+              }),
+            ),
+            h('div', { className: 'dgc-hint', style: { marginTop: -4 } }, t('projectLengthHint')),
+            preview
+              ? h(
+                  'div',
+                  { className: 'dgc-dialogField' },
+                  t('projectPathPreview'),
+                  h('div', { className: 'dgc-listRowSlim dgc-mono', style: { wordBreak: 'break-all', padding: '2px 0' } }, preview),
+                )
+              : null,
+            error ? h('div', { className: 'dgc-listRowSlim dgc-err' }, error) : null,
+            h('div', { className: 'dgc-hint', style: { padding: 0 } }, t('newProjectHint')),
+          ),
+          h(
+            'div',
+            { className: 'dgc-dialogFoot' },
+            h('span', { className: 'dgc-spacer' }),
+            h(Button, { onClick: onClose, disabled: busy }, t('cancel')),
+            h(
+              Button,
+              { variant: 'primary', icon: 'plus', disabled: busy, onClick: () => submit() },
+              busy ? t('projectCreating') : t('create'),
             ),
           ),
         ),
@@ -10832,7 +12727,7 @@ window.__ModuleLoader__.load({
      * Pure presentation; every value arrives from ChartStudioPage.
      */
     function StudioHeader(props) {
-      const { t, project, dirty, connection, session, hasPlayableContent, onOpenProject, onPreview, previewDisabled, curveBusy } = props;
+      const { t, project, dirty, connection, session, hasPlayableContent, onOpenProject, onNewProject, onPreview, previewDisabled, curveBusy } = props;
       return h(
         'div',
         { className: 'dgc-header' },
@@ -10846,11 +12741,24 @@ window.__ModuleLoader__.load({
         dirty ? h('span', { className: 'dgc-badge', title: t('dirtyDot') }, '●') : null,
         connection === 'offline' ? h('span', { className: 'dgc-badge is-dirty dgc-offline' }, t('offline')) : null,
         h('span', { className: 'dgc-spacer' }),
+        h(Button, { icon: 'plus', onClick: onNewProject, title: t('newProjectHint') }, t('newProject')),
         h(Button, { icon: 'folder', onClick: onOpenProject }, t('openProject')),
         h(Button, { icon: 'preview', onClick: onPreview, disabled: !project || !hasPlayableContent || previewDisabled, title: previewDisabled ? t('curvePreviewBusy') : t('playbackOpen') }, t('playbackOpen')),
         h(Button, { icon: 'reload', onClick: () => session.reload(), disabled: !project || curveBusy, title: curveBusy ? t('curvePreviewBusy') : undefined }, t('reload')),
         h(Button, { icon: 'undo', onClick: () => session.undo(), disabled: !project || curveBusy, title: curveBusy ? t('curvePreviewBusy') : undefined }, t('undo')),
         h(Button, { icon: 'redo', onClick: () => session.redo(), disabled: !project || curveBusy, title: curveBusy ? t('curvePreviewBusy') : undefined }, t('redo')),
+        h(
+          Button,
+          {
+            icon: 'export',
+            disabled: !project || session.exporting,
+            title: session.exporting ? t('exporting') : t('exportHint'),
+            onClick: () => session.exportProject(),
+          },
+          session.exporting
+            ? t('exporting') + (Number.isFinite(session.exportPercent) ? ' ' + session.exportPercent + '%' : '')
+            : t('export'),
+        ),
         h(
           Button,
           {
@@ -10869,14 +12777,36 @@ window.__ModuleLoader__.load({
      * chart tempo/offset fields. Pure presentation.
      */
     function StudioToolbar(props) {
-      const { t, tool, setTool, snapOn, snapDiv, setSnapOn, setSnapDiv, canvasApiRef, selection, onDuplicate, onDelete, tempo, onEdit } = props;
-      const tools = [
-        { id: 'select', icon: 'select', label: t('toolSelect'), key: 'V' },
-        { id: 'tap', icon: 'tap', label: t('toolTap'), key: 'Q' },
-        { id: 'drag', icon: 'drag', label: t('toolDrag'), key: 'W' },
-        { id: 'hold', icon: 'hold', label: t('toolHold'), key: 'E' },
-        { id: 'lane', icon: 'lane', label: t('toolLane'), key: 'T' },
-      ];
+      const { t, tool, setTool, snapOn, snapDiv, setSnapOn, setSnapDiv, canvasApiRef, selection, onDuplicate, onDelete, tempo, onEdit, noteEditor } = props;
+      const noteMode = !!(noteEditor && noteEditor.tool);
+      const activeTool = noteMode ? noteEditor.tool : tool;
+      const chooseTool = noteMode ? noteEditor.setTool : setTool;
+      const tools = noteMode
+        ? [
+            { id: 'select', icon: 'select', label: t('toolSelect'), key: 'V' },
+            { id: 'tap', icon: 'tap', label: t('toolTap'), key: 'Q' },
+            { id: 'drag', icon: 'drag', label: t('toolDrag'), key: 'W' },
+            { id: 'taplik', icon: 'taplik', label: t('toolTaplik'), key: 'E' },
+            { id: 'hold', icon: 'hold', label: t('toolHold'), key: 'R' },
+          ]
+        : [
+            { id: 'select', icon: 'select', label: t('toolSelect'), key: 'V' },
+            { id: 'tap', icon: 'tap', label: t('toolTap'), key: 'Q' },
+            { id: 'drag', icon: 'drag', label: t('toolDrag'), key: 'W' },
+            { id: 'hold', icon: 'hold', label: t('toolHold'), key: 'E' },
+            { id: 'lane', icon: 'lane', label: t('toolLane'), key: 'T' },
+          ];
+      const zoom = (direction) => {
+        if (noteMode) {
+          noteEditor.onZoom(direction);
+          return;
+        }
+        const api = canvasApiRef.current;
+        if (!api) return;
+        if (direction === 'in') api.zoomIn();
+        else if (direction === 'out') api.zoomOut();
+        else api.fit();
+      };
       return h(
         'div',
         { className: 'dgc-toolbar' },
@@ -10889,9 +12819,9 @@ window.__ModuleLoader__.load({
               {
                 key: item.id,
                 icon: item.icon,
-                active: tool === item.id,
+                active: activeTool === item.id,
                 title: item.label + ' (' + item.key + ')',
-                onClick: () => setTool(item.id),
+                onClick: () => chooseTool(item.id),
               },
               item.label,
             ),
@@ -10921,9 +12851,9 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'dgc-toolgroup' },
-          h(Button, { variant: 'ghost', icon: 'zoomOut', title: t('zoomOut'), onClick: () => canvasApiRef.current && canvasApiRef.current.zoomOut() }),
-          h(Button, { variant: 'ghost', icon: 'zoomIn', title: t('zoomIn'), onClick: () => canvasApiRef.current && canvasApiRef.current.zoomIn() }),
-          h(Button, { variant: 'ghost', icon: 'fit', title: t('fitAll'), onClick: () => canvasApiRef.current && canvasApiRef.current.fit() }),
+          h(Button, { variant: 'ghost', icon: 'zoomOut', title: t('zoomOut'), onClick: () => zoom('out') }),
+          h(Button, { variant: 'ghost', icon: 'zoomIn', title: t('zoomIn'), onClick: () => zoom('in') }),
+          h(Button, { variant: 'ghost', icon: 'fit', title: noteMode ? t('reset') : t('fitAll'), onClick: () => zoom('reset') }),
         ),
         h(
           'div',
@@ -10976,6 +12906,14 @@ window.__ModuleLoader__.load({
         canvasApiRef,
         curveEditing,
         closeCurvePanel,
+        noteEditing,
+        noteTool,
+        setNoteTool,
+        notePps,
+        setNotePps,
+        closeNoteEditor,
+        selectLaneNotes,
+        nudgeNoteSelection,
       } = actions;
 
       const target = event.target;
@@ -11041,7 +12979,8 @@ window.__ModuleLoader__.load({
       }
       if (mod && event.key.toLowerCase() === 'a') {
         event.preventDefault();
-        setSelection(allElementIds.slice(0, 4000));
+        if (noteEditing && typeof selectLaneNotes === 'function') setSelection(selectLaneNotes());
+        else setSelection(allElementIds.slice(0, 4000));
         return;
       }
       if (mod && event.key.toLowerCase() === 'c') {
@@ -11077,8 +13016,25 @@ window.__ModuleLoader__.load({
         return;
       }
       if (event.key === 'Escape') {
+        if (noteEditing) {
+          if (selection.length > 0) setSelection([]);
+          else closeNoteEditor();
+          return;
+        }
         if (selection.length > 0) setSelection([]);
         else setTool('select');
+        return;
+      }
+      if (noteEditing && (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+        event.preventDefault();
+        const stepSeconds = (60 / ((tempo && tempo.bpm) || 120)) / (snapDiv || 4);
+        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+          const step = stepSeconds * (event.shiftKey ? 4 : 1);
+          nudgeNoteSelection(event.key === 'ArrowUp' ? step : -step, 0);
+        } else {
+          const step = event.shiftKey ? 1 : 0.5;
+          nudgeNoteSelection(0, event.key === 'ArrowRight' ? step : -step);
+        }
         return;
       }
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
@@ -11088,6 +13044,27 @@ window.__ModuleLoader__.load({
           const step = (60 / ((tempo && tempo.bpm) || 120)) / (snapDiv || 4);
           transport.seek(Math.max(0, transport.time + (event.key === 'ArrowRight' ? step : -step)));
         }
+        return;
+      }
+      if (noteEditing) {
+        if (/^[1-8]$/.test(event.key)) {
+          setSnapDiv(SNAP_DIVISIONS[Number(event.key) - 1]);
+          return;
+        }
+        if (event.key === '=' || event.key === '+') {
+          setNotePps((previous) => clamp((previous || NOTE_PPS_DEFAULT) * 1.25, NOTE_PPS_MIN, NOTE_PPS_MAX));
+          return;
+        }
+        if (event.key === '-') {
+          setNotePps((previous) => clamp((previous || NOTE_PPS_DEFAULT) / 1.25, NOTE_PPS_MIN, NOTE_PPS_MAX));
+          return;
+        }
+        if (event.key === '0') {
+          setNotePps(NOTE_PPS_DEFAULT);
+          return;
+        }
+        const noteToolNext = noteToolForKey(event.key);
+        if (noteToolNext) setNoteTool(noteToolNext);
         return;
       }
       const key = event.key.toLowerCase();
@@ -11122,9 +13099,14 @@ window.__ModuleLoader__.load({
       const [snapOn, setSnapOn] = useState(true);
       const [follow, setFollow] = useState(false);
       const [openDialog, setOpenDialog] = useState(false);
+      const [createDialog, setCreateDialog] = useState(false);
       const [preview, setPreview] = useState(false);
       const [notice, setNotice] = useState(null);
       const [curveTarget, setCurveTarget] = useState(null);
+      const [noteEditor, setNoteEditor] = useState(null);
+      const [noteTool, setNoteTool] = useState('select');
+      const [notePps, setNotePps] = useState(NOTE_PPS_DEFAULT);
+      const noteEditorRef = useRef(null);
       const curveSeqRef = useRef(0);
       const curveTargetRef = useRef(null);
       // Latest main-timeline view ({t0, pps}); the docked curve panel uses it
@@ -11248,6 +13230,111 @@ window.__ModuleLoader__.load({
         noticeTimerRef.current = window.setTimeout(() => setNotice(null), 4200);
       }, []);
 
+      // Judgement-line note editor: opened from a lane strip, hosted by the
+      // center pane as an overlay so the timeline keeps its view state.
+      noteEditorRef.current = noteEditor;
+      const openNoteEditor = useCallback(
+        (targetValue) => {
+          if (!targetValue || typeof targetValue.staffId !== 'string' || typeof targetValue.lane !== 'string') return;
+          const staff = project ? (project.staffs || []).find((item) => item && item.id === targetValue.staffId) : null;
+          const hasLane = !!(staff && (staff.periods || []).some((period) =>
+            (period.elements || []).some((element) => element && element.category === 'lane' && element.fields && element.fields.name === targetValue.lane),
+          ));
+          if (!hasLane) {
+            pushNotice({ kind: 'error', text: t('noteEditorNoLane') });
+            return;
+          }
+          if (curveTargetRef.current) {
+            // Do not discard an in-flight curve draft behind the user's back;
+            // the curve panel must be applied or cancelled first.
+            pushNotice({ kind: 'error', text: t('curveOpenBusy') });
+            return;
+          }
+          if (preview) {
+            transport.pause();
+            setPreview(false);
+          }
+          // If the playhead is outside the lane's lifetime, jump to the
+          // nearest lane window so the notes being edited are actually in
+          // view (the timeline's own playhead is untouched while it is inside
+          // a window, which keeps the fixture/editor flow predictable).
+          const laneModel = buildLaneEditorModel(project, targetValue.staffId, targetValue.lane);
+          if (laneModel && laneModel.windows.length > 0) {
+            const playhead = transport.time;
+            const inside = laneModel.windows.some((laneWindow) => playhead >= laneWindow.start - 1e-6 && playhead < laneWindow.end + 1e-6);
+            if (!inside) {
+              let nearest = null;
+              let nearestDistance = Infinity;
+              for (const laneWindow of laneModel.windows) {
+                const distance = playhead < laneWindow.start ? laneWindow.start - playhead : playhead > laneWindow.end ? playhead - laneWindow.end : 0;
+                if (distance < nearestDistance) {
+                  nearestDistance = distance;
+                  nearest = laneWindow;
+                }
+              }
+              if (nearest) {
+                transport.seek(Math.max(0, nearest.start));
+                if (canvasApiRef.current && typeof canvasApiRef.current.reveal === 'function') {
+                  canvasApiRef.current.reveal(Math.max(0, nearest.start));
+                }
+              }
+            }
+          }
+          setNoteEditor({ staffId: targetValue.staffId, lane: targetValue.lane });
+          setNoteTool('select');
+          setSelection([]);
+          setActiveStaff(targetValue.staffId);
+        },
+        [preview, project, pushNotice, t, transport],
+      );
+      const closeNoteEditor = useCallback(() => {
+        setNoteEditor(null);
+        setNoteTool('select');
+      }, []);
+      const noteZoom = useCallback((direction) => {
+        setNotePps((previous) => {
+          if (direction === 'reset') return NOTE_PPS_DEFAULT;
+          if (direction === 'in') return clamp(previous * 1.25, NOTE_PPS_MIN, NOTE_PPS_MAX);
+          return clamp(previous / 1.25, NOTE_PPS_MIN, NOTE_PPS_MAX);
+        });
+      }, []);
+      const selectLaneNotes = useCallback(() => {
+        if (!noteEditor || !project) return [];
+        const laneModel = buildLaneEditorModel(project, noteEditor.staffId, noteEditor.lane);
+        return laneModel ? laneModel.notes.map((item) => item.element.id) : [];
+      }, [noteEditor, project]);
+      const nudgeNoteSelection = useCallback(
+        (deltaTime, deltaPosition) => {
+          if (!noteEditor || !project || selection.length === 0) return;
+          const ops = [];
+          for (const id of selection) {
+            const found = findElement(project, id);
+            if (!found) continue;
+            const noteLane = found.element.lane || (found.element.fields && typeof found.element.fields.laneName === 'string' ? found.element.fields.laneName : '');
+            if (noteLane !== noteEditor.lane) continue;
+            if (Number.isFinite(deltaTime) && Math.abs(deltaTime) > 1e-12) {
+              const startField = resolveStartField(catalog, found.element);
+              const current = startField ? valueAsNumber(found.element.fields[startField]) : null;
+              if (startField && current !== null) {
+                const nextStart = Math.max(0, (found.element.start || 0) + deltaTime);
+                const periodOffset = Number.isFinite(found.period.timeOffset) ? found.period.timeOffset : 0;
+                const nextRelative = round(nextStart - periodOffset, 6);
+                if (Math.abs(nextRelative - current) > 1e-9) {
+                  ops.push({ op: 'patch', elementId: id, path: [startField], value: nextRelative });
+                }
+              }
+            }
+            if (Number.isFinite(deltaPosition) && Math.abs(deltaPosition) > 1e-12) {
+              const nextPosition = clamp(notePositionOf(found.element) + deltaPosition, -NOTE_POS_LIMIT, NOTE_POS_LIMIT);
+              const patch = notePositionPatch(found.element, nextPosition);
+              ops.push({ op: 'patch', elementId: id, path: patch.path, value: patch.value });
+            }
+          }
+          if (ops.length > 0) session.edit(ops);
+        },
+        [catalog, noteEditor, project, selection, session],
+      );
+
       // Docked curve editor: the inspector requests it, the center pane hosts it.
       curveTargetRef.current = curveTarget;
       // Keep the beat origin in sync when the element's start time is edited
@@ -11275,6 +13362,12 @@ window.__ModuleLoader__.load({
           transport.pause();
           setPreview(false);
         }
+        // The curve panel docks under the timeline; close the note editor so
+        // it cannot cover the panel it was opened from.
+        if (noteEditorRef.current) {
+          setNoteEditor(null);
+          setNoteTool('select');
+        }
         curveSeqRef.current += 1;
         const view = timelineViewRef.current;
         setLiveTimelineView({ t0: view.t0, pps: view.pps });
@@ -11300,6 +13393,18 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         setCurveTarget(null);
       }, [project && project.dir]);
+      useEffect(() => {
+        if (!noteEditor) return;
+        if (!project) {
+          setNoteEditor(null);
+          return;
+        }
+        const staff = (project.staffs || []).find((item) => item && item.id === noteEditor.staffId);
+        const hasLane = !!(staff && (staff.periods || []).some((period) =>
+          (period.elements || []).some((element) => element && element.category === 'lane' && element.fields && element.fields.name === noteEditor.lane),
+        ));
+        if (!hasLane) setNoteEditor(null);
+      }, [project, noteEditor]);
 
       const [bpmBusy, setBpmBusy] = useState(false);
       const bpmAvailable = useMemo(
@@ -11354,6 +13459,8 @@ window.__ModuleLoader__.load({
         setSelection([]);
         setActiveStaff(null);
         setHiddenStaffs(new Set());
+        setNoteEditor(null);
+        setNoteTool('select');
         clipboardRef.current = [];
       }, [project && project.dir]);
 
@@ -11702,6 +13809,14 @@ window.__ModuleLoader__.load({
           canvasApiRef,
           curveEditing: curveTarget !== null,
           closeCurvePanel,
+          noteEditing: noteEditor !== null,
+          noteTool,
+          setNoteTool,
+          notePps,
+          setNotePps,
+          closeNoteEditor,
+          selectLaneNotes,
+          nudgeNoteSelection,
         });
 
       // The left pane is memoized and ignores callback props, so hand it stable
@@ -11734,6 +13849,7 @@ window.__ModuleLoader__.load({
           previewDisabled: curveTarget !== null,
           curveBusy: curveTarget !== null,
           onOpenProject: () => setOpenDialog(true),
+          onNewProject: () => setCreateDialog(true),
           onPreview: openPreview,
         }),
         h(StudioToolbar, {
@@ -11750,6 +13866,7 @@ window.__ModuleLoader__.load({
           onDelete: deleteElements,
           tempo,
           onEdit: session.edit,
+          noteEditor: noteEditor ? { tool: noteTool, setTool: setNoteTool, onZoom: noteZoom } : null,
         }),
 
         // Body.
@@ -11819,6 +13936,7 @@ window.__ModuleLoader__.load({
               onReady: setCanvasApi,
               onViewChange: onTimelineView,
               onContentHeight: onTimelineContentHeight,
+              onOpenNoteEditor: openNoteEditor,
             }),
             // Docked curve editor: replaces the timeline pane visually while
             // keeping the editor chrome, inspector and transport reachable.
@@ -11838,6 +13956,31 @@ window.__ModuleLoader__.load({
                   onTimelineFit: syncTimelineFit,
                   onApply: applyCurvePanel,
                   onClose: closeCurvePanel,
+                })
+              : null,
+            // Judgement-line note editor overlay (timeline stays mounted
+            // underneath so returning keeps its zoom and scroll state).
+            noteEditor && project
+              ? h(NoteEditorLayer, {
+                  key: 'note:' + noteEditor.staffId + '::' + noteEditor.lane,
+                  t,
+                  project,
+                  catalog,
+                  target: noteEditor,
+                  tempo,
+                  transport,
+                  waves,
+                  waveStatus,
+                  audioClips,
+                  selection,
+                  setSelection,
+                  tool: noteTool,
+                  snapOn,
+                  snapDiv,
+                  pps: notePps,
+                  setPps: setNotePps,
+                  onEdit: session.edit,
+                  onClose: closeNoteEditor,
                 })
               : null,
             phase === 'error'
@@ -11909,7 +14052,8 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'dgc-rowActions' },
-                  h(Button, { variant: 'primary', icon: 'folder', onClick: () => setOpenDialog(true) }, t('openProject')),
+                  h(Button, { variant: 'primary', icon: 'plus', onClick: () => setCreateDialog(true) }, t('newProject')),
+                  h(Button, { icon: 'folder', onClick: () => setOpenDialog(true) }, t('openProject')),
                   state && (state.recent || []).length > 0
                     ? h(Button, { onClick: () => session.openProject(state.recent[0]) }, state.recent[0])
                     : null,
@@ -11949,7 +14093,22 @@ window.__ModuleLoader__.load({
                 setCurveTarget(null);
                 session.openProject(dir);
               },
+              onNewProject: () => {
+                setOpenDialog(false);
+                setCreateDialog(true);
+              },
               onClose: () => setOpenDialog(false),
+            })
+          : null,
+        createDialog
+          ? h(CreateProjectDialog, {
+              t,
+              projectRoot: (state && state.projectRoot) || '',
+              onCreate: (request) => {
+                setCurveTarget(null);
+                return session.createProject(request);
+              },
+              onClose: () => setCreateDialog(false),
             })
           : null,
       );
@@ -12053,6 +14212,20 @@ window.__ModuleLoader__.load({
       curveTypeOf,
       isCurveEditorValue,
     });
+    const noteEditorTestApi = Object.freeze({
+      layout: noteEditorLayout,
+      positionToX: notePositionToX,
+      xToPosition: noteXToPosition,
+      timeToY: noteTimeToY,
+      yToTime: noteYToTime,
+      snapPosition: snapNotePosition,
+      toolForKey: noteToolForKey,
+      buildLaneEditorModel,
+      positionOf: notePositionOf,
+      positionPatch: notePositionPatch,
+      holdTimeOf: noteHoldTimeOf,
+      pickLanePeriodId,
+    });
     const clientPlugin = {
       name: 'gorge-chart-studio-client',
       inject: ['slots', 'locale'],
@@ -12063,6 +14236,7 @@ window.__ModuleLoader__.load({
     Object.defineProperty(clientPlugin, '__playback', { value: playbackTestApi, enumerable: false });
     Object.defineProperty(clientPlugin, '__audio', { value: audioTestApi, enumerable: false });
     Object.defineProperty(clientPlugin, '__curve', { value: curveTestApi, enumerable: false });
+    Object.defineProperty(clientPlugin, '__noteEditor', { value: noteEditorTestApi, enumerable: false });
     return clientPlugin;
   },
 });

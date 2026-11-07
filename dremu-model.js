@@ -134,7 +134,8 @@
  * `project.audio.offset` is its `@Song` `PeriodConfig.timeOffset` (`Song.g`:
  * 0.373), chart time = audio time + offset, and `project.audioPeriods` lists
  * every `@Song` clip with `{ staffId, id, file, relativePath, offset, duration,
- * missing }`. `project.duration = max(element ends, every clip end)`.
+ * missing }`. `project.duration = max(element ends, declared period minLength
+ * ends, every clip end)`.
  *
  * ---------------------------------------------------------------------------
  * CURVES — `evaluateCurve(value, x)` (source of truth; the client preview is a
@@ -1490,11 +1491,21 @@ function refreshElement(element, period) {
   return element
 }
 
-/** Recompute `project.duration` = max(last element end, every audio clip end). */
+/**
+ * Recompute `project.duration` = max(last element end, every declared period
+ * `minLength` end, every audio clip end). Taking `minLength` into account keeps
+ * a freshly created empty project's timeline at its declared starter length
+ * instead of collapsing to zero.
+ */
 function refreshDuration(project) {
   let lastEnd = 0
   for (const staff of project.staffs || []) {
     for (const period of staff.periods || []) {
+      if (Number.isFinite(period.minLength) && period.minLength > 0) {
+        const start = Number.isFinite(period.timeOffset) ? period.timeOffset : 0
+        const declaredEnd = start + period.minLength
+        if (declaredEnd > lastEnd) lastEnd = declaredEnd
+      }
       for (const element of period.elements || []) {
         const end = (element.start || 0) + (element.duration || 0)
         if (Number.isFinite(end) && end > lastEnd) lastEnd = end
@@ -3506,65 +3517,59 @@ export function probeAudioFile(absPath) {
  * `timeOffset: 0`; `applyOps` `add` ops can then create elements, allocating
  * periods as needed.
  *
+ * Optional `options` shape the starter project (used by the Host's "new
+ * project" endpoint/tool):
+ *   - `displayName`  chart staff `displayName` (default `Dremu谱表`)
+ *   - `minLength`    initial `period.minLength` in seconds (default open-ended)
+ *   - `storyboard`   also create an empty storyboard staff (`Storyboard.g`,
+ *                    form `DeentyStoryboard`, same `minLength`)
+ *   - `storyboardDisplayName` its header `displayName` (default `新剧情板`)
+ *   - `eol`          `'\n'` (default) or `'\r\n'`
+ *
  * @param {string} dir    target project directory (may not exist yet).
  * @param {string} [title] project title (defaults to the directory basename).
+ * @param {object} [options] starter-staff options (see above).
  * @returns {object} internal Project model with `dirty: true`.
  */
-export function createEmptyProject(dir, title) {
+export function createEmptyProject(dir, title, options = {}) {
+  const opts = isPlainObject(options) ? options : {}
   const absDir = path.resolve(String(dir === undefined || dir === null || dir === '' ? '.' : dir))
   const project = makeProjectShell(absDir, typeof title === 'string' && title.length > 0 ? title : path.basename(absDir) || 'Untitled')
   project._new = true
   project.dirty = true
-  const qualified = G
-  const staffFile = {
-    usings: [],
-    header: [
-      { type: 'string', name: 'form', value: 'Dremu' },
-      { type: 'string', name: 'displayName', value: 'Dremu谱表' },
-    ],
-    className: 'DremuStaff',
-    annotations: ['ElementStaff'],
-    blankAfterUsings: 1,
-    eol: '\n',
-    members: [
-      {
-        attr: [
-          {
-            type: qualified + 'PeriodConfig^',
-            name: 'config',
-            value: { t: 'obj', type: qualified + 'PeriodConfig', fields: { timeOffset: 0 } },
-          },
-        ],
-        annotation: 'Chart',
-        retType: qualified + 'Element^[]',
-        name: 'Period',
-        chartArray: { elemType: qualified + 'Element', items: [] },
-        returnValue: null,
-      },
-    ],
+  const eol = opts.eol === '\r\n' ? '\r\n' : '\n'
+  let minLength = null
+  if (opts.minLength !== undefined && opts.minLength !== null && Number.isFinite(Number(opts.minLength)) && Number(opts.minLength) >= 0) {
+    minLength = round6(Number(opts.minLength))
   }
-  const staff = {
-    id: 'DremuStaff.g',
-    file: path.join(absDir, 'DremuStaff.g'),
-    kind: 'chart',
-    form: 'Dremu',
-    displayName: 'Dremu谱表',
-    className: 'DremuStaff',
-    periods: [],
-    _staffFile: staffFile,
-    _origText: null,
-    _new: true,
-  }
-  const member = staffFile.members[0]
-  staff.periods.push({
-    id: 'p0',
-    method: 'Period',
-    timeOffset: 0,
-    minLength: null,
-    elements: [],
-    _member: member,
-  })
+  const displayName =
+    typeof opts.displayName === 'string' && opts.displayName.trim().length > 0 ? opts.displayName.trim() : 'Dremu谱表'
+
+  const staffFile = makeStaffFile({ form: 'Dremu', className: 'DremuStaff', displayName, timeOffset: 0, minLength, eol })
+  const staff = buildStaff(project, absDir, 'DremuStaff.g', staffFile, null, project.warnings)
+  staff._new = true
+  staff._origText = null
   project.staffs.push(staff)
+
+  if (opts.storyboard === true) {
+    const storyboardDisplayName =
+      typeof opts.storyboardDisplayName === 'string' && opts.storyboardDisplayName.trim().length > 0
+        ? opts.storyboardDisplayName.trim()
+        : '新剧情板'
+    const storyboardFile = makeStaffFile({
+      form: 'DeentyStoryboard',
+      className: 'Storyboard',
+      displayName: storyboardDisplayName,
+      timeOffset: 0,
+      minLength,
+      eol,
+    })
+    const storyboard = buildStaff(project, absDir, 'Storyboard.g', storyboardFile, null, project.warnings)
+    storyboard._new = true
+    storyboard._origText = null
+    project.staffs.push(storyboard)
+  }
+
   project.form = 'Dremu'
   refreshDuration(project)
   return project

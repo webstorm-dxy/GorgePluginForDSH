@@ -1,6 +1,6 @@
 ---
 name: dremu-chart-editing
-description: "Create and edit Dremu/Gorge .g rhythm-game charts through the gorge_* chart tools: inspect the flattened chart, apply patch/add/remove/duplicate/setMeta/setPeriodConfig/addStaff/removeStaff ops, add or edit audio periods (乐段) with addAudioPeriod/patchAudioPeriod/removeAudioPeriod, validate, and save byte-exact staffs. Use for notes, holds, lanes, storyboard images, periods, new staffs, audio clips, tempo, or retiming work in a Dremu谱面 project, including mapping a section, copying patterns, or fixing validation issues."
+description: "Create and edit Dremu/Gorge .g rhythm-game charts through the gorge_* chart tools: create a brand-new project (gorge_project_create), inspect the flattened chart, apply patch/add/remove/duplicate/setMeta/setPeriodConfig/addStaff/removeStaff ops, add or edit audio periods (乐段) with addAudioPeriod/patchAudioPeriod/removeAudioPeriod, validate, and save byte-exact staffs. Use for notes, holds, lanes, storyboard images, periods, new staffs, audio clips, tempo, retiming, or starting a project from scratch in a Dremu谱面 project, including mapping a section, copying patterns, or fixing validation issues."
 ---
 
 # Dremu chart editing
@@ -16,7 +16,8 @@ the revision stream.
 1. **Locate** — `gorge_project_list` (scans `~/Music` by default; pass
    `refresh: true` to rescan), then `gorge_project_open { dir }`. `dir` is an
    absolute path, a project name under the root, or a path relative to the
-   session cwd.
+   session cwd. To start from scratch, `gorge_project_create` (see below) makes
+   and opens a new folder in one call.
 2. **Inspect before writing** — `gorge_chart_get` with `staffId` and/or `lanes`
    keeps the result small; an unfiltered read caps at 400 elements and sets
    `truncated: true`. `gorge_chart_get { elementId }` returns one element with
@@ -31,6 +32,38 @@ the revision stream.
    Fix error-level issues; warnings are often intentional.
 6. **Save** — `gorge_chart_save`, then report the written files and any
    remaining validation issues.
+7. **Share (optional)** — `gorge_chart_export` packages the live project as
+   `<project>.zip` next to its staffs (staffs, referenced assets, README). It
+   works without saving first and reports the path, byte size and skipped
+   unreferenced assets.
+
+## Creating a brand-new project
+
+`gorge_project_create { name, parent?, template?, minLength? }` creates a
+project folder **on disk** and opens it in the studio:
+
+```json
+{ "name": "MySong", "template": "storyboard", "minLength": 180 }
+```
+
+- `name` is one folder name (no `/ \ : * ? " < > |`, no leading or trailing
+  `.`); the project directory becomes `<parent>/<name>`.
+- `parent` defaults to the configured project root and must already exist.
+  `~` is **not** expanded: pass an absolute path, or a path relative to the
+  project root / session cwd.
+- `template: "chart"` (default) writes `DremuStaff.g` with one empty `@Chart`
+  period; `"storyboard"` also writes `Storyboard.g` (`form = "DeentyStoryboard"`).
+- `minLength` (default 180 s) is each starter period's length, so it also sets
+  the new project's duration; adjust it later with `setPeriodConfig`.
+- The result reports `openPath`, `staffCount`, `elementCount`, `duration`,
+  `files` and `warnings`. The starter files are saved immediately, so the new
+  project opens clean (not dirty).
+- An existing **empty** folder is reused; an existing non-empty folder is a
+  conflict (`ok: false`). Never try to overwrite it — pick another name.
+- Typical start: create the project, then add a lane with `gorge_chart_edit`
+  (`add` a `MainLane`), place notes on it, and save. For an audio-driven chart,
+  import the track with `addAudioPeriod { sourcePath }` first so the timeline
+  length follows the music.
 
 ## The two time spaces
 

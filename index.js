@@ -3,10 +3,11 @@
  *
  * One opened Gorge/Dremu chart project lives here and is exposed three ways:
  *   - browser:  GET /plugins/gorge-chart/state, SSE /plugins/gorge-chart/events,
- *               POST /plugins/gorge-chart/{edit,open,save,reload,import-audio},
- *               GET /plugins/gorge-chart/{projects,file}
- *   - model:    gorge_project_list / gorge_project_open / gorge_chart_get /
- *               gorge_chart_edit / gorge_chart_save / gorge_chart_validate /
+ *               POST /plugins/gorge-chart/{edit,open,create,save,reload,import-audio},
+ *               GET /plugins/gorge-chart/{projects,file,export}
+ *   - model:    gorge_project_list / gorge_project_open / gorge_project_create /
+ *               gorge_chart_get / gorge_chart_edit / gorge_chart_save /
+ *               gorge_chart_export / gorge_chart_validate /
  *               gorge_element_schema tools
  *   - prompt:   a dynamic one-line workspace summary (`gorge-chart:workspace`)
  *
@@ -41,12 +42,14 @@ import { fileURLToPath } from 'node:url'
 import {
   CATALOG,
   applyOps as modelApplyOps,
+  createEmptyProject,
   loadProject,
   probeAudioFile,
   projectToWire,
   saveProject,
   validateProject,
 } from './dremu-model.js'
+import { buildProjectZip } from './gorge-zip.js'
 import { registerSkillProvider } from './skills.js'
 
 // ---------------------------------------------------------------------------
@@ -66,12 +69,21 @@ export const ENDPOINTS = {
   edit: '/plugins/gorge-chart/edit',
   events: '/plugins/gorge-chart/events',
   open: '/plugins/gorge-chart/open',
+  create: '/plugins/gorge-chart/create',
   save: '/plugins/gorge-chart/save',
   file: '/plugins/gorge-chart/file',
+  export: '/plugins/gorge-chart/export',
   projects: '/plugins/gorge-chart/projects',
   reload: '/plugins/gorge-chart/reload',
   importAudio: '/plugins/gorge-chart/import-audio',
 }
+
+/** Default initial period length (seconds) for a project created from the UI/tool. */
+export const DEFAULT_NEW_PROJECT_MIN_LENGTH = 180
+/** Longest accepted new-project folder name. */
+const MAX_PROJECT_NAME_LENGTH = 120
+/** Longest accepted initial period length for a new project (one day). */
+const MAX_NEW_PROJECT_MIN_LENGTH = 86_400
 
 /** Debounce for the recovery snapshot write (`state/project.json`). */
 const PERSIST_DEBOUNCE_MS = 300
@@ -496,6 +508,148 @@ export function resolveProjectDirectory(input, options = {}) {
     else candidate = underRoot || underCwd
   }
   return requireDirectory(candidate)
+}
+
+/** Characters no cross-platform folder name may contain (plus separators). */
+const PROJECT_NAME_FORBIDDEN = /[\\/:*?"<>|\u0000-\u001f]/
+
+/**
+ * Validate one new-project folder name. Returns a human-readable error or
+ * `null` when the name is usable as a single directory entry on this machine.
+ */
+export function validateProjectName(value) {
+  if (typeof value !== 'string') return 'a project name is required'
+  const name = value.trim()
+  if (name.length === 0) return 'a project name is required'
+  if (name.length > MAX_PROJECT_NAME_LENGTH) return `the project name must be at most ${MAX_PROJECT_NAME_LENGTH} characters`
+  if (name === '.' || name === '..') return 'the project name must not be "." or ".."'
+  if (name.startsWith('.')) return 'the project name must not start with "." (the project scanner skips hidden folders)'
+  if (name.endsWith('.')) return 'the project name must not end with "."'
+  if (PROJECT_NAME_FORBIDDEN.test(name)) return 'the project name must not contain any of \\ / : * ? " < > |'
+  return null
+}
+
+/** Resolve a parent directory for a new project (defaults to the project root). */
+function resolveProjectParent(input, projectRoot, cwd) {
+  if (typeof input !== 'string' || input.trim().length === 0) return path.resolve(projectRoot)
+  const value = input.trim()
+  if (path.isAbsolute(value)) return path.normalize(value)
+  const underRoot = path.resolve(projectRoot, value)
+  if (safeStat(underRoot)?.isDirectory()) return underRoot
+  const underCwd = path.resolve(cwd, value)
+  if (safeStat(underCwd)?.isDirectory()) return underCwd
+  return underRoot
+}
+
+/**
+ * Create a brand-new chart project folder with starter staff files on disk.
+ *
+ * `options`: `{ name, parent?, template?, minLength? }`
+ *   - `name`      folder name of the new project (required, one path segment)
+ *   - `parent`    existing directory that will hold it (default: project root;
+ *                 absolute, or relative to the project root / `context.cwd`)
+ *   - `template`  `chart` (default) or `storyboard` (chart + storyboard staffs)
+ *   - `minLength` initial period length in seconds (default 180, `>= 0`)
+ *
+ * The starter project holds `<name>/DremuStaff.g` (an empty Dremu chart staff
+ * with one open `@Chart` period) and, for the storyboard template,
+ * `<name>/Storyboard.g`. An already existing *empty* directory is accepted; a
+ * non-empty one is a conflict and is never overwritten.
+ *
+ * Returns `{ ok: true, name, dir, template, written[] }` or
+ * `{ ok: false, status, error }` (400 bad input, 409 conflict, 500 write
+ * failure). Never throws for user input.
+ */
+export function createProjectFiles(options = {}, context = {}) {
+  const value = isPlainObject(options) ? options : {}
+  const name = typeof value.name === 'string' ? value.name.trim() : ''
+  const nameError = validateProjectName(name)
+  if (nameError) return { ok: false, status: 400, error: nameError }
+
+  const projectRoot =
+    typeof context.projectRoot === 'string' && context.projectRoot.length > 0 ? path.resolve(context.projectRoot) : DEFAULT_PROJECT_ROOT
+  const cwd = typeof context.cwd === 'string' && context.cwd.length > 0 ? path.resolve(context.cwd) : process.cwd()
+  const parent = resolveProjectParent(value.parent, projectRoot, cwd)
+  const parentStat = safeStat(parent)
+  if (!parentStat) return { ok: false, status: 400, error: `the parent directory does not exist: ${parent}` }
+  if (!parentStat.isDirectory()) return { ok: false, status: 400, error: `the parent path is not a directory: ${parent}` }
+
+  let template = 'chart'
+  if (value.template !== undefined && value.template !== null && value.template !== '') {
+    if (value.template !== 'chart' && value.template !== 'storyboard') {
+      return { ok: false, status: 400, error: 'template must be "chart" or "storyboard"' }
+    }
+    template = value.template
+  }
+
+  let minLength = DEFAULT_NEW_PROJECT_MIN_LENGTH
+  if (value.minLength !== undefined && value.minLength !== null) {
+    const requested = Number(value.minLength)
+    if (!Number.isFinite(requested) || requested < 0 || requested > MAX_NEW_PROJECT_MIN_LENGTH) {
+      return {
+        ok: false,
+        status: 400,
+        error: `minLength must be a finite number between 0 and ${MAX_NEW_PROJECT_MIN_LENGTH} seconds`,
+      }
+    }
+    minLength = requested
+  }
+
+  const dir = path.join(parent, name)
+  const existing = safeStat(dir)
+  let createdDirectory = false
+  if (existing) {
+    if (!existing.isDirectory()) return { ok: false, status: 409, error: `"${dir}" already exists and is not a directory` }
+    let entries
+    try {
+      entries = fs.readdirSync(dir)
+    } catch (error) {
+      return { ok: false, status: 400, error: `cannot read "${dir}": ${messageOf(error)}` }
+    }
+    if (entries.length > 0) return { ok: false, status: 409, error: `"${dir}" already exists and is not empty` }
+  } else {
+    try {
+      fs.mkdirSync(dir)
+      createdDirectory = true
+    } catch (error) {
+      return { ok: false, status: error && error.code === 'EEXIST' ? 409 : 400, error: `cannot create "${dir}": ${messageOf(error)}` }
+    }
+  }
+
+  let project
+  try {
+    project = createEmptyProject(dir, name, {
+      displayName: name,
+      minLength,
+      storyboard: template === 'storyboard',
+      storyboardDisplayName: '剧情',
+    })
+  } catch (error) {
+    rollbackEmptyDirectory(dir, createdDirectory)
+    return { ok: false, status: 500, error: `cannot build the starter project: ${messageOf(error)}` }
+  }
+  const saved = saveProject(project)
+  if (saved.errors.length > 0) {
+    rollbackEmptyDirectory(dir, createdDirectory)
+    return { ok: false, status: 500, error: saved.errors.join('; ') }
+  }
+  return {
+    ok: true,
+    name,
+    dir,
+    template,
+    written: Array.isArray(saved.written) ? saved.written.map(String) : [],
+  }
+}
+
+/** Remove a just-created directory when it is still empty (failed creation). */
+function rollbackEmptyDirectory(directory, created) {
+  if (!created) return
+  try {
+    if (fs.readdirSync(directory).length === 0) fs.rmdirSync(directory)
+  } catch {
+    /* the folder may hold a partial write: leave it for inspection */
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1132,30 @@ export function createStore(options = {}) {
     return state()
   }
 
+  /**
+   * Create a brand-new project folder with starter staff files, then open it.
+   *
+   * `options`: `{ name, parent?, template?, minLength? }` (see
+   * `createProjectFiles`); `context.cwd` resolves a relative `parent` against
+   * the calling session's directory. Invalid input is reported, not thrown:
+   * returns `{ ok: false, status, error }`, or the new state plus
+   * `created: { name, dir, template, files }`.
+   */
+  function create(options = {}, context = {}) {
+    if (closed) return { ok: false, status: 500, error: 'the store is closed' }
+    const created = createProjectFiles(options, {
+      projectRoot,
+      cwd: context && typeof context.cwd === 'string' && context.cwd.length > 0 ? context.cwd : process.cwd(),
+    })
+    if (created.ok !== true) return created
+    const snapshot = open(created.dir)
+    return {
+      ok: true,
+      ...snapshot,
+      created: { name: created.name, dir: created.dir, template: created.template, files: created.written },
+    }
+  }
+
   /** Discard in-memory edits and re-read the open project from disk. */
   function reload() {
     if (closed) return { ok: false, error: 'the store is closed' }
@@ -1065,6 +1243,7 @@ export function createStore(options = {}) {
     state,
     wire: computeWire,
     open,
+    create,
     reload,
     applyOps: applyOpsNow,
     save: saveNow,
@@ -1448,6 +1627,48 @@ export function createOpenHandler(store, options = {}) {
 }
 
 /**
+ * POST `/plugins/gorge-chart/create` — body
+ * `{ name, parent?, template?, minLength? }`. Creates a new project folder with
+ * starter staff files (an empty Dremu chart staff, plus a storyboard for
+ * `template: 'storyboard'`) and opens it. Answers 200 with the new state
+ * (+ `projects` for the picker and `created: { name, dir, template, files }`),
+ * 400 for a bad name/parent/template/length, 409 when the target folder already
+ * exists with content, 500 when the starter files cannot be written.
+ */
+export function createCreateHandler(store, options = {}) {
+  const maxBodyBytes = Number.isFinite(options.maxBodyBytes) ? Math.max(1, options.maxBodyBytes) : MAX_SMALL_BODY_BYTES
+  const resolveDirectory = typeof options.resolveDirectory === 'function' ? options.resolveDirectory : () => process.cwd()
+  return async function handleCreate(req, res) {
+    if (guardEndpoint(req, res, ['POST'])) return
+    let body
+    try {
+      body = await readJsonBody(req, maxBodyBytes)
+    } catch (error) {
+      jsonResponse(res, 400, { error: messageOf(error) })
+      return
+    }
+    if (!isPlainObject(body)) {
+      jsonResponse(res, 400, { error: 'expected { name: string, parent?: string, template?: string, minLength?: number }' })
+      return
+    }
+    let outcome
+    try {
+      outcome = store.create(body, { cwd: resolveDirectory() })
+    } catch (error) {
+      jsonResponse(res, 500, { error: messageOf(error) })
+      return
+    }
+    if (!outcome || outcome.ok !== true) {
+      jsonResponse(res, Number.isFinite(outcome && outcome.status) ? outcome.status : 400, {
+        error: (outcome && outcome.error) || 'cannot create the project',
+      })
+      return
+    }
+    jsonResponse(res, 200, { ...outcome, projects: store.projects(true) })
+  }
+}
+
+/**
  * POST `/plugins/gorge-chart/save` — force a synchronous save of the open
  * project. Always answers 200 for an open project: write failures are reported
  * in `errors[]` (the client shows them) because the in-memory document is
@@ -1474,6 +1695,74 @@ export function createSaveHandler(store) {
       rev: result.rev,
       dirty: result.dirty,
     })
+  }
+}
+
+/**
+ * RFC 5987 `filename*` value (percent-encoded UTF-8) for the download header.
+ * `encodeURIComponent` leaves `'()*` alone, which the RFC excludes.
+ */
+function encodeRfc5987(value) {
+  return encodeURIComponent(String(value)).replace(
+    /['()*]/g,
+    (char) => '%' + char.charCodeAt(0).toString(16).toUpperCase(),
+  )
+}
+
+/**
+ * GET `/plugins/gorge-chart/export?assets=referenced|all|none` — download the
+ * open project as a chart `.zip` package.
+ *
+ * The archive is built from the **live** Host model, so unsaved edits are
+ * included: every staff is serialised as it appears in the editor, referenced
+ * assets are copied from the project directory, and `README.md` is carried
+ * along. `assets=referenced` (default) skips files no staff/clip refers to
+ * (reported in `x-export-skipped`); `all` packs the whole project folder and
+ * `none` produces chart files only.
+ *
+ * Answers 200 `application/zip` with `content-length` and both a plain and an
+ * RFC 5987 `content-disposition` filename, 409 when no project is open, and
+ * 500 `{ error }` when packaging fails. Local-only.
+ */
+export function createExportHandler(store) {
+  return async function handleExport(req, res) {
+    if (guardEndpoint(req, res, ['GET'])) return
+    const view = store.view()
+    if (!view.openPath || !view.project) {
+      jsonResponse(res, 409, { error: 'no project is open' })
+      return
+    }
+    let url
+    try {
+      url = new URL(req.url || '/', 'http://localhost')
+    } catch {
+      jsonResponse(res, 400, { error: 'invalid request url' })
+      return
+    }
+    const requested = url.searchParams.get('assets')
+    const assets = requested === 'all' || requested === 'none' ? requested : 'referenced'
+    let result
+    try {
+      result = await buildProjectZip(view.project, { assets })
+    } catch (error) {
+      jsonResponse(res, 500, { error: messageOf(error) })
+      return
+    }
+    const filename = result.filename
+    // ASCII fallback for clients that ignore RFC 5987; the header value must
+    // stay 7-bit safe even for Chinese project names.
+    const asciiFilename = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
+    res.writeHead(200, {
+      'content-type': 'application/zip',
+      'content-length': result.buffer.length,
+      'content-disposition': `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodeRfc5987(filename)}`,
+      'cache-control': 'no-store',
+      'x-export-filename': encodeURIComponent(filename),
+      'x-export-count': String(result.entries.length),
+      'x-export-skipped': String(result.skipped.length),
+      'x-export-assets': assets,
+    })
+    res.end(result.buffer)
   }
 }
 
@@ -1662,7 +1951,9 @@ export function createHandlers(store, options = {}) {
     { path: ENDPOINTS.edit, handler: createEditHandler(store, options) },
     { path: ENDPOINTS.events, handler: createEventsHandler(store) },
     { path: ENDPOINTS.open, handler: createOpenHandler(store, options) },
+    { path: ENDPOINTS.create, handler: createCreateHandler(store, options) },
     { path: ENDPOINTS.save, handler: createSaveHandler(store) },
+    { path: ENDPOINTS.export, handler: createExportHandler(store) },
     { path: ENDPOINTS.file, handler: createFileHandler(store, options) },
     { path: ENDPOINTS.projects, handler: createProjectsHandler(store) },
     { path: ENDPOINTS.reload, handler: createReloadHandler(store) },
@@ -1785,6 +2076,32 @@ const TOOL_PARAMETERS = {
       },
     },
   },
+  project_create: {
+    type: 'object',
+    required: ['name'],
+    additionalProperties: false,
+    properties: {
+      name: {
+        type: 'string',
+        description:
+          'Folder name of the new project (one path segment; no / \\ : * ? " < > |; must not start or end with ".").',
+      },
+      parent: {
+        type: 'string',
+        description:
+          'Existing directory that will hold the new project folder (absolute, or relative to the project root / session directory). Defaults to the project root.',
+      },
+      template: {
+        type: 'string',
+        enum: ['chart', 'storyboard'],
+        description: 'Starter staffs: "chart" (one empty Dremu chart staff, default) or "storyboard" (chart + storyboard staff).',
+      },
+      minLength: {
+        type: 'number',
+        description: 'Initial length of the chart period in seconds (default 180).',
+      },
+    },
+  },
   chart_get: {
     type: 'object',
     additionalProperties: false,
@@ -1807,6 +2124,18 @@ const TOOL_PARAMETERS = {
     },
   },
   chart_save: { type: 'object', additionalProperties: false, properties: {} },
+  chart_export: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      assets: {
+        type: 'string',
+        enum: ['referenced', 'all', 'none'],
+        description:
+          'Which project assets to pack: referenced (default: only files the chart/clips use), all, or none.',
+      },
+    },
+  },
   chart_validate: { type: 'object', additionalProperties: false, properties: {} },
   element_schema: {
     type: 'object',
@@ -1879,7 +2208,7 @@ function compactProjectMeta(project) {
 }
 
 /**
- * Build the seven Gorge/Dremu agent tools over one chart store.
+ * Build the eight Gorge/Dremu agent tools over one chart store.
  *
  * Options:
  *   - resolveDirectory(agent): base directory for relative project paths
@@ -1913,7 +2242,7 @@ export function createTools(store, options = {}) {
         ok: false,
         error: state.openPath
           ? 'the open project could not be read; call gorge_project_open or check the Host log'
-          : 'no project is open; call gorge_project_list then gorge_project_open first',
+          : 'no project is open; call gorge_project_list then gorge_project_open, or gorge_project_create for a new project',
         rev: state.rev,
       }
     }
@@ -2061,6 +2390,34 @@ export function createTools(store, options = {}) {
     }
   }
 
+  /** Create and open a brand-new project folder with starter staffs. */
+  function projectCreate(args = {}, exec) {
+    const outcome = store.create(
+      {
+        name: args.name,
+        parent: args.parent,
+        template: args.template,
+        minLength: args.minLength,
+      },
+      { cwd: baseDirectory(exec) },
+    )
+    if (outcome.ok !== true) return { ok: false, error: outcome.error || 'cannot create the project' }
+    const project = outcome.project
+    const { staffCount, elementCount } = countProjectElements(project)
+    return {
+      ok: true,
+      openPath: outcome.openPath,
+      rev: outcome.rev,
+      dirty: outcome.dirty,
+      title: project ? project.title : args.name,
+      staffCount,
+      elementCount,
+      duration: project ? roundNumber(project.duration) : null,
+      files: outcome.created ? outcome.created.files : [],
+      warnings: project ? capStrings(project.warnings, 20) : [],
+    }
+  }
+
   /** Apply an op batch at the current revision (agent edits never race). */
   function chartEdit(args = {}) {
     const current = store.view().rev
@@ -2085,6 +2442,51 @@ export function createTools(store, options = {}) {
       errors: Array.isArray(result.errors) ? result.errors : [],
       rev: result.rev,
       dirty: result.dirty,
+    }
+  }
+
+  /**
+   * Package the open project as a chart `.zip` next to its staffs.
+   *
+   * The archive reflects the live document (unsaved edits included), so the
+   * agent does not need to save first. The file name comes from the project
+   * directory (`<name>.zip`) and an existing export is overwritten atomically.
+   */
+  async function chartExport(args = {}) {
+    const view = store.view()
+    if (!view.openPath || !view.project) return { ok: false, error: 'no project is open' }
+    const assets = args.assets === 'all' || args.assets === 'none' ? args.assets : 'referenced'
+    let result
+    try {
+      result = await buildProjectZip(view.project, { assets })
+    } catch (error) {
+      return { ok: false, error: messageOf(error) }
+    }
+    const target = path.join(path.resolve(view.openPath), result.filename)
+    const temp = `${target}.${process.pid.toString(36)}${Date.now().toString(36)}.tmp`
+    try {
+      await fs.promises.writeFile(temp, result.buffer)
+      await fs.promises.rename(temp, target)
+    } catch (error) {
+      try {
+        await fs.promises.unlink(temp)
+      } catch {
+        /* nothing left to clean up */
+      }
+      return { ok: false, error: `cannot write ${target}: ${messageOf(error)}` }
+    }
+    return {
+      ok: true,
+      path: target,
+      filename: result.filename,
+      bytes: result.buffer.length,
+      fileCount: result.entries.length,
+      counts: result.counts,
+      assets,
+      skippedCount: result.skipped.length,
+      skipped: result.skipped.slice(0, 20),
+      rev: view.rev,
+      dirty: view.dirty,
     }
   }
 
@@ -2184,6 +2586,12 @@ export function createTools(store, options = {}) {
       safe('gorge_project_open', (args, exec) => projectOpen(args, exec)),
     ),
     defineTool(
+      'gorge_project_create',
+      'Create a brand-new Dremu chart project folder (empty chart staff, plus an optional storyboard staff) and open it in the shared chart studio. The folder is created under the project root unless parent is given; an existing non-empty folder is a conflict. 创建全新谱面项目并打开。',
+      TOOL_PARAMETERS.project_create,
+      safe('gorge_project_create', (args, exec) => projectCreate(args, exec)),
+    ),
+    defineTool(
       'gorge_chart_get',
       'Read the open Dremu chart project shown in the Web UI: project metadata, staffs, periods, lanes, and elements (start/duration in seconds, capped at ~400). Pass elementId to read one element with its full field tree, or detail:true for every field map. 读取谱面数据。',
       TOOL_PARAMETERS.chart_get,
@@ -2203,6 +2611,12 @@ export function createTools(store, options = {}) {
       'Save the open Dremu chart project to disk (atomic .g writes with .g.bak backups) and report the written files. 保存谱面到磁盘。',
       TOOL_PARAMETERS.chart_save,
       safe('gorge_chart_save', () => chartSave()),
+    ),
+    defineTool(
+      'gorge_chart_export',
+      'Export the open Dremu chart project as a .zip chart package (live staff files, referenced assets, README) written next to the project. Unsaved edits are included; no gorge_chart_save needed first. 导出谱面 ZIP 包。',
+      TOOL_PARAMETERS.chart_export,
+      safe('gorge_chart_export', (args) => chartExport(args)),
     ),
     defineTool(
       'gorge_chart_validate',
@@ -2229,7 +2643,7 @@ export function workspaceSummary(store) {
   if (!state.openPath || !state.project) {
     return (
       'Dremu chart workspace: no project is open. Use gorge_project_list to find chart projects under ' +
-      `${store.projectRoot}, then gorge_project_open to open one.`
+      `${store.projectRoot}, then gorge_project_open to open one, or gorge_project_create to start a new project.`
     )
   }
   const project = state.project
@@ -2243,7 +2657,8 @@ export function workspaceSummary(store) {
     `${audioCount} audio period${audioCount === 1 ? '' : 's'} | ${durationText} | ` +
     `rev ${state.rev}${state.dirty ? ' | unsaved changes' : ''} | ${state.openPath}. The user sees this project in the ` +
     'Dremu 谱面工坊 editor panel of the Web UI; use gorge_chart_get to read it, gorge_chart_edit to change it ' +
-    '(edits appear live), and gorge_chart_save to write the .g files to disk.'
+    '(edits appear live), gorge_chart_save to write the .g files to disk, and gorge_chart_export to package the ' +
+    'project as a zip.'
   )
 }
 

@@ -1069,6 +1069,43 @@ test('starts with one chart staff/period and is savable + reloadable', () => {
   assert.deepEqual(saveProject(reloaded), { written: [], errors: [] })
 })
 
+test('options shape the starter staffs and duration (display name, minLength, storyboard)', () => {
+  const dir = path.join(makeTemp('dremu-empty-options-'), 'option-project')
+  const project = createEmptyProject(dir, 'Options', {
+    displayName: '主谱面',
+    minLength: 42,
+    storyboard: true,
+    storyboardDisplayName: '剧情板',
+  })
+  assert.equal(project.duration, 42, 'an empty period declares the project length through minLength')
+  assert.deepEqual(
+    project.staffs.map((staff) => [staff.id, staff.kind, staff.displayName]),
+    [
+      ['DremuStaff.g', 'chart', '主谱面'],
+      ['Storyboard.g', 'storyboard', '剧情板'],
+    ],
+  )
+  assert.ok(project.staffs.every((staff) => staff.periods.length === 1 && staff.periods[0].minLength === 42))
+  assert.equal(project.form, 'Dremu')
+  const saved = saveProject(project)
+  assert.deepEqual(saved.errors, [])
+  assert.deepEqual(saved.written.map((file) => path.basename(file)).sort(), ['DremuStaff.g', 'Storyboard.g'])
+  const reloaded = loadProject(dir)
+  assert.equal(reloaded.staffs.length, 2)
+  assert.equal(reloaded.duration, 42)
+  assert.equal(reloaded.staffs.find((staff) => staff.kind === 'storyboard').form, 'DeentyStoryboard')
+  assert.equal(reloaded.staffs.find((staff) => staff.kind === 'chart').displayName, '主谱面')
+})
+
+test('defaults are unchanged when no options are passed', () => {
+  const dir = path.join(makeTemp('dremu-empty-defaults-'), 'plain')
+  const project = createEmptyProject(dir, 'Plain')
+  assert.equal(project.staffs.length, 1)
+  assert.equal(project.staffs[0].displayName, 'Dremu谱表')
+  assert.equal(project.staffs[0].periods[0].minLength, null)
+  assert.equal(project.duration, 0)
+})
+
 // ===========================================================================
 // K2. addStaff / removeStaff (left pane "添加谱表")
 // ===========================================================================

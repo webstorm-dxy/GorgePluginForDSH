@@ -38,9 +38,11 @@ const REFERENCE_DIR = path.join(SKILL_DIR, 'references')
 const KNOWN_TOOLS = new Set([
   'gorge_project_list',
   'gorge_project_open',
+  'gorge_project_create',
   'gorge_chart_get',
   'gorge_chart_edit',
   'gorge_chart_save',
+  'gorge_chart_export',
   'gorge_chart_validate',
   'gorge_element_schema',
 ])
