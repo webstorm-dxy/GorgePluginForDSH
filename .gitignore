@@ -10,3 +10,6 @@ state/
 demo/
 TheSpectreE/
 TheSpectreE.zip
+
+# Local scratch/downloads cache
+.cache/

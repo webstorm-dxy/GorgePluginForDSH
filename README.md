@@ -100,7 +100,11 @@ Gorge framework declarative `.g` format used by the Dremu chart projects on this
   curves. The panel is stacked: the plot/ruler/segment band occupy the full-width
   top, and the **properties** area below holds the segment list, type selector,
   boundary/flags, complete numeric editor and value-jump warnings (it scrolls if
-  tall). One Apply = one undo step;
+  tall). A value-jump warning card has an **自动修复** button: it vertically
+  shifts the right segment so the shared boundary value matches the left
+  (composite/unknown curves are wrapped in an Addition with a constant offset),
+  leaving all segment times and outer ±∞ bounds untouched; review the draft and
+  Apply. One Apply = one undo step;
   an untouched Apply writes the original value back unchanged.
 * **Auto BPM** — the inspector's BPM row has a **自动 BPM** button. It derives a
   low-band-weighted spectral-flux onset envelope from the cached spectrogram,
@@ -388,7 +392,10 @@ patch, redo restores it, and placing a Tap emits an `add` op with the row's lane
   the main toolbar repaints the panel's beat grid and restoring it returns the
   grid, scrolling the panel's plot changes the shared view and scrolling back
   restores it, and a curve inside an array opens with an item path
-  (`['curves','items',0]`).
+  (`['curves','items',0]`). The auto-fix helper is asserted on two-segment,
+  multi-boundary cascade and composite cases (the composite is wrapped as an
+  addition offset); the UI test edits a constant to 999, clicks the warning
+  card's auto-fix, applies, and checks the boundary samples meet.
 * **Editor page** is still exercised structurally by `tests/client-smoke.mjs`;
   refresh the Web UI and open the sidebar glyph to confirm layout/theming.
 

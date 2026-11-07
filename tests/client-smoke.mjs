@@ -1114,7 +1114,7 @@ assert.deepEqual(clientPlugin.inject, ['slots', 'locale'], 'client plugin inject
 {
   const curve = clientPlugin.__curve;
   assert.ok(curve && typeof curve.readCurveDraft === 'function', 'client exposes no __curve test helpers');
-  for (const name of ['sampleCurve', 'readCurveDraft', 'buildCurveValue', 'normalizeSegments', 'setSegmentBoundary', 'splitCurveSegment', 'addCurveSegmentOutside', 'deleteCurveSegment', 'changeCurveSegmentType', 'defaultSegmentCurve', 'curveNaturalRange', 'curveInitialView', 'curveAlignedView', 'curveValueRange', 'curveParamHandles', 'curveBoundaryWarnings', 'snapCurveTime', 'curveLayout']) {
+  for (const name of ['sampleCurve', 'readCurveDraft', 'buildCurveValue', 'normalizeSegments', 'setSegmentBoundary', 'splitCurveSegment', 'addCurveSegmentOutside', 'deleteCurveSegment', 'changeCurveSegmentType', 'defaultSegmentCurve', 'curveNaturalRange', 'curveInitialView', 'curveAlignedView', 'curveValueRange', 'curveParamHandles', 'curveBoundaryWarnings', 'autoFixCurveBoundaryJumps', 'offsetCurveValue', 'snapCurveTime', 'curveLayout']) {
     assert.equal(typeof curve[name], 'function', '__curve.' + name + ' is not a function');
   }
 
@@ -1263,6 +1263,52 @@ assert.deepEqual(clientPlugin.inject, ['slots', 'locale'], 'client plugin inject
   assert.equal(jumps.length, 1, 'a 1 -> 2 boundary must be reported as a jump');
   assert.equal(jumps[0].left, 1);
   assert.equal(jumps[0].right, 2);
+
+  const fixedJump = curve.autoFixCurveBoundaryJumps(jumpDraft);
+  assert.equal(curve.curveBoundaryWarnings(fixedJump).length, 0, 'auto-fix left a value jump behind');
+  assert.equal(fixedJump.edited, true, 'auto-fix must mark the draft as edited');
+  assert.equal(fixedJump.segments.length, jumpDraft.segments.length, 'auto-fix changed the segment count');
+  assert.equal(fixedJump.segments[1].curve.fields.value, 1, 'auto-fix did not shift the right constant to the left value');
+
+  const cascadeValue = {
+    t: 'arr',
+    type: 'GorgeFramework.FunctionPiece',
+    items: [
+      { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: constant(1), startX: 0, endX: 1 } },
+      { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: constant(2), startX: 1, endX: 2 } },
+      { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: constant(4), startX: 2, endX: 3 } },
+    ],
+  };
+  const cascadeDraft = curve.readCurveDraft(
+    { t: 'obj', type: 'GorgeFramework.PiecewiseFunctionCurve', fields: { functionPieces: cascadeValue } },
+    { fallbackRange: [-1, 1] },
+  );
+  assert.equal(curve.curveBoundaryWarnings(cascadeDraft).length, 2);
+  const cascadeFixed = curve.autoFixCurveBoundaryJumps(cascadeDraft);
+  assert.equal(curve.curveBoundaryWarnings(cascadeFixed).length, 0, 'auto-fix did not cascade through multiple boundaries');
+  assert.ok(cascadeFixed.segments.every((segment) => segment.curve.fields.value === 1), 'cascade auto-fix should meet the first segment value');
+
+  const compositeJump = curve.readCurveDraft(
+    {
+      t: 'obj',
+      type: 'GorgeFramework.PiecewiseFunctionCurve',
+      fields: {
+        functionPieces: {
+          t: 'arr',
+          type: 'GorgeFramework.FunctionPiece',
+          items: [
+            { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: constant(0), startX: 0, endX: 1 } },
+            { t: 'obj', type: 'GorgeFramework.FunctionPiece', fields: { functionCurve: composite, startX: 1, endX: 2 } },
+          ],
+        },
+      },
+    },
+    { fallbackRange: [-1, 1] },
+  );
+  const compositeFixed = curve.autoFixCurveBoundaryJumps(compositeJump);
+  assert.equal(curve.curveBoundaryWarnings(compositeFixed).length, 0, 'auto-fix failed for a composite curve');
+  assert.equal(compositeFixed.segments[1].curve.type, 'GorgeFramework.AdditionFunctionCurve', 'composite auto-fix should wrap the original curve with an addition offset');
+  assert.ok(Math.abs(curve.sampleCurve(compositeFixed.segments[1].curve, 1)) < 1e-6, 'composite auto-fix did not shift the boundary value');
 
   // Walk every piecewise curve in the loaded project: the real corpus has
   // infinite bounds, zero-length head pieces and omitted closed flags; an
@@ -2017,6 +2063,50 @@ if (!isRealMode) {
   assert.equal(outsidePieces.length, 2);
   assert.equal(outsidePieces[0].fields.endX, outsidePieces[1].fields.startX);
   assert.ok(Math.abs(outsidePieces[1].fields.endX - 1.75) < 1e-6, 'outside segment did not reach the clicked time');
+
+  // The outside Constant(0) segment creates a value jump against the linear
+  // curve; the warning card must offer a one-click auto-fix that shifts the
+  // right segment, and the fixed draft must apply cleanly.
+  curveApplyButton = await openCurvePanel();
+  tree = await settle();
+  const outsideSegmentRows = segmentRowHosts();
+  assert.ok(outsideSegmentRows.length >= 2, 'outside segment was not listed after reopening');
+  outsideSegmentRows[1].props.onClick({ preventDefault() {}, stopPropagation() {}, target: outsideSegmentRows[1] });
+  tree = await settle();
+  const constantValueRow = findHost(
+    tree,
+    (host) => hasClassToken(host, 'dgc-field') && flattenText(host.rendered, []).join(' ').trim() === 'value',
+  );
+  assert.ok(constantValueRow, 'selected Constant segment has no value field');
+  const constantValueInput = flattenHosts(constantValueRow.rendered, []).find((host) => host.tagName === 'INPUT');
+  assert.ok(constantValueInput, 'Constant value input missing');
+  constantValueInput.props.onChange({ target: { value: '999' } });
+  constantValueInput.props.onBlur({ target: { value: '999' }, currentTarget: constantValueInput });
+  tree = await settle();
+  assert.ok(flattenText(tree, []).join(' ').includes('curveValueJump'), 'value-jump warning missing after editing the segment value');
+  const autoFixButton = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').includes('curveAutoFix');
+  });
+  assert.ok(autoFixButton, 'value-jump warning has no auto-fix button');
+  autoFixButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: autoFixButton });
+  tree = await settle();
+  assert.ok(!flattenText(tree, []).join(' ').includes('curveValueJump'), 'auto-fix did not clear the value-jump warning');
+  const autoFixedApplyButton = findHost(tree, (host) => {
+    if (!host.props || typeof host.props.onClick !== 'function') return false;
+    return flattenText(host.rendered, []).join(' ').trim() === 'apply';
+  });
+  const autoFixedBatch = await applyLastCurve(autoFixedApplyButton);
+  const autoFixedOp = autoFixedBatch && autoFixedBatch.ops && autoFixedBatch.ops.find((op) => op.op === 'patch');
+  assert.ok(autoFixedOp, 'auto-fixed curve did not patch the element');
+  const autoFixedPieces = autoFixedOp.value.fields.functionPieces.items;
+  assert.equal(autoFixedPieces.length, 2, 'auto-fix changed the segment count');
+  const fixedBoundary = autoFixedPieces[1].fields.startX;
+  const fixedLeft = curveApi.sampleCurve(autoFixedPieces[0].fields.functionCurve, fixedBoundary);
+  const fixedRight = curveApi.sampleCurve(autoFixedPieces[1].fields.functionCurve, fixedBoundary);
+  assert.ok(Number.isFinite(fixedLeft) && Number.isFinite(fixedRight), 'auto-fixed boundary samples are not finite');
+  assert.ok(Math.abs(fixedLeft - fixedRight) < 1e-6, 'auto-fix did not make the applied boundary continuous');
+  assert.notEqual(autoFixedPieces[1].fields.functionCurve.fields.value, 999, 'auto-fix left the edited 999 value in place');
 }
 
 // 5a. Optional schema fields are switched on/off with checkboxes. Checking a

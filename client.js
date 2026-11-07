@@ -207,6 +207,8 @@ window.__ModuleLoader__.load({
       curveWillConvert: '新建段或拖动段边界后会转换为分段函数；段外返回 0。',
       curveConverted: '分段函数：段外返回 0。',
       curveValueJump: '段边界数值不连续',
+      curveAutoFix: '自动修复',
+      curveAutoFixHint: '把右侧段曲线整体平移，使边界数值与左侧一致',
       curveValueJumpAt: '{time}s 处：左 {left} / 右 {right}',
       curveNoJump: '段边界数值连续',
       curveElementOrigin: '元素时间',
@@ -477,6 +479,8 @@ window.__ModuleLoader__.load({
       curveWillConvert: 'Adding a segment or moving a boundary converts this curve to a piecewise function (0 outside its pieces).',
       curveConverted: 'Piecewise function: 0 outside its pieces.',
       curveValueJump: 'Value jump at a segment boundary',
+      curveAutoFix: 'Auto fix',
+      curveAutoFixHint: 'Shift the right segment so its value matches the left at the boundary',
       curveValueJumpAt: 'at {time}s: left {left} / right {right}',
       curveNoJump: 'Boundary values are continuous',
       curveElementOrigin: 'Element time',
@@ -1696,6 +1700,9 @@ window.__ModuleLoader__.load({
       '.dgc-curveWarn{border:1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent);background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 9%, transparent);border-radius:8px;padding:6px 8px;margin:6px 0;font-size:11px;line-height:16px;color:var(--dsw-alias-label-primary)}',
       '.dgc-curveWarn strong{display:block;font-weight:600;margin-bottom:2px}',
       '.dgc-curveWarnRow{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
+      '.dgc-curveWarnHead{display:flex;align-items:center;gap:6px;margin-bottom:2px}',
+      '.dgc-curveWarnHead strong{flex:1 1 auto;display:block;margin:0;font-weight:600}',
+      '.dgc-curveAutoFix{height:22px;padding:0 7px;font-size:11px;flex:0 0 auto}',
       '.dgc-curveNote{margin:8px 0 2px;padding:6px 8px;border-radius:7px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
       '.dgc-curveFoot{display:flex;align-items:center;gap:10px;padding:6px 12px;flex:0 0 auto;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);font-size:11.5px;color:var(--dsw-alias-label-secondary);min-width:0}',
       '.dgc-curveHint{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
@@ -4212,6 +4219,88 @@ window.__ModuleLoader__.load({
       return warnings;
     }
 
+    /** Shift a curve vertically without changing its shape. */
+    function offsetCurveValue(curve, delta) {
+      if (!Number.isFinite(delta) || Math.abs(delta) < 1e-12) return deepClone(curve);
+      if (!isCurveEditorValue(curve)) {
+        return curveObject('AdditionFunctionCurve', {
+          firstFunctionCurve: curve,
+          secondFunctionCurve: curveObject('ConstantFunctionCurve', { value: round(delta, 6) }),
+        });
+      }
+      const type = curveTypeOf(curve);
+      const fields = curve && curve.fields ? curve.fields : {};
+      switch (type) {
+        case 'ConstantFunctionCurve':
+          return curveSetNumericField(curve, 'value', curveFieldNumber(curve, 'value', 0) + delta);
+        case 'LinearFunctionCurve':
+          return curveSetNumericField(curve, 'b', curveFieldNumber(curve, 'b', 0) + delta);
+        case 'LinearCurve':
+          return curveSetNumericFields(curve, {
+            valueStart: curveFieldNumber(curve, 'valueStart', 0) + delta,
+            valueEnd: curveFieldNumber(curve, 'valueEnd', 1) + delta,
+          });
+        case 'CubicHermiteSpline': {
+          const start = curvePointOf(curve, 'startPoint', 0, 0);
+          const end = curvePointOf(curve, 'endPoint', 1, 1);
+          let next = curveSetPoint(curve, 'startPoint', start.x, start.y + delta);
+          next = curveSetPoint(next, 'endPoint', end.x, end.y + delta);
+          return next;
+        }
+        case 'PeriodicFunctionCurve':
+        case 'AxialSymmetricFunctionCurve': {
+          const inner = fields.functionCurve;
+          const shifted = isCurveEditorValue(inner)
+            ? offsetCurveValue(inner, delta)
+            : curveObject('ConstantFunctionCurve', { value: round(delta, 6) });
+          return curveSetField(curve, 'functionCurve', shifted);
+        }
+        case 'AdditionFunctionCurve': {
+          if (isCurveEditorValue(fields.firstFunctionCurve)) {
+            return curveSetField(curve, 'firstFunctionCurve', offsetCurveValue(fields.firstFunctionCurve, delta));
+          }
+          if (isCurveEditorValue(fields.secondFunctionCurve)) {
+            return curveSetField(curve, 'secondFunctionCurve', offsetCurveValue(fields.secondFunctionCurve, delta));
+          }
+          return curveSetField(curve, 'firstFunctionCurve', curveObject('ConstantFunctionCurve', { value: round(delta, 6) }));
+        }
+        default:
+          // Composite and any future type: preserve the original function and
+          // add a constant offset.
+          return curveObject('AdditionFunctionCurve', {
+            firstFunctionCurve: deepClone(curve),
+            secondFunctionCurve: curveObject('ConstantFunctionCurve', { value: round(delta, 6) }),
+          });
+      }
+    }
+
+    /**
+     * Remove value jumps at internal segment boundaries by shifting each right
+     * segment (and, in turn, the next) so both sides meet. Segment boundaries
+     * themselves never move; the outer ±∞ bounds are untouched.
+     */
+    function autoFixCurveBoundaryJumps(draft) {
+      const next = cloneCurveDraft(draft);
+      let changed = false;
+      for (let i = 1; i < next.segments.length; i += 1) {
+        const boundary = next.segments[i].start;
+        if (!Number.isFinite(boundary)) continue;
+        const left = sampleCurve(next.segments[i - 1].curve, boundary);
+        const right = sampleCurve(next.segments[i].curve, boundary);
+        if (left === null || right === null || !Number.isFinite(left) || !Number.isFinite(right)) continue;
+        const delta = left - right;
+        const tolerance = 1e-6 * Math.max(1, Math.abs(left), Math.abs(right));
+        if (Math.abs(delta) <= tolerance) continue;
+        next.segments[i] = Object.assign({}, next.segments[i], {
+          curve: offsetCurveValue(next.segments[i].curve, delta),
+        });
+        changed = true;
+      }
+      if (!changed) return draft;
+      next.edited = true;
+      return next;
+    }
+
     /** Initial x view: finite segment bounds plus each inner curve's own domain. */
     function curveInitialView(draft, tempo, fallbackRange) {
       const bpm = tempo && Number.isFinite(tempo.bpm) && tempo.bpm > 0 ? tempo.bpm : 120;
@@ -5076,6 +5165,7 @@ window.__ModuleLoader__.load({
       const yRange = useMemo(() => curveValueRange(draft, view), [draft, view]);
       const yRangeRef = useRef(yRange);
       const warnings = useMemo(() => curveBoundaryWarnings(draft), [draft]);
+      const autoFixWarnings = useCallback(() => setDraft((current) => autoFixCurveBoundaryJumps(current)), []);
       const boundaries = curveBoundaries(draft);
       const foundIndex = draft.segments.findIndex((segment) => segment.id === selectedId);
       const selectedIndex = foundIndex >= 0 ? foundIndex : draft.segments.length ? 0 : -1;
@@ -5664,7 +5754,21 @@ window.__ModuleLoader__.load({
             ? h(
                 'div',
                 { className: 'dgc-curveWarn' },
-                h('strong', null, t('curveValueJump') + ' × ' + warnings.length),
+                h(
+                  'div',
+                  { className: 'dgc-curveWarnHead' },
+                  h('strong', null, t('curveValueJump') + ' × ' + warnings.length),
+                  h(
+                    Button,
+                    {
+                      variant: 'ghost',
+                      className: 'dgc-curveAutoFix',
+                      title: t('curveAutoFixHint'),
+                      onClick: autoFixWarnings,
+                    },
+                    t('curveAutoFix'),
+                  ),
+                ),
                 warnings.map((warning) =>
                   h(
                     'div',
@@ -5734,7 +5838,23 @@ window.__ModuleLoader__.load({
         { className: 'dgc-curveFoot' },
         h('span', { className: 'dgc-curveHint' }, t('curvePanelHint')),
         h('span', { className: 'dgc-spacer' }),
-        warnings.length ? h('span', { className: 'dgc-err' }, t('curveValueJump') + ' × ' + warnings.length) : h('span', { className: 'dgc-listRowSlim' }, t('curveNoJump')),
+        warnings.length
+          ? h(
+              'span',
+              { className: 'dgc-err', style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+              t('curveValueJump') + ' × ' + warnings.length,
+              h(
+                Button,
+                {
+                  variant: 'ghost',
+                  className: 'dgc-curveAutoFix',
+                  title: t('curveAutoFixHint'),
+                  onClick: autoFixWarnings,
+                },
+                t('curveAutoFix'),
+              ),
+            )
+          : h('span', { className: 'dgc-listRowSlim' }, t('curveNoJump')),
         h('span', { className: 'dgc-listRowSlim' }, t('curveTimeAxis')),
         h('span', { className: 'dgc-listRowSlim' }, t('curveBeatGrid')),
       );
@@ -11926,6 +12046,8 @@ window.__ModuleLoader__.load({
       curveValueRange,
       curveParamHandles,
       curveBoundaryWarnings,
+      autoFixCurveBoundaryJumps,
+      offsetCurveValue,
       snapCurveTime,
       curveLayout,
       curveTypeOf,
