@@ -1290,6 +1290,15 @@ window.__ModuleLoader__.load({
       let lastEnd = 0;
       for (const staff of project.staffs || []) {
         for (const period of staff.periods || []) {
+          // A period's declared minLength extends the chart even when it has
+          // no elements (an empty 180 s chart must not shrink to its last
+          // note after the first edit — the Host's refreshDuration does this
+          // too).
+          if (Number.isFinite(period.minLength) && period.minLength > 0) {
+            const start = Number.isFinite(period.timeOffset) ? period.timeOffset : 0;
+            const declaredEnd = start + period.minLength;
+            if (declaredEnd > lastEnd) lastEnd = declaredEnd;
+          }
           for (const element of period.elements || []) {
             const end = (element.start || 0) + (element.duration || 0);
             if (Number.isFinite(end) && end > lastEnd) lastEnd = end;
@@ -2888,6 +2897,8 @@ window.__ModuleLoader__.load({
       const durationRef = useRef(fallbackDuration || 0);
       /** Wall-clock anchor: chart time + performance.now() + rate at anchor. */
       const anchorRef = useRef({ chart: 0, at: 0, rate: 1 });
+      /** Last time we assigned currentTime to each element (seek-storm guard). */
+      const seekStampRef = useRef(new Map());
       const clipSignature = (clips || [])
         .map((clip, index) => audioClipKey(clip, index) + ':' + (clip.offset || 0) + ':' + (clip.duration === null || clip.duration === undefined ? '' : clip.duration))
         .join('||');
@@ -2914,6 +2925,7 @@ window.__ModuleLoader__.load({
           }
         }
         audioMapRef.current.clear();
+        seekStampRef.current.clear();
       }, []);
 
       const ensureAudio = useCallback((clip) => {
@@ -2971,6 +2983,7 @@ window.__ModuleLoader__.load({
           } catch (error) {
             /* ignore */
           }
+          seekStampRef.current.delete(entry.audio);
           audioMapRef.current.delete(key);
         }
       }, [clipSignature, ensureAudio]);
@@ -3019,10 +3032,18 @@ window.__ModuleLoader__.load({
           }
           const target = Math.max(0, chartTime - offset);
           if (settings.seek || audio.paused || Math.abs(audio.currentTime - target) > 0.35) {
-            try {
-              audio.currentTime = target;
-            } catch (error) {
-              /* ignore */
+            // A media element can keep reporting the pre-seek position (often
+            // 0) for a while; only re-issue the seek a few times per second so
+            // a slow seek cannot turn into a seek storm.
+            const nowMs = performance.now();
+            const lastSeek = seekStampRef.current.get(audio) || 0;
+            if (settings.seek || audio.paused || nowMs - lastSeek > 200) {
+              try {
+                audio.currentTime = target;
+              } catch (error) {
+                /* ignore */
+              }
+              seekStampRef.current.set(audio, nowMs);
             }
           }
           if (!isPlaying) {
@@ -3047,6 +3068,10 @@ window.__ModuleLoader__.load({
           rafRef.current = 0;
           return;
         }
+        // Wall-clock expectation: the position playback should be at right now.
+        // The media element is only trusted while it agrees with it.
+        const anchor = anchorRef.current;
+        const expected = anchor.chart + ((performance.now() - anchor.at) / 1000) * anchor.rate;
         // Prefer an actually-playing clip as the clock; otherwise extrapolate
         // from the wall clock (gaps, loading media, missing audio).
         let authoritative = null;
@@ -3060,10 +3085,18 @@ window.__ModuleLoader__.load({
         }
         let current;
         if (authoritative) {
-          current = authoritative.audio.currentTime + authoritative.offset;
-        } else {
-          const anchor = anchorRef.current;
-          current = anchor.chart + ((performance.now() - anchor.at) / 1000) * anchor.rate;
+          const mediaChart = authoritative.audio.currentTime + authoritative.offset;
+          // A media element that has not applied the seek yet (or restarted at
+          // 0) must not drag the playhead back to the start. Keep the wall
+          // clock instead; syncClips below re-issues the seek.
+          if (Math.abs(mediaChart - expected) > 0.75) {
+            authoritative = null;
+          } else {
+            current = mediaChart;
+          }
+        }
+        if (!authoritative) {
+          current = expected;
         }
         // Refine durations once an element knows its real length.
         let total = Number.isFinite(durationRef.current) ? durationRef.current : 0;
@@ -7791,7 +7824,7 @@ window.__ModuleLoader__.load({
 
     /** Bottom transport: play/pause, clock, beat, scrubber, rate, follow. */
     function TransportBar(props) {
-      const { t, transport, project, follow, setFollow, selection } = props;
+      const { t, transport, project, follow, setFollow, selection, onPlay } = props;
       const tempo = (project && project.tempo) || { bpm: 120, offset: 0 };
       const duration = Math.max(1, transport.duration || (project && project.duration) || 0);
       const beat = ((transport.time - (tempo.offset || 0)) * (tempo.bpm || 120)) / 60;
@@ -7803,7 +7836,8 @@ window.__ModuleLoader__.load({
           {
             variant: 'primary',
             icon: transport.playing ? 'pause' : 'play',
-            onClick: () => (transport.playing ? transport.pause() : transport.play()),
+            onClick: () =>
+              transport.playing ? transport.pause() : typeof onPlay === 'function' ? onPlay() : transport.play(),
             title: transport.playing ? t('pause') : t('play'),
           },
           transport.playing ? t('pause') : t('play'),
@@ -9885,6 +9919,34 @@ window.__ModuleLoader__.load({
       audioClipsRef.current = audioClips || [];
       const transportRef = useRef(transport);
       transportRef.current = transport;
+      /**
+       * Chart time at the judgement line. The wheel scrolls this view without
+       * touching the transport; playing (Space / the transport bar) seeks here
+       * first (playFromEditor in the page), so editing starts at the line
+       * rather than at a stale clock. While the transport runs, the line
+       * follows it unless the user scrolled.
+       */
+      const viewAnchorRef = useRef(null);
+      if (viewAnchorRef.current === null) {
+        const playhead = transport && transport.timeRef && Number.isFinite(transport.timeRef.current)
+          ? transport.timeRef.current
+          : transport && Number.isFinite(transport.time)
+            ? transport.time
+            : 0;
+        viewAnchorRef.current = Math.max(0, playhead);
+      }
+      const followPlaybackRef = useRef(true);
+      const wasPlayingRef = useRef(false);
+      /** Last transport time seen while parked, to follow explicit seeks. */
+      const lastPausedTransportRef = useRef(null);
+      const onAnchorChangeRef = useRef(props.onAnchorChange);
+      onAnchorChangeRef.current = props.onAnchorChange;
+      const reportedAnchorRef = useRef(null);
+      const reportAnchor = useCallback((value) => {
+        if (reportedAnchorRef.current === value) return;
+        reportedAnchorRef.current = value;
+        if (typeof onAnchorChangeRef.current === 'function') onAnchorChangeRef.current(value);
+      }, []);
 
       // --- Size tracking -----------------------------------------------------
       useEffect(() => {
@@ -9948,6 +10010,23 @@ window.__ModuleLoader__.load({
           brand: cssToken('--dsw-alias-brand-primary', '#5b8cff'),
         };
         const now = transportRef.current ? transportRef.current.time : 0;
+        const playingNow = !!(transportRef.current && transportRef.current.playing);
+        if (playingNow && !wasPlayingRef.current) followPlaybackRef.current = true;
+        wasPlayingRef.current = playingNow;
+        if (playingNow) {
+          if (followPlaybackRef.current) viewAnchorRef.current = now;
+        } else {
+          // An explicit transport seek (rewind, scrubber, arrow keys, lane
+          // jump) moves the line too; free scrolling leaves the transport
+          // alone, so it is the only paused-time change we must not adopt.
+          const previous = lastPausedTransportRef.current;
+          if (Number.isFinite(now) && (previous === null || Math.abs(now - previous) > 1e-6)) {
+            viewAnchorRef.current = Math.max(0, now);
+          }
+        }
+        lastPausedTransportRef.current = Number.isFinite(now) ? now : null;
+        const anchor = Number.isFinite(viewAnchorRef.current) ? viewAnchorRef.current : now;
+        reportAnchor(anchor);
         const currentPps = Math.max(1, ppsRef.current);
         const currentModel = modelRef.current;
         const currentNotes = notesRef.current;
@@ -9959,8 +10038,8 @@ window.__ModuleLoader__.load({
         const secondsPerBeat = 60 / bpm;
         const origin = tempoRef.current && Number.isFinite(tempoRef.current.offset) ? tempoRef.current.offset : 0;
         const xOf = (position) => notePositionToX(position, currentView);
-        const yOf = (time) => noteTimeToY(time, now, currentPps, currentView);
-        const timeOf = (y) => noteYToTime(y, now, currentPps, currentView);
+        const yOf = (time) => noteTimeToY(time, anchor, currentPps, currentView);
+        const timeOf = (y) => noteYToTime(y, anchor, currentPps, currentView);
 
         ctx.fillStyle = colors.background;
         ctx.fillRect(0, 0, width, height);
@@ -10320,8 +10399,8 @@ window.__ModuleLoader__.load({
         ctx.lineTo(width, Math.round(currentView.judgeY) + 0.5);
         ctx.stroke();
         ctx.globalAlpha = 1;
-        const judgeBeat = (now - origin) / secondsPerBeat;
-        const judgeLabel = t('noteEditorJudge') + ' · ' + formatTime(now) + ' · ♪' + formatNum(judgeBeat, 2);
+        const judgeBeat = (anchor - origin) / secondsPerBeat;
+        const judgeLabel = t('noteEditorJudge') + ' · ' + formatTime(anchor) + ' · ♪' + formatNum(judgeBeat, 2);
         ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'bottom';
@@ -10497,7 +10576,7 @@ window.__ModuleLoader__.load({
           const position = snapEditorPosition(noteXToPosition(hovered.x, currentView), hovered.alt);
           return { type: currentToolNow, start: time, position, holdTime: Math.max(1e-3, 60 / bpm) };
         }
-      }, [audioClips, catalog, layout, model, notes, pps, selection, snapDiv, snapOn, t, tempo, tool, transport.time, waves, waveStatus]);
+      }, [audioClips, catalog, layout, model, notes, pps, reportAnchor, selection, snapDiv, snapOn, t, tempo, tool, transport.playing, transport.time, waves, waveStatus]);
 
       paintRef.current = paint;
 
@@ -10513,12 +10592,11 @@ window.__ModuleLoader__.load({
         return { x: event.clientX - rect.left, y: event.clientY - rect.top };
       }, []);
 
-      const currentAnchorTime = useCallback(() => {
-        const transportNow = transportRef.current;
-        if (!transportNow) return 0;
-        if (transportNow.timeRef && Number.isFinite(transportNow.timeRef.current)) return transportNow.timeRef.current;
-        return Number.isFinite(transportNow.time) ? transportNow.time : 0;
-      }, []);
+      /** Chart time drawn on the judgement line (the editor's scroll position). */
+      const currentAnchorTime = useCallback(
+        () => (Number.isFinite(viewAnchorRef.current) ? viewAnchorRef.current : 0),
+        [],
+      );
 
       /** Note / ruler hit-testing at a canvas point. */
       const hitTest = useCallback((point, layoutNow, anchorNow) => {
@@ -10571,8 +10649,12 @@ window.__ModuleLoader__.load({
         const transportNow = transportRef.current;
         if (!transportNow) return;
         const duration = Math.max(0, Number.isFinite(transportNow.duration) ? transportNow.duration : 0);
-        transportNow.seek(clamp(time, 0, Math.max(duration, 0)));
-      }, []);
+        const target = clamp(time, 0, Math.max(duration, 0));
+        followPlaybackRef.current = true;
+        viewAnchorRef.current = target;
+        reportAnchor(target);
+        transportNow.seek(target);
+      }, [reportAnchor]);
 
       // --- Gesture starts ----------------------------------------------------
       const beginCreate = useCallback((point, type, anchorNow, loose) => {
@@ -10915,8 +10997,6 @@ window.__ModuleLoader__.load({
 
       const onWheel = useCallback((event) => {
         if (event && typeof event.preventDefault === 'function') event.preventDefault();
-        const transportNow = transportRef.current;
-        if (!transportNow) return;
         const layoutNow = layoutRef.current;
         if (event.ctrlKey || event.metaKey) {
           const factor = Math.exp(-event.deltaY * 0.0015);
@@ -10925,21 +11005,31 @@ window.__ModuleLoader__.load({
           if (setPps) setPps((previous) => round(clamp(previous * factor, NOTE_PPS_MIN, NOTE_PPS_MAX), 2));
           return;
         }
-        const delta = event.deltaY / Math.max(1, ppsRef.current);
-        const currentTime = transportNow.timeRef && Number.isFinite(transportNow.timeRef.current) ? transportNow.timeRef.current : transportNow.time;
-        const duration = Math.max(
-          Number.isFinite(transportNow.duration) ? transportNow.duration : 0,
-          (projectRef.current && Number.isFinite(projectRef.current.duration)) ? projectRef.current.duration : 0,
-          currentTime,
-        );
-        transportNow.seek(clamp(currentTime + delta, 0, Math.max(0, duration)));
-        // Keep the pointer ghost current after a wheel seek.
+        // Wheel scrolls the editor's own time view (the judgement line) and
+        // leaves the transport alone, so browsing/editing never restarts the
+        // song. Time increases upward: scrolling up reveals later notes.
+        const transportNow = transportRef.current;
+        if (transportNow && transportNow.playing) {
+          transportNow.pause();
+          // Keep the paint below from re-adopting the paused transport time
+          // (which would undo the scroll we are about to apply).
+          const pausedTime = transportNow.timeRef && Number.isFinite(transportNow.timeRef.current) ? transportNow.timeRef.current : transportNow.time;
+          lastPausedTransportRef.current = Number.isFinite(pausedTime) ? pausedTime : null;
+        }
+        followPlaybackRef.current = false;
+        const delta = -event.deltaY / Math.max(1, ppsRef.current);
+        const projectDuration = projectRef.current && Number.isFinite(projectRef.current.duration) ? projectRef.current.duration : 0;
+        const limit = projectDuration > 0 ? projectDuration : Infinity;
+        const anchor = Number.isFinite(viewAnchorRef.current) ? viewAnchorRef.current : 0;
+        viewAnchorRef.current = clamp(anchor + delta, 0, Math.max(0, limit));
+        reportAnchor(viewAnchorRef.current);
+        // Keep the pointer ghost current after a view scroll.
         const point = localPoint(event);
         if (point.y >= 0 && point.y <= layoutNow.h && point.x >= layoutNow.left && point.x <= layoutNow.right) {
           hoverRef.current = { area: 'lane', x: point.x, y: point.y, alt: !!event.altKey };
         }
         paintRef.current && paintRef.current();
-      }, [localPoint, setPps]);
+      }, [localPoint, reportAnchor, setPps]);
 
       // --- Render ------------------------------------------------------------
       const staffLabel = model ? model.staffLabel : target.staffId;
@@ -12889,6 +12979,7 @@ window.__ModuleLoader__.load({
       const {
         preview,
         closePreview,
+        playFromEditor,
         transport,
         session,
         selection,
@@ -12915,6 +13006,7 @@ window.__ModuleLoader__.load({
         selectLaneNotes,
         nudgeNoteSelection,
       } = actions;
+      const startPlayback = typeof playFromEditor === 'function' ? playFromEditor : () => transport.play();
 
       const target = event.target;
       if (preview) {
@@ -12926,7 +13018,7 @@ window.__ModuleLoader__.load({
         if (event.key === ' ') {
           event.preventDefault();
           if (transport.playing) transport.pause();
-          else transport.play();
+          else startPlayback();
           return;
         }
         if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
@@ -12953,7 +13045,7 @@ window.__ModuleLoader__.load({
         if (event.key === ' ') {
           event.preventDefault();
           if (transport.playing) transport.pause();
-          else transport.play();
+          else startPlayback();
           return;
         }
         // Keep chart-editing shortcuts (delete/undo/duplicate/...) away from
@@ -13001,7 +13093,7 @@ window.__ModuleLoader__.load({
       if (event.key === ' ') {
         event.preventDefault();
         if (transport.playing) transport.pause();
-        else transport.play();
+        else startPlayback();
         return;
       }
       if (event.key === 'Home') {
@@ -13195,6 +13287,20 @@ window.__ModuleLoader__.load({
       const { waves, status: waveStatus } = useWaveforms(audioClips);
       const tempo = (project && project.tempo) || { bpm: 120, offset: 0 };
 
+      // The note editor's judgement line is its own scroll position. Pressing
+      // play while editing first seeks there, so playback starts at the line
+      // instead of the stale clock; everywhere else it starts at the playhead.
+      const noteEditorAnchorRef = useRef(null);
+      const onNoteAnchorChange = useCallback((value) => {
+        noteEditorAnchorRef.current = Number.isFinite(value) ? value : null;
+      }, []);
+      const playFromEditor = useCallback(() => {
+        if (noteEditor && !preview && noteEditorAnchorRef.current !== null) {
+          transport.seek(noteEditorAnchorRef.current);
+        }
+        transport.play();
+      }, [noteEditor, preview, transport]);
+
       // Playback preview: pure autoplay rendering, no chart signals.
       const hasPlayableContent = useMemo(() => {
         for (const staff of (project && project.staffs) || []) {
@@ -13213,9 +13319,9 @@ window.__ModuleLoader__.load({
         if (!project || curveTargetRef.current) return;
         const total = Math.max(1, transport.duration || project.duration || 0);
         if (transport.time >= total - 0.05) transport.seek(0);
-        transport.play();
+        playFromEditor();
         setPreview(true);
-      }, [project, transport]);
+      }, [project, transport, playFromEditor]);
       const closePreview = useCallback(() => {
         transport.pause();
         setPreview(false);
@@ -13254,32 +13360,10 @@ window.__ModuleLoader__.load({
             transport.pause();
             setPreview(false);
           }
-          // If the playhead is outside the lane's lifetime, jump to the
-          // nearest lane window so the notes being edited are actually in
-          // view (the timeline's own playhead is untouched while it is inside
-          // a window, which keeps the fixture/editor flow predictable).
-          const laneModel = buildLaneEditorModel(project, targetValue.staffId, targetValue.lane);
-          if (laneModel && laneModel.windows.length > 0) {
-            const playhead = transport.time;
-            const inside = laneModel.windows.some((laneWindow) => playhead >= laneWindow.start - 1e-6 && playhead < laneWindow.end + 1e-6);
-            if (!inside) {
-              let nearest = null;
-              let nearestDistance = Infinity;
-              for (const laneWindow of laneModel.windows) {
-                const distance = playhead < laneWindow.start ? laneWindow.start - playhead : playhead > laneWindow.end ? playhead - laneWindow.end : 0;
-                if (distance < nearestDistance) {
-                  nearestDistance = distance;
-                  nearest = laneWindow;
-                }
-              }
-              if (nearest) {
-                transport.seek(Math.max(0, nearest.start));
-                if (canvasApiRef.current && typeof canvasApiRef.current.reveal === 'function') {
-                  canvasApiRef.current.reveal(Math.max(0, nearest.start));
-                }
-              }
-            }
-          }
+          // Opening the editor must never move the transport. The judgement
+          // line starts at the current playhead; scrolling moves only the line,
+          // and play starts from it (see playFromEditor).
+          noteEditorAnchorRef.current = Math.max(0, transport.time);
           setNoteEditor({ staffId: targetValue.staffId, lane: targetValue.lane });
           setNoteTool('select');
           setSelection([]);
@@ -13792,6 +13876,7 @@ window.__ModuleLoader__.load({
         handleEditorKey(event, {
           preview,
           closePreview,
+          playFromEditor,
           transport,
           session,
           selection,
@@ -13980,6 +14065,7 @@ window.__ModuleLoader__.load({
                   pps: notePps,
                   setPps: setNotePps,
                   onEdit: session.edit,
+                  onAnchorChange: onNoteAnchorChange,
                   onClose: closeNoteEditor,
                 })
               : null,
@@ -14037,7 +14123,7 @@ window.__ModuleLoader__.load({
             : h('aside', { className: 'dgc-inspector' }, h('div', { className: 'dgc-hint' }, t('noSelectionHint'))),
         ),
         // Transport.
-        h(TransportBar, { t, transport, project, follow, setFollow, selection }),
+        h(TransportBar, { t, transport, project, follow, setFollow, selection, onPlay: playFromEditor }),
 
         // No-project overlay.
         !project && phase === 'empty'

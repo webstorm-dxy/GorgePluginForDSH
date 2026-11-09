@@ -373,11 +373,19 @@ function installGlobals() {
         this.error = null;
         this.preload = 'auto';
         this.src = '';
+        this.paused = true;
+        this.readyState = 0;
+        // Exposed so a test can simulate a media element that has not applied
+        // a seek yet (currentTime pinned to 0).
+        (globalThis.__testAudios || (globalThis.__testAudios = [])).push(this);
       }
       play() {
+        this.paused = false;
         return Promise.resolve();
       }
-      pause() {}
+      pause() {
+        this.paused = true;
+      }
       addEventListener() {}
       removeEventListener() {}
       removeAttribute() {}
@@ -889,6 +897,16 @@ const PROJECT = {
               category: 'note',
             },
           ],
+        },
+        {
+          // Empty tail period: its declared minLength is what keeps the
+          // fixture's 40 s transport length after a local edit (the same way
+          // a real .g period does).
+          id: 'p2',
+          method: 'Period2',
+          timeOffset: 31.5,
+          minLength: 8.5,
+          elements: [],
         },
       ],
     },
@@ -2648,6 +2666,13 @@ if (!isRealMode) {
   assert.equal(patch.path[0], 'hitTime', 'drag must patch hitTime for a tap, got ' + JSON.stringify(patch.path));
   assert.ok(Math.abs(patch.value - 3) < 0.2, 'drag +1s should move hitTime from 2 to ~3, got ' + patch.value);
   assert.ok(Number.isFinite(dragBatch.baseRev), 'edit batch carries no baseRev');
+  // A local op re-derives the project length locally; the period's declared
+  // minLength is part of that length (the Host model does the same), so the
+  // transport must keep its 40 s instead of shrinking to the last element.
+  assert.ok(
+    flattenText(tree, []).join(' ').indexOf('/ 0:40.000') !== -1,
+    'a local edit shrank the transport duration: ' + flattenText(tree, []).join(' ').slice(0, 240),
+  );
 
   // Undo through the header button (label "undo"): it must POST a real inverse.
   const undoButton = findHost(tree, (host) => {
@@ -2703,6 +2728,57 @@ if (!isRealMode) {
   assert.equal(addOp.element.fields.laneName, 'Main1', 'placed note must join the row lane');
   assert.ok(Math.abs(addOp.element.fields.hitTime - 5) < 0.2, 'placed note hitTime should be ~5, got ' + addOp.element.fields.hitTime);
   assert.ok(addOp.periodId, 'add op carries no periodId');
+
+  // -------------------------------------------------------------------------
+  // A media element that has not applied a seek yet (currentTime stuck at 0)
+  // must not yank the transport back to the start when playback begins.
+  // -------------------------------------------------------------------------
+  {
+    const scrubber = findHost(tree, (host) => host.tagName === 'INPUT' && host.props && host.props['aria-label'] === 'time');
+    assert.ok(scrubber, 'transport scrubber not found');
+    scrubber.props.onChange({ target: { value: 200 } }); // 8 s, inside the 12 s clip
+    tree = await settle();
+    const audios = globalThis.__testAudios || [];
+    const audio = audios[audios.length - 1];
+    assert.ok(audio, 'the transport created no media element');
+    audio.paused = false;
+    audio.readyState = 4;
+    Object.defineProperty(audio, 'currentTime', { configurable: true, get: () => 0, set: () => undefined });
+    const playButton = findHost(
+      tree,
+      (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'play',
+    );
+    assert.ok(playButton, 'transport play button not found');
+    playButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: playButton });
+    tree = await settle();
+    flushAnimationFrames(2);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    flushAnimationFrames(2);
+    tree = await settle();
+    const driftText = flattenText(tree, []).join(' ');
+    assert.ok(
+      driftText.indexOf('0:08.') !== -1,
+      'a stuck media clock dragged the playhead back to the start: ' + driftText.slice(0, 220),
+    );
+    const pauseButton = findHost(
+      tree,
+      (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'pause',
+    );
+    assert.ok(pauseButton, 'transport pause button not found');
+    pauseButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: pauseButton });
+    tree = await settle();
+    // Restore the fake media element and the transport for the next blocks.
+    delete audio.currentTime;
+    audio.currentTime = 0;
+    audio.paused = true;
+    const rewind = findHost(
+      tree,
+      (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'jumpToStart',
+    );
+    assert.ok(rewind, 'transport rewind button not found');
+    rewind.props.onClick({ preventDefault() {}, stopPropagation() {}, target: rewind });
+    tree = await settle();
+  }
 
   // -------------------------------------------------------------------------
   // Judgement-line note editor: open from the lane strip, place notes with
@@ -2948,6 +3024,92 @@ if (!isRealMode) {
     );
     if (selectAgain) {
       selectAgain.props.onClick({ preventDefault() {}, stopPropagation() {}, target: selectAgain });
+      tree = await settle();
+    }
+
+    // The editor owns a scrollable judgement line. Opening it must not move the
+    // transport, the wheel must scroll that line without seeking, and pressing
+    // play must start the transport at the line (not at the stale clock).
+    {
+      const scrubber = findHost(tree, (host) => host.tagName === 'INPUT' && host.props && host.props['aria-label'] === 'time');
+      assert.ok(scrubber, 'transport scrubber not found');
+      scrubber.props.onChange({ target: { value: 625 } }); // 25 s of the 40 s fixture
+      tree = await settle();
+      assert.ok(flattenText(tree, []).join(' ').indexOf('0:25.000') !== -1, 'transport seek to 25 s failed');
+      pointer(timelineCanvas(), 'DoubleClick', 700, 112);
+      tree = await settle();
+      assert.ok(noteCanvas(), 'note editor did not open at 25 s');
+      const clockText = () => flattenText(tree, []).join(' ');
+      assert.ok(clockText().indexOf('0:25.000') !== -1, 'opening the note editor moved the transport');
+      const wheelEvent = (deltaY) => ({
+        deltaY,
+        clientX: 400,
+        clientY: 200,
+        ctrlKey: false,
+        metaKey: false,
+        altKey: false,
+        preventDefault() {},
+        stopPropagation() {},
+      });
+      // Wheel up scrolls the line to a later time (the axis points up) but the
+      // transport stays parked at 25 s.
+      noteCanvas().props.onWheel(wheelEvent(-240));
+      tree = await settle();
+      assert.ok(clockText().indexOf('0:25.000') !== -1, 'scrolling the note editor moved the transport');
+      assert.ok(
+        noteCanvas().getContext('2d').drawn.some((item) => String(item.text).indexOf('0:26.500') !== -1),
+        'the judgement line label did not follow the scroll (expected 0:26.500)',
+      );
+      // Wheel down is symmetric (back to 25 s); then scroll up to 28 s.
+      noteCanvas().props.onWheel(wheelEvent(240));
+      tree = await settle();
+      assert.ok(clockText().indexOf('0:25.000') !== -1, 'wheeling down moved the transport');
+      noteCanvas().props.onWheel(wheelEvent(-480));
+      tree = await settle();
+      assert.ok(clockText().indexOf('0:25.000') !== -1, 'scrolling again moved the transport');
+      // Pressing play seeks to the judgement line (28 s) before starting.
+      const playButton = findHost(
+        tree,
+        (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'play',
+      );
+      assert.ok(playButton, 'transport play button not found');
+      playButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: playButton });
+      tree = await settle();
+      assert.ok(
+        clockText().indexOf('0:28.000') !== -1,
+        'play did not start from the note editor judgement line: ' + clockText().slice(0, 240),
+      );
+      assert.ok(
+        flattenText(tree, []).join(' ').indexOf('0:25.000') === -1,
+        'the transport clock still shows the old position after play',
+      );
+      // Pause again so the spectrum scrub below starts from a parked transport.
+      const pauseButton = findHost(
+        tree,
+        (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'pause',
+      );
+      assert.ok(pauseButton, 'transport pause button not found after play');
+      pauseButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: pauseButton });
+      tree = await settle();
+      // The spectrum strip still scrubs the transport explicitly.
+      pointer(noteCanvas(), 'PointerDown', 20, 210);
+      pointer(noteCanvas(), 'PointerUp', 20, 210);
+      tree = await settle();
+      assert.ok(clockText().indexOf('0:28.000') === -1, 'scrubbing the note editor spectrum no longer seeks the transport');
+      const rewindAgain = findHost(
+        tree,
+        (host) => host.props && typeof host.props.onClick === 'function' && host.props.title === 'jumpToStart',
+      );
+      assert.ok(rewindAgain, 'transport rewind button not found');
+      rewindAgain.props.onClick({ preventDefault() {}, stopPropagation() {}, target: rewindAgain });
+      tree = await settle();
+      assert.ok(clockText().indexOf('0:00.000') !== -1, 'rewind after the note-editor scrub failed');
+      const leaveButton = findHost(
+        tree,
+        (host) => host.props && typeof host.props.onClick === 'function' && flattenText(host.rendered, []).join('').trim() === 'noteEditorBack',
+      );
+      assert.ok(leaveButton, 'note editor has no back button');
+      leaveButton.props.onClick({ preventDefault() {}, stopPropagation() {}, target: leaveButton });
       tree = await settle();
     }
   }
